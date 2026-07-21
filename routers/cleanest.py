@@ -75,7 +75,7 @@ async def obtener_pedidos():
     cursor = conn.cursor(dictionary=True)
 
     try:
-        cursor.execute("SELECT * FROM cleanestChoice")
+        cursor.execute("SELECT * FROM cleanestChoice ORDER BY id DESC")
         return cursor.fetchall()
     
     except mysql.connector.Error as err:
