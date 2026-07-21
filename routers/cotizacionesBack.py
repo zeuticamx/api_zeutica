@@ -158,11 +158,12 @@ async def consulta_cotizacion():
                     c.relacion_factura,
                     c.metodo_pago,
                     c.fecha_pago,
-                    c.empresa, 
-                    c.fecha, 
-                    c.subtotal, 
+                    c.empresa,
+                    c.fecha,
+                    c.subtotal,
                     c.total,
                     c.firma_envio,
+                    c.vendido,
                     i.nombre_producto
                 FROM cotizaciones c                  
                 JOIN cotizacion_items i ON c.id = i.cotizacion_id 
@@ -190,6 +191,7 @@ async def consulta_cotizacion():
                         "metodo_pago": fila["metodo_pago"],
                         "fecha_pago": str(fila["fecha_pago"]) if isinstance(fila["fecha_pago"], (datetime.date, datetime.datetime)) else fila["fecha_pago"],
                         "firma_envio": fila["firma_envio"],
+                        "vendido": fila["vendido"],
                         "empresa": fila["empresa"],
                         "fecha": str(fila["fecha"]) if isinstance(fila["fecha"], (datetime.date, datetime.datetime)) else fila["fecha"],
                         "subtotal": str(fila["subtotal"]) if isinstance(fila["subtotal"], Decimal) else fila["subtotal"],
