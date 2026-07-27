@@ -1,7 +1,7 @@
 import mysql.connector
 from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException
-import os, sys
+import os
 from dotenv import load_dotenv
 import mov_reg
 

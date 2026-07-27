@@ -7,6 +7,7 @@ import datetime
 import os, mov_reg
 from dotenv import load_dotenv
 from typing import Optional
+from cotizacion_service import generar_nuevo_codigo, guardar_cotizacion_db
 
 router =APIRouter(tags=["/cotizaciones"],responses={404: {"Mensaje":"No encontrado"}})
 load_dotenv() # Cargar credenciales .env
@@ -49,6 +50,7 @@ class CotizacionSchema(BaseModel):
 
 # Creamos el "molde" para los datos que enviará el frontend
 class VinculoFactura(BaseModel):
+    id: int
     codigo_cotizacion: str  
     relacion_factura: Optional[str] = None
     metodo_pago: Optional[str] = None
@@ -62,26 +64,40 @@ async def obtener_nuevo_codigo():
     """
     connection = get_db_connection()
     try:
-        with connection.cursor(dictionary=True) as cursor:
-            cursor.execute("SELECT codigo_cotizacion FROM cotizaciones ORDER BY id DESC LIMIT 1")
-            ultimo = cursor.fetchone()
-            
-            prefijo = "ZTC-"
-            # Si no hay registros previos, empezamos en ZTC-001
-            if not ultimo:
-                return {"nuevo_codigo": f"{prefijo}001"}
-            
-            # Extraer el número de "ZTC-239" -> 239 y sumar 1
-            ultimo_codigo = ultimo['codigo_cotizacion']
-            numero_actual = int(ultimo_codigo.replace(prefijo, ""))
-            nuevo_numero = numero_actual + 1
-            
-            # Formateamos con ceros a la izquierda (ej: ZTC-240)
-            nuevo_codigo = f"{prefijo}{nuevo_numero:03d}"
-            return {"nuevo_codigo": nuevo_codigo}
+        # La lógica del consecutivo vive en el servicio de raíz para
+        # reutilizarla también en /genera-cotizacion.
+        nuevo_codigo = generar_nuevo_codigo(connection)
+        return {"nuevo_codigo": nuevo_codigo}
     except mysql.connector.Error as err:
         print(f"Error BD en nuevo-codigo: {err}")
         raise HTTPException(status_code=500, detail=f"Error BD: {str(err)}")
+    finally:
+        connection.close()
+
+from fastapi import APIRouter, HTTPException
+
+@router.get("/complemento-pago/{codigo_cotizacion}")
+async def obtener_complemento_pago(codigo_cotizacion: str):
+    """
+    Obtiene el complemento de pago para una cotización específica.
+    """
+    connection = get_db_connection()
+    try:
+        with connection.cursor(dictionary=True) as cursor:
+            cursor.execute("SELECT * FROM complemento_pago WHERE id_cot = %s", (codigo_cotizacion,))
+            # Una cotización puede tener varios complementos: siempre devolvemos lista
+            # (vacía si no hay), para que el front no tenga que tratar el 404 como caso normal.
+            return cursor.fetchall()
+
+    # 1. Atrapamos explícitamente las HTTPExceptions y las re-lanzamos sin modificar
+    except HTTPException:
+        raise
+
+    # 2. Atrapamos cualquier otro error inesperado (fallos en la BD, etc.) como 500
+    except Exception as e:
+        print(f"Error al obtener complemento de pago: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    
     finally:
         connection.close()
 
@@ -92,43 +108,14 @@ async def guardar_cotizacion(cot: CotizacionSchema):
     """
     connection = get_db_connection()
     try:
-        with connection.cursor() as cursor:
-            # Insertar en la tabla principal (Maestro)
-            sql_maestro = """
-                INSERT INTO cotizaciones 
-                (codigo_cotizacion, empresa, atencion, email, domicilio, telefono, subtotal, iva, total, costo_envio, forma_pago, comentarios, usuario, pdf) 
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            """
-            # Convierto valores monetarios a float para evitar problemas de tipo
-            valores_maestro = (
-                cot.codigo_cotizacion, cot.empresa, cot.atencion, cot.email, 
-                cot.domicilio, cot.telefono, float(cot.subtotal), float(cot.iva), 
-                float(cot.total), float(cot.costo_envio), cot.forma_pago, cot.comentarios, cot.usuario, cot.pdf
-            )
-            cursor.execute(sql_maestro, valores_maestro)
-            
-            # Obtenemos el ID generado para vincular los productos
-            cotizacion_id = cursor.lastrowid
-            
-            # Insertar los productos
-            sql_detalle = """
-                INSERT INTO cotizacion_items 
-                (cotizacion_id, sku, nombre_producto, cantidad, precio_unitario, total_linea) 
-                VALUES (%s, %s, %s, %s, %s, %s)
-            """
-            # Preparamos una lista de tuplas para insertar todo de golpe (eficiencia)
-            items_data = [
-                (cotizacion_id, i.sku, i.nombre_producto, i.cantidad, float(i.precio_unitario), float(i.total_linea))
-                for i in cot.items
-            ]
-            cursor.executemany(sql_detalle, items_data)
-            
-            connection.commit()
+        # El INSERT vive en el servicio de raíz para reutilizarlo también
+        # en /genera-cotizacion.
+        cotizacion_id = guardar_cotizacion_db(connection, cot)
 
-            mov_reg.registrar_movimiento(cot.usuario, f"Registró una nueva cotización: {cot.codigo_cotizacion}", "Cotizaciones")
+        mov_reg.registrar_movimiento(cot.usuario, f"Registró una nueva cotización: {cot.codigo_cotizacion}", "Cotizaciones")
 
-            return {"status": "success", "id": cotizacion_id}
-            
+        return {"status": "success", "id": cotizacion_id}
+
     except mysql.connector.Error as err:
         connection.rollback()
         print(f"Error BD al guardar cotización: {err}")
@@ -228,7 +215,7 @@ async def vincular_factura(vinculos: List[VinculoFactura]):
             for v in vinculos:
                 # Actualizamos el registro.                 
                 sql = "UPDATE cotizaciones SET relacion_factura = %s, metodo_pago = %s, fecha_pago = %s WHERE codigo_cotizacion = %s"
-                cursor.execute(sql, (v.relacion_factura, v.metodo_pago, v.fecha_pago, v.codigo_cotizacion))
+                cursor.execute(sql, (v.relacion_factura, v.metodo_pago, v.fecha_pago, v.codigo_cotizacion))            
             
             # Guardamos los cambios
             connection.commit()
@@ -240,6 +227,37 @@ async def vincular_factura(vinculos: List[VinculoFactura]):
     except Exception as e:
         connection.rollback()
         print(f"Error al vincular factura: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        connection.close()
+
+class vinculoPago(BaseModel):
+    codigo_cotizacion: str
+    complemento: str
+    pago: float
+    usuario: Optional[str] = None
+
+@router.post("/complemento-pago")   
+async def registrar_complemento_pago(vinculo: vinculoPago):
+    """
+    Registra un complemento de pago para una cotización específica.
+    """
+    connection = get_db_connection()
+    try:
+        with connection.cursor() as cursor:
+            # Inyectamos el complemento de pago en la cotización
+            sql_pago = "INSERT INTO complemento_pago (id_cot, complemento, pago) VALUES (%s, %s, %s)"
+            cursor.execute(sql_pago, (vinculo.codigo_cotizacion, vinculo.complemento, vinculo.pago))
+
+            connection.commit()
+
+            mov_reg.registrar_movimiento(vinculo.usuario or "", f"Registró complemento de pago para cotización con ID {vinculo.codigo_cotizacion}", "Cotizaciones")
+            
+        return {"status": "success", "mensaje": "Complemento de pago registrado"}
+        
+    except Exception as e:
+        connection.rollback()
+        print(f"Error al registrar complemento de pago: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         connection.close()
@@ -314,7 +332,7 @@ class vendido(BaseModel):
     codigo_cotizacion: str
 
 @router.post("/cotizaciones/vendido")
-async def guardar_cotizacion(vendido: vendido):
+async def marcar_vendido(vendido: vendido):
     """
     Marca como vendida una cotizacion para que ya no este disponible en seccion de ventas.
     """

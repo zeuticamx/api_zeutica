@@ -3,7 +3,7 @@ import bcrypt
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from routers import cotizacionesBack, productos, ventas, clientes, traspaso, gastos, compras, cleanest, cuentas_pendientes,\
-      abonos, estadisticas, inventario, empleados, notificaciones, cuentas_pagar, consulta_registros, pendientes, proveedores
+      abonos, estadisticas, inventario, empleados, notificaciones, cuentas_pagar, consulta_registros, pendientes, proveedores, genera_cotizacion
 import mysql.connector
 from fastapi.middleware.cors import CORSMiddleware
 import os, secrets
@@ -59,6 +59,7 @@ app.include_router(cuentas_pagar.router, dependencies=[Depends(obtener_usuario_a
 app.include_router(consulta_registros.router, dependencies=[Depends(obtener_usuario_actual)])
 app.include_router(pendientes.router, dependencies=[Depends(obtener_usuario_actual)])
 app.include_router(proveedores.router, dependencies=[Depends(obtener_usuario_actual)])
+app.include_router(genera_cotizacion.router, dependencies=[Depends(obtener_usuario_actual)])
 
 app.add_middleware(
     CORSMiddleware,
