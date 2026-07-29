@@ -74,7 +74,6 @@ async def obtener_nuevo_codigo():
     finally:
         connection.close()
 
-from fastapi import APIRouter, HTTPException
 
 @router.get("/complemento-pago/{codigo_cotizacion}")
 async def obtener_complemento_pago(codigo_cotizacion: str):
@@ -144,6 +143,7 @@ async def consulta_cotizacion():
                     c.codigo_cotizacion, 
                     c.relacion_factura,
                     c.metodo_pago,
+                    c.forma_pago,
                     c.fecha_pago,
                     c.empresa,
                     c.fecha,
@@ -176,6 +176,7 @@ async def consulta_cotizacion():
                         "codigo_cotizacion": fila["codigo_cotizacion"],
                         "relacion_factura": fila["relacion_factura"],
                         "metodo_pago": fila["metodo_pago"],
+                        "forma_pago": fila["forma_pago"],
                         "fecha_pago": str(fila["fecha_pago"]) if isinstance(fila["fecha_pago"], (datetime.date, datetime.datetime)) else fila["fecha_pago"],
                         "firma_envio": fila["firma_envio"],
                         "vendido": fila["vendido"],
