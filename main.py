@@ -1,18 +1,55 @@
 # fichero para backend
-import bcrypt
+import bcrypt, asyncpg
+from contextlib import asynccontextmanager  # <-- Añadido para el lifespan
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from routers import cotizacionesBack, productos, ventas, clientes, traspaso, gastos, compras, cleanest, cuentas_pendientes,\
-      abonos, estadisticas, inventario, empleados, notificaciones, cuentas_pagar, consulta_registros, pendientes, proveedores, genera_cotizacion
+      abonos, estadisticas, inventario, empleados, notificaciones, cuentas_pagar, consulta_registros, pendientes, proveedores, genera_cotizacion, sofi_conversaciones
 import mysql.connector
 from fastapi.middleware.cors import CORSMiddleware
 import os, secrets
 from dotenv import load_dotenv
 from pydantic import BaseModel
 
+load_dotenv()
+
+# ---  CREDENCIALES POSTGRESQL (NUEVO) ---
+PG_USER = os.getenv("PG_USER")
+PG_PASSWORD = os.getenv("PG_PASSWORD")
+PG_HOST = os.getenv("PG_HOST")
+PG_PORT = os.getenv("PG_PORT")
+PG_NAME = os.getenv("PG_NAME")
+
+# --- CICLO DE VIDA PARA INICIAR POSTGRESQL ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Intentar conectar al pool de PostgreSQL al arrancar
+    try:
+        if PG_USER and PG_PASSWORD: # Pequeña validación
+            DATABASE_URL = f"postgresql://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{PG_NAME}"
+            app.state.db_pool = await asyncpg.create_pool(
+                dsn=DATABASE_URL,
+                min_size=1,   # un solo modulo, no necesito muchos
+                max_size=5,
+                timeout=10.0
+            )
+            print("✅ Pool de conexiones a PostgreSQL (Sofia) creado.")
+        else:
+            print("⚠️ Faltan credenciales de PostgreSQL en el .env")
+            app.state.db_pool = None
+    except Exception as e:
+        print(f"❌ Error al conectar con PostgreSQL: {e}")
+        app.state.db_pool = None
+
+    yield  # Aquí corre la aplicación normal
+
+    # Apagar el pool al cerrar la API
+    if getattr(app.state, "db_pool", None):
+        await app.state.db_pool.close()
+        print("🔒 Pool de PostgreSQL cerrado.")
+
 # ---  CONFIGURACIÓN DE SEGURIDAD Y ESTADO ---
 security = HTTPBearer()
-
 
 # ---  DEPENDENCIA PARA VALIDAR EL TOKEN EN LAS RUTAS ---
 def obtener_usuario_actual(credentials: HTTPAuthorizationCredentials = Depends(security)):
@@ -38,7 +75,7 @@ def obtener_usuario_actual(credentials: HTTPAuthorizationCredentials = Depends(s
         conn.close()
 
 # Corregido: FastAPI usa root_path, no prefix. 
-app = FastAPI(root_path="/zeutica", tags=["login"], responses={404: {"Mensaje":"No encontrado"}})
+app = FastAPI(root_path="/zeutica", tags=["login"], responses={404: {"Mensaje":"No encontrado"}}, lifespan=lifespan)
 
 # Paginas
 app.include_router(productos.router, dependencies=[Depends(obtener_usuario_actual)])
@@ -60,6 +97,7 @@ app.include_router(consulta_registros.router, dependencies=[Depends(obtener_usua
 app.include_router(pendientes.router, dependencies=[Depends(obtener_usuario_actual)])
 app.include_router(proveedores.router, dependencies=[Depends(obtener_usuario_actual)])
 app.include_router(genera_cotizacion.router, dependencies=[Depends(obtener_usuario_actual)])
+app.include_router(sofi_conversaciones.router, dependencies=[Depends(obtener_usuario_actual)])  # <-- Añadido para la ruta de conversaciones
 
 app.add_middleware(
     CORSMiddleware,
@@ -67,7 +105,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-load_dotenv()
+
 
 # Configuración de la conexión
 def get_db_connection():
@@ -105,7 +143,7 @@ async def test_server():
 @app.post("/login")
 async def login(datos: LoginSchema):
     """
-    Consulta credenciales para ingreso a sistema
+    Consulta credenciales para ingreso a sistema.
     """
     usuario = datos.usuario
     password_ingresado = datos.password
