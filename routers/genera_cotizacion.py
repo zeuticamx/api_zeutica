@@ -44,6 +44,7 @@ class CotizacionSchema(BaseModel):
     total: float
     costo_envio: float  # Cambié de int a float para aceptar decimales
     forma_pago: str
+    metodo_pago: Optional[str] = None  # ej. "PUE - PAGO EN UNA SOLA EXHIBICIÓN"
     comentarios: Optional[str] = None
     usuario: str
     pdf: Optional[str] = None

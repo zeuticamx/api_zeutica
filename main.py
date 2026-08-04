@@ -99,7 +99,7 @@ app.include_router(proveedores.router, dependencies=[Depends(obtener_usuario_act
 app.include_router(genera_cotizacion.router, dependencies=[Depends(obtener_usuario_actual)])
 app.include_router(sofi_conversaciones.router, dependencies=[Depends(obtener_usuario_actual)])  # <-- Añadido para la ruta de conversaciones
 
-app.add_middleware(
+app.add_middleware( 
     CORSMiddleware,
     allow_origins=["*"],    
     allow_methods=["*"],
