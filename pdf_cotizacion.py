@@ -172,6 +172,10 @@ def generar_pdf_cotizacion(cot) -> bytes:
         ("TELÉFONO:", cot.telefono),
     ]
     for etiqueta, valor in campos:
+        # fpdf 1.7.2 deja la X en el margen izquierdo al terminar multi_cell,
+        # pero fpdf2 la deja al final de la celda; fijamos la X en cada fila
+        # para que el bloque salga igual con cualquiera de las dos versiones.
+        pdf.set_x(pdf.l_margin)
         pdf.set_font("Arial", "B", 9)
         pdf.cell(30, 6, etiqueta, 0, 0, "L")
         pdf.set_font("Arial", "", 9)
@@ -246,6 +250,7 @@ def generar_pdf_cotizacion(cot) -> bytes:
         f"5. COMENTARIOS: {_txt(cot.comentarios).upper()}",
     ]
     for t in terminos:
+        pdf.set_x(pdf.l_margin)
         pdf.multi_cell(ancho, 6, t, 0, "L")
 
     pdf.ln(6)

@@ -1,7 +1,7 @@
 import mysql.connector
 from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException
-from typing import Optional
+from typing import Optional, List
 import os, mov_reg
 from dotenv import load_dotenv
 
@@ -50,7 +50,7 @@ async def obtener_clientes():
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True) 
 
-    query = "SELECT * FROM clientes ORDER BY nombre ASC"  # Ordenamos por nombre de cliente
+    query = "SELECT * FROM clientes ORDER BY id DESC"  # Ordenamos por nombre de cliente
 
     try:
         cursor.execute(query)
@@ -77,7 +77,7 @@ async def obtener_clientes_potenciales():
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True) 
 
-    query = "SELECT * FROM clientes_potenciales ORDER BY nombre_comprador ASC LIMIT 1000"  # Ordenamos por nombre de cliente
+    query = "SELECT * FROM clientes_potenciales ORDER BY id DESC LIMIT 1000"  # Ordenamos por nombre de cliente
 
     try:
         cursor.execute(query)
@@ -95,6 +95,89 @@ async def obtener_clientes_potenciales():
     finally:
         cursor.close()
         conn.close() 
+
+class ClientePotencial(BaseModel):
+    id: int
+    revisado: bool
+    correo_encontrado: Optional[str] = None
+
+class NotaCliente(BaseModel):
+    id: int
+    notas: str
+
+# IMPORTANTE: esta ruta debe declararse ANTES de "/clientes-potenciales/{id}".
+# FastAPI resuelve por orden de registro; si {id} va primero intenta parsear
+# "notas-lote" como int y responde 422 en lugar de llegar aquí.
+@router.patch("/clientes-potenciales/notas-lote")
+async def actualizar_notas_por_lista(lista_clientes: List[NotaCliente]):
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    query = """
+        UPDATE clientes_potenciales
+        SET notas = %s
+        WHERE id = %s
+    """
+
+    # Preparamos una lista de tuplas: [("Nota A", 1), ("Nota B", 2), ...]
+    valores = [(c.notas, c.id) for c in lista_clientes]
+
+    try:
+        # executemany ejecuta el UPDATE en bloque para todos los elementos de la lista
+        cursor.executemany(query, valores)
+        conn.commit()
+
+        return {
+            "mensaje": "Notas actualizadas con éxito",
+            "total_actualizados": cursor.rowcount
+        }
+
+    except mysql.connector.Error as err:
+        conn.rollback()
+        print(f"Error al actualizar notas en lote: {err}")
+        raise HTTPException(status_code=500, detail=f"Error en DB: {err}")
+
+    finally:
+        cursor.close()
+        conn.close()
+
+@router.patch("/clientes-potenciales/{id}") # Endpoint para actualizar un cliente potencial existente
+async def actualizar_cliente_potencial(id: int, cliente: ClientePotencial):
+    """
+    Actualiza un cliente potencial en la base de datos.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+
+    # correo_encontrado es opcional: si no viene en el body no se toca la columna,
+    # así el panel puede actualizar solo el check de revisado sin borrar el correo.
+    if cliente.correo_encontrado is None:
+        query = "UPDATE clientes_potenciales SET revisado = %s WHERE id = %s"
+        valores = (cliente.revisado, id)
+    else:
+        query = "UPDATE clientes_potenciales SET revisado = %s, correo_encontrado = %s WHERE id = %s"
+        valores = (cliente.revisado, cliente.correo_encontrado, id)
+
+    try:
+        cursor.execute(query, valores)
+        conn.commit()  # Guardamos los cambios en la base de datos
+
+        # rowcount == 0 también ocurre cuando los valores enviados son idénticos a
+        # los ya guardados, así que no se puede tratar como "no encontrado".
+        return {
+            "mensaje": "Cliente potencial actualizado con éxito",
+            "id": id,
+            "revisado": cliente.revisado,
+            "correo_encontrado": cliente.correo_encontrado,
+        }
+    
+    except mysql.connector.Error as err:
+        conn.rollback()  # Cancelamos la operación si falla
+        raise HTTPException(status_code=500, detail=f"Error en DB: {err}")
+    
+    finally:
+        cursor.close()
+        conn.close()
 
 
 @router.post("/clientenuevo/{usuario}") # Enpoint para agregar cliente a la base de datos
