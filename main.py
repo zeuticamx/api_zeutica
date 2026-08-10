@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager  # <-- Añadido para el lifespan
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from routers import cotizacionesBack, productos, ventas, clientes, traspaso, gastos, compras, cleanest, cuentas_pendientes,\
-      abonos, estadisticas, inventario, empleados, notificaciones, cuentas_pagar, consulta_registros, pendientes, proveedores, genera_cotizacion, sofi_conversaciones
+      abonos, estadisticas, inventario, empleados, notificaciones, cuentas_pagar, consulta_registros, pendientes, proveedores, genera_cotizacion, sofi_conversaciones, embarques
 import mysql.connector
 from fastapi.middleware.cors import CORSMiddleware
 import os, secrets
@@ -40,6 +40,9 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"❌ Error al conectar con PostgreSQL: {e}")
         app.state.db_pool = None
+
+    # Crea tablas del modulo de embarques si no existen (MySQL, sin FK)
+    embarques.crear_tablas_embarques()
 
     yield  # Aquí corre la aplicación normal
 
@@ -98,6 +101,7 @@ app.include_router(pendientes.router, dependencies=[Depends(obtener_usuario_actu
 app.include_router(proveedores.router, dependencies=[Depends(obtener_usuario_actual)])
 app.include_router(genera_cotizacion.router, dependencies=[Depends(obtener_usuario_actual)])
 app.include_router(sofi_conversaciones.router, dependencies=[Depends(obtener_usuario_actual)])  # <-- Añadido para la ruta de conversaciones
+app.include_router(embarques.router, dependencies=[Depends(obtener_usuario_actual)])
 
 app.add_middleware( 
     CORSMiddleware,

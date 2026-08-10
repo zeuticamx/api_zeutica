@@ -77,7 +77,7 @@ async def obtener_clientes_potenciales():
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True) 
 
-    query = "SELECT * FROM clientes_potenciales ORDER BY id DESC LIMIT 1000"  # Ordenamos por nombre de cliente
+    query = "SELECT * FROM clientes_potenciales WHERE descartado = 0 ORDER BY id DESC LIMIT 1000"  # Ordenamos por nombre de cliente
 
     try:
         cursor.execute(query)
@@ -99,6 +99,7 @@ async def obtener_clientes_potenciales():
 class ClientePotencial(BaseModel):
     id: int
     revisado: bool
+    descartado: bool = False
     correo_encontrado: Optional[str] = None
 
 class NotaCliente(BaseModel):
@@ -152,11 +153,11 @@ async def actualizar_cliente_potencial(id: int, cliente: ClientePotencial):
     # correo_encontrado es opcional: si no viene en el body no se toca la columna,
     # así el panel puede actualizar solo el check de revisado sin borrar el correo.
     if cliente.correo_encontrado is None:
-        query = "UPDATE clientes_potenciales SET revisado = %s WHERE id = %s"
-        valores = (cliente.revisado, id)
+        query = "UPDATE clientes_potenciales SET revisado = %s, descartado = %s WHERE id = %s"
+        valores = (cliente.revisado, cliente.descartado, id)
     else:
-        query = "UPDATE clientes_potenciales SET revisado = %s, correo_encontrado = %s WHERE id = %s"
-        valores = (cliente.revisado, cliente.correo_encontrado, id)
+        query = "UPDATE clientes_potenciales SET revisado = %s, descartado = %s, correo_encontrado = %s WHERE id = %s"
+        valores = (cliente.revisado, cliente.descartado, cliente.correo_encontrado, id)
 
     try:
         cursor.execute(query, valores)
@@ -168,6 +169,7 @@ async def actualizar_cliente_potencial(id: int, cliente: ClientePotencial):
             "mensaje": "Cliente potencial actualizado con éxito",
             "id": id,
             "revisado": cliente.revisado,
+            "descartado": cliente.descartado,
             "correo_encontrado": cliente.correo_encontrado,
         }
     
