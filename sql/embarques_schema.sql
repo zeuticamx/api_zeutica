@@ -5,9 +5,7 @@
 
 CREATE TABLE IF NOT EXISTS embarques (
     id INT AUTO_INCREMENT PRIMARY KEY,
-    numero_contenedor VARCHAR(100) NULL,
     invoice_orders VARCHAR(255) NOT NULL,
-    proveedor VARCHAR(255) NULL,
     llegada_manzanillo_tentativa DATE NULL,
     fecha_llegada_real DATE NULL,
     fecha_de_recibido DATE NULL,
@@ -15,25 +13,33 @@ CREATE TABLE IF NOT EXISTS embarques (
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
 
+CREATE TABLE IF NOT EXISTS embarque_contenedores (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    embarque_id INT NOT NULL,
+    numero VARCHAR(100) NOT NULL,
+    KEY idx_contenedor_embarque (embarque_id)
+) ENGINE=InnoDB;
+
+CREATE TABLE IF NOT EXISTS embarque_proveedores (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    embarque_id INT NOT NULL,
+    nombre VARCHAR(255) NOT NULL,
+    KEY idx_proveedor_embarque (embarque_id)
+) ENGINE=InnoDB;
+
 CREATE TABLE IF NOT EXISTS embarque_etapas (
     id INT AUTO_INCREMENT PRIMARY KEY,
     embarque_id INT NOT NULL,
     tipo ENUM('ANTICIPO_CHINA', 'LIQUIDADO_CHINA', 'HL_LIQUIDADA') NOT NULL,
     completado BOOLEAN NOT NULL DEFAULT FALSE,
-    fecha_pago DATE NULL,
-    monto_mxn DECIMAL(12,2) NULL,
-    tipo_cambio_referencia DECIMAL(10,4) NULL,
-    fecha_captura TIMESTAMP NULL,
     nota VARCHAR(255) NULL,
     UNIQUE KEY uq_embarque_etapa (embarque_id, tipo),
     KEY idx_etapa_embarque (embarque_id)
 ) ENGINE=InnoDB;
 
--- Migracion in-place para instalaciones ya existentes (columnas viejas
--- fecha_registro / tipo_cambio_usd_mxn -> fecha_pago / monto_mxn / tipo_cambio_referencia):
--- ver _migrar_columnas_embarque_etapas() en routers/embarques.py. No se hace aqui
--- con "ADD COLUMN IF NOT EXISTS" porque requiere MySQL 8.0.29+ y no todos los
--- servidores lo soportan (1064 en versiones viejas).
+-- Migracion in-place: ver _migrar_columnas_embarques() en routers/embarques.py.
+-- Se eliminan columnas de liquidacion (fecha_pago, monto_mxn, tipo_cambio_referencia, etc.).
+-- Funciones de Banxico se mantienen en banxico_service.py para uso futuro.
 
 CREATE TABLE IF NOT EXISTS embarque_estatus (
     id INT AUTO_INCREMENT PRIMARY KEY,

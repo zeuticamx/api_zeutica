@@ -27,17 +27,12 @@ def get_db_connection():
 
 _SCHEMA_PATH = os.path.join(os.path.dirname(__file__), "..", "sql", "embarques_schema.sql")
 
-# Columnas nuevas de embarque_etapas (fecha_pago/monto_mxn/tipo_cambio_referencia/
-# fecha_captura reemplazan a fecha_registro/tipo_cambio_usd_mxn). "ADD COLUMN IF NOT
-# EXISTS" requiere MySQL 8.0.29+ y truena (1064) en servidores viejos, asi que la
-# migracion se hace a mano contra INFORMATION_SCHEMA en vez de en el .sql crudo.
-_COLUMNAS_NUEVAS_EMBARQUE_ETAPAS = [
-    ("fecha_pago", "DATE NULL AFTER completado"),
-    ("monto_mxn", "DECIMAL(12,2) NULL AFTER fecha_pago"),
-    ("tipo_cambio_referencia", "DECIMAL(10,4) NULL AFTER monto_mxn"),
-    ("fecha_captura", "TIMESTAMP NULL AFTER tipo_cambio_referencia"),
+# Columnas que se eliminan de embarque_etapas (fueron para liquidacion con monto/tipo_cambio).
+# Las funciones de Banxico se mantienen para uso futuro en otra implementacion.
+_COLUMNAS_VIEJAS_EMBARQUE_ETAPAS = [
+    "fecha_registro", "tipo_cambio_usd_mxn", "fecha_pago", "monto_mxn",
+    "tipo_cambio_referencia", "fecha_captura"
 ]
-_COLUMNAS_VIEJAS_EMBARQUE_ETAPAS = ["fecha_registro", "tipo_cambio_usd_mxn"]
 
 # fecha real de arribo (distinta de llegada_manzanillo_tentativa, que es la estimada).
 _COLUMNAS_NUEVAS_EMBARQUES = [
@@ -55,16 +50,13 @@ def _columna_existe(cursor, tabla: str, columna: str) -> bool:
 
 
 def _migrar_columnas_embarques(cursor):
-    for columna, definicion in _COLUMNAS_NUEVAS_EMBARQUE_ETAPAS:
-        if not _columna_existe(cursor, "embarque_etapas", columna):
-            cursor.execute(f"ALTER TABLE embarque_etapas ADD COLUMN {columna} {definicion}")
-            print(f"Columna embarque_etapas.{columna} agregada.")
-
+    # Limpiar columnas de liquidacion (ya no se usan).
     for columna in _COLUMNAS_VIEJAS_EMBARQUE_ETAPAS:
         if _columna_existe(cursor, "embarque_etapas", columna):
             cursor.execute(f"ALTER TABLE embarque_etapas DROP COLUMN {columna}")
             print(f"Columna embarque_etapas.{columna} eliminada.")
 
+    # Agregar fecha_llegada_real a embarques.
     for columna, definicion in _COLUMNAS_NUEVAS_EMBARQUES:
         if not _columna_existe(cursor, "embarques", columna):
             cursor.execute(f"ALTER TABLE embarques ADD COLUMN {columna} {definicion}")
@@ -118,9 +110,9 @@ class EmbarqueItemIn(BaseModel):
 
 
 class EmbarqueCabeceraIn(BaseModel):
-    numero_contenedor: Optional[str] = None
+    contenedores: List[str] = []
     invoice_orders: str
-    proveedor: Optional[str] = None
+    proveedores: List[str] = []
     llegada_manzanillo_tentativa: Optional[date] = None
     fecha_llegada_real: Optional[date] = None
     fecha_de_recibido: Optional[date] = None
@@ -133,24 +125,8 @@ class EmbarqueCrear(EmbarqueCabeceraIn):
 
 class EtapaUpdate(BaseModel):
     completado: bool
-    fecha_pago: Optional[date] = None
-    monto_mxn: Optional[float] = None
     nota: Optional[str] = None
     usuario: Optional[str] = "sistema"
-
-    @field_validator('fecha_pago')
-    @classmethod
-    def fecha_no_futura(cls, v):
-        if v and v > date.today():
-            raise ValueError("La fecha de pago no puede ser futura")
-        return v
-
-    @field_validator('monto_mxn')
-    @classmethod
-    def monto_positivo(cls, v):
-        if v is not None and v <= 0:
-            raise ValueError("El monto debe ser mayor a 0")
-        return v
 
 
 class EtapaResponse(BaseModel):
@@ -158,10 +134,6 @@ class EtapaResponse(BaseModel):
     embarque_id: int
     tipo: str
     completado: bool
-    fecha_pago: Optional[date] = None
-    monto_mxn: Optional[float] = None
-    tipo_cambio_referencia: Optional[Decimal] = None
-    fecha_captura: Optional[datetime] = None
     nota: Optional[str] = None
 
     model_config = ConfigDict(from_attributes=True)
@@ -185,14 +157,25 @@ def _obtener_embarque_detalle(embarque_id: int):
             return None
 
         cursor.execute(
+            "SELECT numero FROM embarque_contenedores WHERE embarque_id = %s ORDER BY id",
+            (embarque_id,)
+        )
+        embarque["contenedores"] = [row["numero"] for row in cursor.fetchall()]
+
+        cursor.execute(
+            "SELECT nombre FROM embarque_proveedores WHERE embarque_id = %s ORDER BY id",
+            (embarque_id,)
+        )
+        embarque["proveedores"] = [row["nombre"] for row in cursor.fetchall()]
+
+        cursor.execute(
             "SELECT id, sku, qty, cbm, pct_contenedor FROM embarque_items WHERE embarque_id = %s",
             (embarque_id,)
         )
         embarque["items"] = cursor.fetchall()
 
         cursor.execute(
-            "SELECT id, embarque_id, tipo, completado, fecha_pago, monto_mxn, "
-            "tipo_cambio_referencia, fecha_captura, nota FROM embarque_etapas WHERE embarque_id = %s",
+            "SELECT id, embarque_id, tipo, completado, nota FROM embarque_etapas WHERE embarque_id = %s",
             (embarque_id,)
         )
         embarque["etapas"] = cursor.fetchall()
@@ -237,10 +220,10 @@ async def listar_embarques(
     valores = []
 
     if proveedor:
-        query += " AND e.proveedor LIKE %s"
+        query += " AND EXISTS (SELECT 1 FROM embarque_proveedores p WHERE p.embarque_id = e.id AND p.nombre LIKE %s)"
         valores.append(f"%{proveedor}%")
     if numero_contenedor:
-        query += " AND e.numero_contenedor LIKE %s"
+        query += " AND EXISTS (SELECT 1 FROM embarque_contenedores c WHERE c.embarque_id = e.id AND c.numero LIKE %s)"
         valores.append(f"%{numero_contenedor}%")
     if con_forwarder is not None:
         query += " AND cf.activo = %s"
@@ -253,7 +236,19 @@ async def listar_embarques(
 
     try:
         cursor.execute(query, tuple(valores))
-        return cursor.fetchall()
+        resultados = cursor.fetchall()
+        for embarque in resultados:
+            cursor.execute(
+                "SELECT numero FROM embarque_contenedores WHERE embarque_id = %s ORDER BY id",
+                (embarque["id"],)
+            )
+            embarque["contenedores"] = [row["numero"] for row in cursor.fetchall()]
+            cursor.execute(
+                "SELECT nombre FROM embarque_proveedores WHERE embarque_id = %s ORDER BY id",
+                (embarque["id"],)
+            )
+            embarque["proveedores"] = [row["nombre"] for row in cursor.fetchall()]
+        return resultados
     except mysql.connector.Error as err:
         print(f"Error en BD: {err}")
         raise HTTPException(status_code=500, detail="Error al consultar embarques")
@@ -276,7 +271,7 @@ async def obtener_embarque(embarque_id: int):
 @router.post("/embarques")
 async def crear_embarque(payload: EmbarqueCrear):
     """
-    Crea un embarque (cabecera + SKUs) y siembra sus etapas/estatus en falso.
+    Crea un embarque (cabecera + contenedores + proveedores + SKUs) y siembra etapas/estatus en falso.
     """
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -285,16 +280,29 @@ async def crear_embarque(payload: EmbarqueCrear):
         cursor.execute(
             """
             INSERT INTO embarques
-                (numero_contenedor, invoice_orders, proveedor, llegada_manzanillo_tentativa,
-                 fecha_llegada_real, fecha_de_recibido)
-            VALUES (%s, %s, %s, %s, %s, %s)
+                (invoice_orders, llegada_manzanillo_tentativa, fecha_llegada_real, fecha_de_recibido)
+            VALUES (%s, %s, %s, %s)
             """,
             (
-                payload.numero_contenedor, payload.invoice_orders, payload.proveedor,
-                payload.llegada_manzanillo_tentativa, payload.fecha_llegada_real, payload.fecha_de_recibido
+                payload.invoice_orders, payload.llegada_manzanillo_tentativa,
+                payload.fecha_llegada_real, payload.fecha_de_recibido
             )
         )
         embarque_id = cursor.lastrowid
+
+        for contenedor in payload.contenedores:
+            if contenedor.strip():
+                cursor.execute(
+                    "INSERT INTO embarque_contenedores (embarque_id, numero) VALUES (%s, %s)",
+                    (embarque_id, contenedor.strip())
+                )
+
+        for proveedor in payload.proveedores:
+            if proveedor.strip():
+                cursor.execute(
+                    "INSERT INTO embarque_proveedores (embarque_id, nombre) VALUES (%s, %s)",
+                    (embarque_id, proveedor.strip())
+                )
 
         for etapa in EtapaTipo:
             cursor.execute(
@@ -330,7 +338,7 @@ async def crear_embarque(payload: EmbarqueCrear):
 @router.put("/embarques/{embarque_id}")
 async def editar_embarque(embarque_id: int, payload: EmbarqueCabeceraIn):
     """
-    Edita la cabecera de un embarque.
+    Edita la cabecera de un embarque (contenedores, proveedores, fechas).
     """
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -339,21 +347,36 @@ async def editar_embarque(embarque_id: int, payload: EmbarqueCabeceraIn):
         cursor.execute(
             """
             UPDATE embarques
-            SET numero_contenedor = %s, invoice_orders = %s, proveedor = %s,
-                llegada_manzanillo_tentativa = %s, fecha_llegada_real = %s, fecha_de_recibido = %s
+            SET invoice_orders = %s, llegada_manzanillo_tentativa = %s,
+                fecha_llegada_real = %s, fecha_de_recibido = %s
             WHERE id = %s
             """,
             (
-                payload.numero_contenedor, payload.invoice_orders, payload.proveedor,
-                payload.llegada_manzanillo_tentativa, payload.fecha_llegada_real,
-                payload.fecha_de_recibido, embarque_id
+                payload.invoice_orders, payload.llegada_manzanillo_tentativa,
+                payload.fecha_llegada_real, payload.fecha_de_recibido, embarque_id
             )
         )
-        conn.commit()
 
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail="Embarque no encontrado")
 
+        cursor.execute("DELETE FROM embarque_contenedores WHERE embarque_id = %s", (embarque_id,))
+        for contenedor in payload.contenedores:
+            if contenedor.strip():
+                cursor.execute(
+                    "INSERT INTO embarque_contenedores (embarque_id, numero) VALUES (%s, %s)",
+                    (embarque_id, contenedor.strip())
+                )
+
+        cursor.execute("DELETE FROM embarque_proveedores WHERE embarque_id = %s", (embarque_id,))
+        for proveedor in payload.proveedores:
+            if proveedor.strip():
+                cursor.execute(
+                    "INSERT INTO embarque_proveedores (embarque_id, nombre) VALUES (%s, %s)",
+                    (embarque_id, proveedor.strip())
+                )
+
+        conn.commit()
         mov_reg.registrar_movimiento(payload.usuario, f"Edito embarque #{embarque_id}", "Importaciones")
         return _obtener_embarque_detalle(embarque_id)
 
@@ -367,15 +390,17 @@ async def editar_embarque(embarque_id: int, payload: EmbarqueCabeceraIn):
 
 
 @router.delete("/embarques/{embarque_id}")
-async def eliminar_embarque(embarque_id: int):
+async def eliminar_embarque(embarque_id: int, usuario: str = "sistema"):
     """
-    Elimina un embarque y arrastra items, etapas y estatus.
+    Elimina un embarque y arrastra contenedores, proveedores, items, etapas y estatus.
     No hay FK en DB (usuario sin privilegio REFERENCES), asi que el cascade se hace aqui.
     """
     conn = get_db_connection()
     cursor = conn.cursor()
 
     try:
+        cursor.execute("DELETE FROM embarque_contenedores WHERE embarque_id = %s", (embarque_id,))
+        cursor.execute("DELETE FROM embarque_proveedores WHERE embarque_id = %s", (embarque_id,))
         cursor.execute("DELETE FROM embarque_items WHERE embarque_id = %s", (embarque_id,))
         cursor.execute("DELETE FROM embarque_etapas WHERE embarque_id = %s", (embarque_id,))
         cursor.execute("DELETE FROM embarque_estatus WHERE embarque_id = %s", (embarque_id,))
@@ -385,7 +410,7 @@ async def eliminar_embarque(embarque_id: int):
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail="Embarque no encontrado")
 
-        mov_reg.registrar_movimiento("sistema", f"Elimino embarque #{embarque_id}", "Importaciones")
+        mov_reg.registrar_movimiento(usuario, f"Elimino embarque #{embarque_id}", "Importaciones")
         return {"mensaje": "Embarque eliminado exitosamente"}
 
     except mysql.connector.Error as err:
@@ -492,13 +517,8 @@ async def eliminar_item(embarque_id: int, item_id: int):
 @router.patch("/embarques/{embarque_id}/etapas/{tipo}", response_model=EtapaResponse)
 async def marcar_etapa(embarque_id: int, tipo: EtapaTipo, payload: EtapaUpdate):
     """
-    Marca/desmarca una etapa de liquidacion. El monto se captura tal cual en
-    MXN (sin conversion de USD); el tipo de cambio de la fecha de pago se
-    guarda solo como referencia de auditoria, nunca se usa para calcularlo.
+    Marca/desmarca una etapa (completado). Solo actualiza completado + nota.
     """
-    if payload.completado and (payload.fecha_pago is None or payload.monto_mxn is None):
-        raise HTTPException(status_code=400, detail="fecha_pago y monto_mxn son requeridos cuando completado=true")
-
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
@@ -508,8 +528,7 @@ async def marcar_etapa(embarque_id: int, tipo: EtapaTipo, payload: EtapaUpdate):
             raise HTTPException(status_code=404, detail="Embarque no encontrado")
 
         cursor.execute(
-            "SELECT id, fecha_pago, tipo_cambio_referencia, nota FROM embarque_etapas "
-            "WHERE embarque_id = %s AND tipo = %s",
+            "SELECT id, nota FROM embarque_etapas WHERE embarque_id = %s AND tipo = %s",
             (embarque_id, tipo.value)
         )
         etapa = cursor.fetchone()
@@ -517,31 +536,11 @@ async def marcar_etapa(embarque_id: int, tipo: EtapaTipo, payload: EtapaUpdate):
             raise HTTPException(status_code=404, detail="Etapa no encontrada")
 
         nota_final = payload.nota if payload.nota is not None else etapa["nota"]
-        fecha_captura = datetime.now()
 
-        if payload.completado:
-            # Solo se vuelve a consultar Banxico si cambio la fecha de pago; si solo
-            # cambio el monto, se reusa la referencia ya guardada (nunca se recalcula).
-            if etapa["fecha_pago"] == payload.fecha_pago and etapa["tipo_cambio_referencia"] is not None:
-                tipo_cambio_referencia = etapa["tipo_cambio_referencia"]
-            else:
-                try:
-                    tipo_cambio_referencia, _ = await obtener_tipo_cambio_fecha_especifica(payload.fecha_pago)
-                except BanxicoServiceError as err:
-                    raise HTTPException(status_code=502, detail=f"No se pudo obtener tipo de cambio de referencia: {err}")
-
-            cursor.execute(
-                "UPDATE embarque_etapas SET completado = TRUE, fecha_pago = %s, monto_mxn = %s, "
-                "tipo_cambio_referencia = %s, fecha_captura = %s, nota = %s WHERE id = %s",
-                (payload.fecha_pago, payload.monto_mxn, tipo_cambio_referencia, fecha_captura, nota_final, etapa["id"])
-            )
-        else:
-            # fecha_captura NO se toca al desmarcar: queda como auditoria de la ultima captura real.
-            cursor.execute(
-                "UPDATE embarque_etapas SET completado = FALSE, fecha_pago = NULL, monto_mxn = NULL, "
-                "tipo_cambio_referencia = NULL, nota = %s WHERE id = %s",
-                (nota_final, etapa["id"])
-            )
+        cursor.execute(
+            "UPDATE embarque_etapas SET completado = %s, nota = %s WHERE id = %s",
+            (payload.completado, nota_final, etapa["id"])
+        )
 
         conn.commit()
         mov_reg.registrar_movimiento(
@@ -549,8 +548,7 @@ async def marcar_etapa(embarque_id: int, tipo: EtapaTipo, payload: EtapaUpdate):
         )
 
         cursor.execute(
-            "SELECT id, embarque_id, tipo, completado, fecha_pago, monto_mxn, "
-            "tipo_cambio_referencia, fecha_captura, nota FROM embarque_etapas WHERE id = %s",
+            "SELECT id, embarque_id, tipo, completado, nota FROM embarque_etapas WHERE id = %s",
             (etapa["id"],)
         )
         return cursor.fetchone()
