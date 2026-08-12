@@ -37,6 +37,14 @@ _COLUMNAS_VIEJAS_EMBARQUE_ETAPAS = [
 # fecha real de arribo (distinta de llegada_manzanillo_tentativa, que es la estimada).
 _COLUMNAS_NUEVAS_EMBARQUES = [
     ("fecha_llegada_real", "DATE NULL AFTER llegada_manzanillo_tentativa"),
+    ("numero_contenedor", "VARCHAR(100) NULL AFTER id"),
+]
+
+# tipo de cambio Banxico por etapa (informativo, nunca se usa para calcular montos).
+_COLUMNAS_NUEVAS_EMBARQUE_ETAPAS = [
+    ("tipo_cambio_fecha", "DATE NULL"),
+    ("tipo_cambio_valor", "DECIMAL(10,4) NULL"),
+    ("tipo_cambio_fecha_dato", "DATE NULL"),
 ]
 
 
@@ -56,17 +64,63 @@ def _migrar_columnas_embarques(cursor):
             cursor.execute(f"ALTER TABLE embarque_etapas DROP COLUMN {columna}")
             print(f"Columna embarque_etapas.{columna} eliminada.")
 
-    # Agregar fecha_llegada_real a embarques.
+    # Agregar fecha_llegada_real / numero_contenedor a embarques.
     for columna, definicion in _COLUMNAS_NUEVAS_EMBARQUES:
         if not _columna_existe(cursor, "embarques", columna):
             cursor.execute(f"ALTER TABLE embarques ADD COLUMN {columna} {definicion}")
             print(f"Columna embarques.{columna} agregada.")
 
+    # Agregar columnas de tipo de cambio a embarque_etapas.
+    for columna, definicion in _COLUMNAS_NUEVAS_EMBARQUE_ETAPAS:
+        if not _columna_existe(cursor, "embarque_etapas", columna):
+            cursor.execute(f"ALTER TABLE embarque_etapas ADD COLUMN {columna} {definicion}")
+            print(f"Columna embarque_etapas.{columna} agregada.")
+
+
+def _migrar_contenedor_invoice_invertido(cursor):
+    """
+    Invierte el modelo viejo (invoice_orders 1 columna, contenedores tabla N)
+    al modelo correcto: contenedor es 1 solo dato (embarques.numero_contenedor),
+    invoice es 1-a-muchos (embarque_invoices). Migra datos existentes antes de
+    tirar la columna/tabla vieja. Idempotente (no vuelve a correr si
+    invoice_orders ya no existe).
+    """
+    if not _columna_existe(cursor, "embarques", "invoice_orders"):
+        return
+
+    # contenedor: N filas en embarque_contenedores -> 1 dato en embarques (se toma el primero).
+    cursor.execute(
+        """
+        UPDATE embarques e
+        SET numero_contenedor = (
+            SELECT c.numero FROM embarque_contenedores c
+            WHERE c.embarque_id = e.id ORDER BY c.id LIMIT 1
+        )
+        WHERE numero_contenedor IS NULL
+        """
+    )
+
+    # invoice: 1 columna en embarques -> N filas en embarque_invoices.
+    cursor.execute(
+        """
+        INSERT INTO embarque_invoices (embarque_id, numero)
+        SELECT e.id, e.invoice_orders FROM embarques e
+        WHERE e.invoice_orders IS NOT NULL AND e.invoice_orders != ''
+        AND NOT EXISTS (SELECT 1 FROM embarque_invoices i WHERE i.embarque_id = e.id)
+        """
+    )
+
+    cursor.execute("ALTER TABLE embarques DROP COLUMN invoice_orders")
+    print("Columna embarques.invoice_orders eliminada (migrada a embarque_invoices).")
+
+    cursor.execute("DROP TABLE IF EXISTS embarque_contenedores")
+    print("Tabla embarque_contenedores eliminada (migrada a embarques.numero_contenedor).")
+
 
 def crear_tablas_embarques():
     """
-    Corre el schema (CREATE TABLE IF NOT EXISTS, sin FK) y la migracion de
-    columnas de embarque_etapas al arrancar el backend. Idempotente: no
+    Corre el schema (CREATE TABLE IF NOT EXISTS, sin FK) y las migraciones de
+    columnas/datos de embarques al arrancar el backend. Idempotente: no
     rompe si las tablas/columnas ya estan en su forma final.
     """
     with open(_SCHEMA_PATH, encoding="utf-8") as f:
@@ -79,6 +133,7 @@ def crear_tablas_embarques():
         for stmt in statements:
             cursor.execute(stmt)
         _migrar_columnas_embarques(cursor)
+        _migrar_contenedor_invoice_invertido(cursor)
         conn.commit()
         print("Tablas de embarques verificadas/creadas.")
     except mysql.connector.Error as err:
@@ -110,8 +165,8 @@ class EmbarqueItemIn(BaseModel):
 
 
 class EmbarqueCabeceraIn(BaseModel):
-    contenedores: List[str] = []
-    invoice_orders: str
+    numero_contenedor: Optional[str] = None
+    invoices: List[str] = []
     proveedores: List[str] = []
     llegada_manzanillo_tentativa: Optional[date] = None
     fecha_llegada_real: Optional[date] = None
@@ -126,6 +181,9 @@ class EmbarqueCrear(EmbarqueCabeceraIn):
 class EtapaUpdate(BaseModel):
     completado: bool
     nota: Optional[str] = None
+    tipo_cambio_fecha: Optional[date] = None
+    tipo_cambio_valor: Optional[Decimal] = None
+    tipo_cambio_fecha_dato: Optional[date] = None
     usuario: Optional[str] = "sistema"
 
 
@@ -135,6 +193,9 @@ class EtapaResponse(BaseModel):
     tipo: str
     completado: bool
     nota: Optional[str] = None
+    tipo_cambio_fecha: Optional[date] = None
+    tipo_cambio_valor: Optional[Decimal] = None
+    tipo_cambio_fecha_dato: Optional[date] = None
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -157,10 +218,10 @@ def _obtener_embarque_detalle(embarque_id: int):
             return None
 
         cursor.execute(
-            "SELECT numero FROM embarque_contenedores WHERE embarque_id = %s ORDER BY id",
+            "SELECT numero FROM embarque_invoices WHERE embarque_id = %s ORDER BY id",
             (embarque_id,)
         )
-        embarque["contenedores"] = [row["numero"] for row in cursor.fetchall()]
+        embarque["invoices"] = [row["numero"] for row in cursor.fetchall()]
 
         cursor.execute(
             "SELECT nombre FROM embarque_proveedores WHERE embarque_id = %s ORDER BY id",
@@ -175,7 +236,9 @@ def _obtener_embarque_detalle(embarque_id: int):
         embarque["items"] = cursor.fetchall()
 
         cursor.execute(
-            "SELECT id, embarque_id, tipo, completado, nota FROM embarque_etapas WHERE embarque_id = %s",
+            "SELECT id, embarque_id, tipo, completado, nota, "
+            "tipo_cambio_fecha, tipo_cambio_valor, tipo_cambio_fecha_dato "
+            "FROM embarque_etapas WHERE embarque_id = %s",
             (embarque_id,)
         )
         embarque["etapas"] = cursor.fetchall()
@@ -223,7 +286,7 @@ async def listar_embarques(
         query += " AND EXISTS (SELECT 1 FROM embarque_proveedores p WHERE p.embarque_id = e.id AND p.nombre LIKE %s)"
         valores.append(f"%{proveedor}%")
     if numero_contenedor:
-        query += " AND EXISTS (SELECT 1 FROM embarque_contenedores c WHERE c.embarque_id = e.id AND c.numero LIKE %s)"
+        query += " AND e.numero_contenedor LIKE %s"
         valores.append(f"%{numero_contenedor}%")
     if con_forwarder is not None:
         query += " AND cf.activo = %s"
@@ -239,10 +302,10 @@ async def listar_embarques(
         resultados = cursor.fetchall()
         for embarque in resultados:
             cursor.execute(
-                "SELECT numero FROM embarque_contenedores WHERE embarque_id = %s ORDER BY id",
+                "SELECT numero FROM embarque_invoices WHERE embarque_id = %s ORDER BY id",
                 (embarque["id"],)
             )
-            embarque["contenedores"] = [row["numero"] for row in cursor.fetchall()]
+            embarque["invoices"] = [row["numero"] for row in cursor.fetchall()]
             cursor.execute(
                 "SELECT nombre FROM embarque_proveedores WHERE embarque_id = %s ORDER BY id",
                 (embarque["id"],)
@@ -271,7 +334,7 @@ async def obtener_embarque(embarque_id: int):
 @router.post("/embarques")
 async def crear_embarque(payload: EmbarqueCrear):
     """
-    Crea un embarque (cabecera + contenedores + proveedores + SKUs) y siembra etapas/estatus en falso.
+    Crea un embarque (cabecera + invoices + proveedores + SKUs) y siembra etapas/estatus en falso.
     """
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -280,21 +343,21 @@ async def crear_embarque(payload: EmbarqueCrear):
         cursor.execute(
             """
             INSERT INTO embarques
-                (invoice_orders, llegada_manzanillo_tentativa, fecha_llegada_real, fecha_de_recibido)
+                (numero_contenedor, llegada_manzanillo_tentativa, fecha_llegada_real, fecha_de_recibido)
             VALUES (%s, %s, %s, %s)
             """,
             (
-                payload.invoice_orders, payload.llegada_manzanillo_tentativa,
+                payload.numero_contenedor, payload.llegada_manzanillo_tentativa,
                 payload.fecha_llegada_real, payload.fecha_de_recibido
             )
         )
         embarque_id = cursor.lastrowid
 
-        for contenedor in payload.contenedores:
-            if contenedor.strip():
+        for invoice in payload.invoices:
+            if invoice.strip():
                 cursor.execute(
-                    "INSERT INTO embarque_contenedores (embarque_id, numero) VALUES (%s, %s)",
-                    (embarque_id, contenedor.strip())
+                    "INSERT INTO embarque_invoices (embarque_id, numero) VALUES (%s, %s)",
+                    (embarque_id, invoice.strip())
                 )
 
         for proveedor in payload.proveedores:
@@ -338,7 +401,7 @@ async def crear_embarque(payload: EmbarqueCrear):
 @router.put("/embarques/{embarque_id}")
 async def editar_embarque(embarque_id: int, payload: EmbarqueCabeceraIn):
     """
-    Edita la cabecera de un embarque (contenedores, proveedores, fechas).
+    Edita la cabecera de un embarque (contenedor, invoices, proveedores, fechas).
     """
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -347,12 +410,12 @@ async def editar_embarque(embarque_id: int, payload: EmbarqueCabeceraIn):
         cursor.execute(
             """
             UPDATE embarques
-            SET invoice_orders = %s, llegada_manzanillo_tentativa = %s,
+            SET numero_contenedor = %s, llegada_manzanillo_tentativa = %s,
                 fecha_llegada_real = %s, fecha_de_recibido = %s
             WHERE id = %s
             """,
             (
-                payload.invoice_orders, payload.llegada_manzanillo_tentativa,
+                payload.numero_contenedor, payload.llegada_manzanillo_tentativa,
                 payload.fecha_llegada_real, payload.fecha_de_recibido, embarque_id
             )
         )
@@ -360,12 +423,12 @@ async def editar_embarque(embarque_id: int, payload: EmbarqueCabeceraIn):
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail="Embarque no encontrado")
 
-        cursor.execute("DELETE FROM embarque_contenedores WHERE embarque_id = %s", (embarque_id,))
-        for contenedor in payload.contenedores:
-            if contenedor.strip():
+        cursor.execute("DELETE FROM embarque_invoices WHERE embarque_id = %s", (embarque_id,))
+        for invoice in payload.invoices:
+            if invoice.strip():
                 cursor.execute(
-                    "INSERT INTO embarque_contenedores (embarque_id, numero) VALUES (%s, %s)",
-                    (embarque_id, contenedor.strip())
+                    "INSERT INTO embarque_invoices (embarque_id, numero) VALUES (%s, %s)",
+                    (embarque_id, invoice.strip())
                 )
 
         cursor.execute("DELETE FROM embarque_proveedores WHERE embarque_id = %s", (embarque_id,))
@@ -392,14 +455,14 @@ async def editar_embarque(embarque_id: int, payload: EmbarqueCabeceraIn):
 @router.delete("/embarques/{embarque_id}")
 async def eliminar_embarque(embarque_id: int, usuario: str = "sistema"):
     """
-    Elimina un embarque y arrastra contenedores, proveedores, items, etapas y estatus.
+    Elimina un embarque y arrastra invoices, proveedores, items, etapas y estatus.
     No hay FK en DB (usuario sin privilegio REFERENCES), asi que el cascade se hace aqui.
     """
     conn = get_db_connection()
     cursor = conn.cursor()
 
     try:
-        cursor.execute("DELETE FROM embarque_contenedores WHERE embarque_id = %s", (embarque_id,))
+        cursor.execute("DELETE FROM embarque_invoices WHERE embarque_id = %s", (embarque_id,))
         cursor.execute("DELETE FROM embarque_proveedores WHERE embarque_id = %s", (embarque_id,))
         cursor.execute("DELETE FROM embarque_items WHERE embarque_id = %s", (embarque_id,))
         cursor.execute("DELETE FROM embarque_etapas WHERE embarque_id = %s", (embarque_id,))
@@ -528,7 +591,8 @@ async def marcar_etapa(embarque_id: int, tipo: EtapaTipo, payload: EtapaUpdate):
             raise HTTPException(status_code=404, detail="Embarque no encontrado")
 
         cursor.execute(
-            "SELECT id, nota FROM embarque_etapas WHERE embarque_id = %s AND tipo = %s",
+            "SELECT id, nota, tipo_cambio_fecha, tipo_cambio_valor, tipo_cambio_fecha_dato "
+            "FROM embarque_etapas WHERE embarque_id = %s AND tipo = %s",
             (embarque_id, tipo.value)
         )
         etapa = cursor.fetchone()
@@ -536,10 +600,14 @@ async def marcar_etapa(embarque_id: int, tipo: EtapaTipo, payload: EtapaUpdate):
             raise HTTPException(status_code=404, detail="Etapa no encontrada")
 
         nota_final = payload.nota if payload.nota is not None else etapa["nota"]
+        tc_fecha_final = payload.tipo_cambio_fecha if payload.tipo_cambio_fecha is not None else etapa["tipo_cambio_fecha"]
+        tc_valor_final = payload.tipo_cambio_valor if payload.tipo_cambio_valor is not None else etapa["tipo_cambio_valor"]
+        tc_fecha_dato_final = payload.tipo_cambio_fecha_dato if payload.tipo_cambio_fecha_dato is not None else etapa["tipo_cambio_fecha_dato"]
 
         cursor.execute(
-            "UPDATE embarque_etapas SET completado = %s, nota = %s WHERE id = %s",
-            (payload.completado, nota_final, etapa["id"])
+            "UPDATE embarque_etapas SET completado = %s, nota = %s, "
+            "tipo_cambio_fecha = %s, tipo_cambio_valor = %s, tipo_cambio_fecha_dato = %s WHERE id = %s",
+            (payload.completado, nota_final, tc_fecha_final, tc_valor_final, tc_fecha_dato_final, etapa["id"])
         )
 
         conn.commit()
@@ -548,7 +616,9 @@ async def marcar_etapa(embarque_id: int, tipo: EtapaTipo, payload: EtapaUpdate):
         )
 
         cursor.execute(
-            "SELECT id, embarque_id, tipo, completado, nota FROM embarque_etapas WHERE id = %s",
+            "SELECT id, embarque_id, tipo, completado, nota, "
+            "tipo_cambio_fecha, tipo_cambio_valor, tipo_cambio_fecha_dato "
+            "FROM embarque_etapas WHERE id = %s",
             (etapa["id"],)
         )
         return cursor.fetchone()

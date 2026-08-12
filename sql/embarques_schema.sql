@@ -5,7 +5,7 @@
 
 CREATE TABLE IF NOT EXISTS embarques (
     id INT AUTO_INCREMENT PRIMARY KEY,
-    invoice_orders VARCHAR(255) NOT NULL,
+    numero_contenedor VARCHAR(100) NULL,
     llegada_manzanillo_tentativa DATE NULL,
     fecha_llegada_real DATE NULL,
     fecha_de_recibido DATE NULL,
@@ -13,11 +13,14 @@ CREATE TABLE IF NOT EXISTS embarques (
     updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
 ) ENGINE=InnoDB;
 
-CREATE TABLE IF NOT EXISTS embarque_contenedores (
+-- Invoice ahora es 1-a-muchos (antes era 1 columna en embarques); contenedor
+-- ahora es 1 solo dato (antes era esta tabla, 1-a-muchos). Ver
+-- _migrar_contenedor_invoice_invertido() en routers/embarques.py.
+CREATE TABLE IF NOT EXISTS embarque_invoices (
     id INT AUTO_INCREMENT PRIMARY KEY,
     embarque_id INT NOT NULL,
-    numero VARCHAR(100) NOT NULL,
-    KEY idx_contenedor_embarque (embarque_id)
+    numero VARCHAR(255) NOT NULL,
+    KEY idx_invoice_embarque (embarque_id)
 ) ENGINE=InnoDB;
 
 CREATE TABLE IF NOT EXISTS embarque_proveedores (
@@ -33,13 +36,16 @@ CREATE TABLE IF NOT EXISTS embarque_etapas (
     tipo ENUM('ANTICIPO_CHINA', 'LIQUIDADO_CHINA', 'HL_LIQUIDADA') NOT NULL,
     completado BOOLEAN NOT NULL DEFAULT FALSE,
     nota VARCHAR(255) NULL,
+    tipo_cambio_fecha DATE NULL,
+    tipo_cambio_valor DECIMAL(10,4) NULL,
+    tipo_cambio_fecha_dato DATE NULL,
     UNIQUE KEY uq_embarque_etapa (embarque_id, tipo),
     KEY idx_etapa_embarque (embarque_id)
 ) ENGINE=InnoDB;
 
 -- Migracion in-place: ver _migrar_columnas_embarques() en routers/embarques.py.
--- Se eliminan columnas de liquidacion (fecha_pago, monto_mxn, tipo_cambio_referencia, etc.).
--- Funciones de Banxico se mantienen en banxico_service.py para uso futuro.
+-- tipo_cambio_fecha/valor/fecha_dato = tipo de cambio Banxico consultado para la
+-- etapa (informativo, nunca se usa para calcular montos).
 
 CREATE TABLE IF NOT EXISTS embarque_estatus (
     id INT AUTO_INCREMENT PRIMARY KEY,
