@@ -70,13 +70,20 @@ async def cons_gastos(usuario: str):
     """
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
-    
-    # Aquí traigo solo los gastos del usuario que consulta
-    query = "SELECT descripcion, costo, cantidad, total, usuario_registro FROM gastos WHERE usuario_registro = %s ORDER BY fecha_registro DESC"
-    
+
     try:
-        cursor.execute(query, (usuario,))
-        registros = cursor.fetchall()
+        if usuario == "fparra" or usuario == "gerencia":  # Usuarios con permisos para ver todos los gastos
+            query = "SELECT descripcion, costo, cantidad, total, usuario_registro FROM gastos ORDER BY fecha_registro DESC"
+
+            cursor.execute(query)
+            registros = cursor.fetchall()
+
+        else:
+            # Aquí traigo solo los gastos del usuario que consulta
+            query = "SELECT descripcion, costo, cantidad, total, usuario_registro FROM gastos WHERE usuario_registro = %s ORDER BY fecha_registro DESC"    
+    
+            cursor.execute(query, (usuario,))
+            registros = cursor.fetchall()
         
         # Si no hay registros, devuelvo lista vacía
         if not registros:
@@ -86,6 +93,7 @@ async def cons_gastos(usuario: str):
         return registros
     
     except mysql.connector.Error as err:
+        print(f"Error en consulta: {err}")
         raise HTTPException(status_code=500, detail=f"Error en consulta: {err}")
     
     finally:
