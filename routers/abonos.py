@@ -1,9 +1,10 @@
-import mysql.connector
+import mysql.connector, asyncio, html
 from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException
 import os
 from dotenv import load_dotenv
 import mov_reg
+from servicios.telegram.notificacion import send_telegram_alert
 
 # Obtiene la ruta del directorio padre (la raíz)
 #sys.path.append(os.path.abspath(os.path.join(os.path.dirname(mov_reg.__file__), '..')))
@@ -107,6 +108,19 @@ async def registrar_abono(abono: abono): # Cambié el nombre de la función para
 
         # 5. Si todo está perfecto, guardamos los cambios en la base de datos de AWS
         conn.commit()
+
+        # Enviamos notificación a Telegram
+        id_safe = html.escape(str(abono.id_ventas))
+        usuario_safe = html.escape(str(abono.usuario))
+        saldo_safe = html.escape(str(abono.saldo_abonado))
+
+        message = (
+            f"📋 <b>Nuevo Abono generado</b>\n\n"
+            f"• <b>Código:</b> <code>{id_safe}</code>\n"           
+            f"• <b>Saldo Abonado:</b> <b>${saldo_safe:,.2f}</b>\n"
+            f"• <b>Usuario:</b> {usuario_safe}"
+        )
+        asyncio.create_task(send_telegram_alert(message))
 
         # Registramos el movimiento en el historial de movimientos
         mov_reg.registrar_movimiento(abono.usuario, f"Registró un abono de {abono.saldo_abonado} para la venta {abono.id_ventas}", "Abonos")

@@ -1,11 +1,12 @@
-import mysql.connector, requests
+import mysql.connector
 from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException
 from typing import Optional
-import os
+import os, html, asyncio
 from dotenv import load_dotenv
 from datetime import date
 import mov_reg
+from servicios.telegram.notificacion import send_telegram_alert
 
 router =APIRouter(tags=["/pendientes"],responses={404: {"Mensaje":"No encontrado"}})
 load_dotenv()
@@ -70,10 +71,21 @@ async def agregar_pendiente(registro: registro):
     try:
         cursor.execute(query, (registro.usuario, registro.actividad, registro.prioridad, registro.estado, registro.observaciones, registro.fecha_promesa))
         conn.commit()
-        r = requests.post("https://n8n-n8n.i4mjht.easypanel.host/webhook/zeutica-pendientes", json={"usuario": registro.usuario, "actividad": registro.actividad, "prioridad": registro.prioridad, "estado": registro.estado, "observaciones": registro.observaciones, "fecha_promesa": str(registro.fecha_promesa)})
-        if r.status_code != 200:
-            print(f"Error al enviar webhook: {r.status_code} - {r.text}")
+        
         mov_reg.registrar_movimiento(registro.usuario, "agregar", f"Actividad: {registro.actividad}, Prioridad: {registro.prioridad}, Estado: {registro.estado}, Observaciones: {registro.observaciones}, Fecha Promesa: {registro.fecha_promesa}")
+
+        # Enviamos notificación a Telegram
+        message = (
+            f"📝 <b>Pendiente Agregado</b>\n\n"
+            f"• <b>Usuario:</b> {html.escape(registro.usuario)}\n"
+            f"• <b>Actividad:</b> {html.escape(registro.actividad)}\n"
+            f"• <b>Prioridad:</b> {html.escape(registro.prioridad)}\n"
+            f"• <b>Estado:</b> {html.escape(registro.estado)}\n"
+            f"• <b>Observaciones:</b> {html.escape(registro.observaciones)}\n"
+            f"• <b>Fecha Promesa:</b> {html.escape(str(registro.fecha_promesa))}"
+        )
+        asyncio.create_task(send_telegram_alert(message))
+
         return {"mensaje": "Registro agregado exitosamente."}        
 
     except mysql.connector.Error as err:
@@ -100,11 +112,22 @@ async def actualizar_pendiente(id_pendiente: int, registro: registro):
 
     try:
         cursor.execute(query, (registro.usuario, registro.actividad, registro.prioridad, registro.estado, registro.observaciones, registro.fecha_promesa, id_pendiente))
-        conn.commit()
-        r = requests.post("https://n8n-n8n.i4mjht.easypanel.host/webhook/zeutica-pendientes", json={"usuario": registro.usuario, "actividad": registro.actividad, "prioridad": registro.prioridad, "estado": registro.estado, "observaciones": registro.observaciones, "fecha_promesa": str(registro.fecha_promesa)})
-        if r.status_code != 200:
-            print(f"Error al enviar webhook: {r.status_code} - {r.text}")
+        conn.commit()        
+
         mov_reg.registrar_movimiento(registro.usuario, "actualizar", f"Actividad: {registro.actividad}, Prioridad: {registro.prioridad}, Estado: {registro.estado}, Observaciones: {registro.observaciones}, Fecha Promesa: {registro.fecha_promesa}")
+
+        # Enviamos notificación a Telegram
+        message = (
+            f"✏️ <b>Pendiente Actualizado</b>\n\n"
+            f"• <b>Usuario:</b> {html.escape(registro.usuario)}\n"
+            f"• <b>Actividad:</b> {html.escape(registro.actividad)}\n"
+            f"• <b>Prioridad:</b> {html.escape(registro.prioridad)}\n"
+            f"• <b>Estado:</b> {html.escape(registro.estado)}\n"
+            f"• <b>Observaciones:</b> {html.escape(registro.observaciones)}\n"
+            f"• <b>Fecha Promesa:</b> {html.escape(str(registro.fecha_promesa))}"
+        )
+        asyncio.create_task(send_telegram_alert(message))
+
         return {"mensaje": "Pendiente actualizado exitosamente."}
 
     except mysql.connector.Error as err:
@@ -130,7 +153,16 @@ async def eliminar_pendiente(id_pendiente: int):
     try:
         cursor.execute(query, (id_pendiente,))
         conn.commit()
+
         mov_reg.registrar_movimiento("gerencia", "eliminar", f"ID: {id_pendiente}")
+
+        # Enviamos notificación a Telegram
+        message = (
+            f"🗑️ <b>Pendiente Eliminado</b>\n\n"
+            f"• <b>ID:</b> {html.escape(str(id_pendiente))}\n"
+        )
+        asyncio.create_task(send_telegram_alert(message))
+
         return {"mensaje": "Pendiente eliminado exitosamente."}
 
     except mysql.connector.Error as err:

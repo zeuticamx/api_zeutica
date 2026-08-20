@@ -1,8 +1,9 @@
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import List
-import os
+import os, html, asyncio
 import mysql.connector
+from servicios.telegram.notificacion import send_telegram_alert
 
 router = APIRouter(tags=["/compras"],responses={404: {"Mensaje":"No encontrado"}})
 
@@ -85,7 +86,16 @@ async def recibir_compra(compras: List[CompraModel]):
                 "stock_nuevo": stock_nuevo
             })
 
-        conn.commit()        
+        conn.commit()
+
+        # Enviamos notificación a Telegram
+        message = (
+            f"📦 <b>Compra Procesada</b>\n\n"
+            f"• <b>Items:</b> {len(res_items)}\n"
+            f"• <b>Cantidad:</b> {compra.stock_bodega}\n"
+        )
+        asyncio.create_task(send_telegram_alert(message))
+
         return {"msg": "Compra procesada", "items": res_items}
 
     except mysql.connector.Error as err:

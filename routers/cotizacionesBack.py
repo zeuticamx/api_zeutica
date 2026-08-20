@@ -1,4 +1,4 @@
-import mysql.connector
+import mysql.connector, html, asyncio
 from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException
 from typing import List
@@ -8,6 +8,7 @@ import os, mov_reg
 from dotenv import load_dotenv
 from typing import Optional
 from cotizacion_service import generar_nuevo_codigo, guardar_cotizacion_db
+from servicios.telegram.notificacion import send_telegram_alert #notificaciones a telegram
 
 router =APIRouter(tags=["/cotizaciones"],responses={404: {"Mensaje":"No encontrado"}})
 load_dotenv() # Cargar credenciales .env
@@ -112,6 +113,20 @@ async def guardar_cotizacion(cot: CotizacionSchema):
         cotizacion_id = guardar_cotizacion_db(connection, cot)
 
         mov_reg.registrar_movimiento(cot.usuario, f"Registró una nueva cotización: {cot.codigo_cotizacion}", "Cotizaciones")
+
+        # Enviamos notificación a Telegram
+        empresa_safe = html.escape(str(cot.empresa))
+        usuario_safe = html.escape(str(cot.usuario))
+        codigo_safe = html.escape(str(cot.codigo_cotizacion))
+
+        message = (
+            f"📋 <b>Nueva cotización generada</b>\n\n"
+            f"• <b>Código:</b> <code>{codigo_safe}</code>\n"
+            f"• <b>Cliente:</b> {empresa_safe}\n"
+            f"• <b>Total:</b> <b>${cot.total:,.2f}</b>\n"
+            f"• <b>Usuario:</b> {usuario_safe}"
+        )
+        asyncio.create_task(send_telegram_alert(message))
 
         return {"status": "success", "id": cotizacion_id}
 
@@ -289,6 +304,15 @@ async def guardar_firma(firma: FirmaEnvio):
             connection.commit()
 
             mov_reg.registrar_movimiento(firma.usuario, f"Guardó firma para cotización {firma.codigo_cotizacion}", "Cotizaciones")
+
+            mensaje = (
+                f"📋 <b>Firma de cliente registrada</b>\n\n"
+                f"• <b>Código:</b> <code>{html.escape(firma.codigo_cotizacion)}</code>\n"
+                f"• <b>Usuario:</b> {html.escape(firma.usuario)}\n"
+                f"• <b>Fecha de firma:</b> {html.escape(firma.fecha_firma)}"
+                )
+
+            asyncio.create_task(send_telegram_alert(mensaje))
 
             return {"status": "success", "mensaje": f"Firma guardada en {firma.codigo_cotizacion}"}
 

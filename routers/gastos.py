@@ -1,8 +1,9 @@
-import mysql.connector
+import mysql.connector, html, asyncio
 from pydantic import BaseModel, ConfigDict
 from fastapi import APIRouter, HTTPException
 import os, mov_reg
 from dotenv import load_dotenv
+from servicios.telegram.notificacion import send_telegram_alert
 
 router =APIRouter(tags=["/gastos"],responses={404: {"Mensaje":"No encontrado"}})
 load_dotenv()
@@ -52,7 +53,20 @@ async def registrar_gasto(gasto: Gasto):
     try:
         cursor.execute(query, values)
         conn.commit()
+
         mov_reg.registrar_movimiento(gasto.usuario_registro, f"Registró un gasto: {gasto.descripcion} por {gasto.costo * gasto.cantidad}", "Gastos")
+
+        # Enviamos notificación a Telegram
+        message = (
+            f"💸 <b>Gasto Registrado</b>\n\n"
+            f"• <b>Descripción:</b> {html.escape(gasto.descripcion)}\n"
+            f"• <b>Costo:</b> ${gasto.costo:,.2f}\n"
+            f"• <b>Cantidad:</b> {gasto.cantidad}\n"
+            f"• <b>Total:</b> ${gasto.costo * gasto.cantidad:,.2f}\n"
+            f"• <b>Usuario:</b> {html.escape(gasto.usuario_registro)}"
+        )
+        asyncio.create_task(send_telegram_alert(message))
+
         return {"mensaje": "Gasto registrado exitosamente"}
     
     except mysql.connector.Error as err:

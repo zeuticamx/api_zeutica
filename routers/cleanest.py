@@ -1,4 +1,4 @@
-import mysql.connector
+import mysql.connector, html, asyncio
 from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException
 from typing import Optional, List
@@ -6,6 +6,7 @@ import os
 from dotenv import load_dotenv
 from datetime import date
 import mov_reg
+from servicios.telegram.notificacion import send_telegram_alert
 
 router =APIRouter(tags=["/cleanest"],responses={404: {"Mensaje":"No encontrado"}})
 load_dotenv()
@@ -51,6 +52,19 @@ async def crear_orden(ordenes: List[OrdenModel], usuario: str):
 
         # Registramos el movimiento en el historial de movimientos
         mov_reg.registrar_movimiento(usuario, f"Registró una orden para {ordenes[0].numero_orden} artículos", "Ordenes Cleanest Choice")
+
+        # Enviamos notificación a Telegram
+        numero_orden_safe = html.escape(str(ordenes[0].numero_orden))
+        usuario_safe = html.escape(str(usuario))
+        cantidad_safe = html.escape(str(len(ordenes)))
+
+        message = (
+            f"📋 <b>Nueva Orden Cleanest Choice Generada</b>\n\n"
+            f"• <b>Código:</b> <code>{numero_orden_safe}</code>\n"
+            f"• <b>Usuario:</b> {usuario_safe}\n"
+            f"• <b>Cantidad:</b> {cantidad_safe}"
+        )
+        asyncio.create_task(send_telegram_alert(message))
 
         return {
             "msg": "Ordenes creadas",
@@ -107,6 +121,17 @@ async def efirma(payload: EfirmaModel):
 
         # Registramos el movimiento en el historial de movimientos
         mov_reg.registrar_movimiento(payload.usuario, f"Registró una firma para la orden {payload.numero_orden}", "Firmas")
+
+        # Enviamos notificación a Telegram
+        numero_orden_safe = html.escape(str(payload.numero_orden))
+        usuario_safe = html.escape(str(payload.usuario))
+
+        message = (
+            f"📋 <b>Firma En Envio Cleanest Registrada</b>\n\n"
+            f"• <b>Código:</b> <code>{numero_orden_safe}</code>\n"
+            f"• <b>Usuario:</b> {usuario_safe}"
+        )
+        asyncio.create_task(send_telegram_alert(message))
 
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail="Ticket no encontrado")
@@ -187,6 +212,17 @@ async def actualizar_pedido(pedido_id: int, payload: OrdenUpdateModel, usuario: 
         # Registramos el movimiento en el historial de movimientos
         mov_reg.registrar_movimiento(usuario, f"Actualizó la orden {pedido_id}", "Ordenes Cleanest Choice")
 
+        # Enviamos notificación a Telegram
+        pedido_id_safe = html.escape(str(pedido_id))
+        usuario_safe = html.escape(str(usuario))
+
+        message = (
+            f"📋 <b>Orden Cleanest Choice Actualizada</b>\n\n"
+            f"• <b>Código:</b> <code>{pedido_id_safe}</code>\n"
+            f"• <b>Usuario:</b> {usuario_safe}"
+        )
+        asyncio.create_task(send_telegram_alert(message))
+
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail="Orden no encontrada")
         
@@ -266,6 +302,19 @@ async def ingresar_venta(venta: VentaSchema):
         if cursor.rowcount == 0:
             conn.rollback()
             raise HTTPException(status_code=500, detail="No se registró la venta")
+
+        # Enviamos notificación a Telegram
+        sku_safe = html.escape(str(venta.sku))
+        usuario_safe = html.escape(str(venta.usuario))
+        cantidad_safe = html.escape(str(venta.stock_clean))
+
+        message = (
+            f"📋 <b>Nueva Venta Cleanest Choice Registrada</b>\n\n"
+            f"• <b>Código:</b> <code>{sku_safe}</code>\n"
+            f"• <b>Usuario:</b> {usuario_safe}\n"
+            f"• <b>Cantidad:</b> {cantidad_safe}"
+        )
+        asyncio.create_task(send_telegram_alert(message))
 
         conn.commit()
 

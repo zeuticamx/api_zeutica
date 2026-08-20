@@ -1,10 +1,11 @@
 # fichero api de productos
-import mysql.connector
+import mysql.connector, html, asyncio
 from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException
 import os, mov_reg
 from dotenv import load_dotenv
 from typing import Optional
+from servicios.telegram.notificacion import send_telegram_alert
 
 router =APIRouter(tags=["/productos"],responses={404: {"Mensaje":"No encontrado"}})
 
@@ -189,6 +190,15 @@ async def actualizar_productos(datos: ProdEditSchema):
         # Confirmo todos los cambios de una vez
         conn.commit()
         mov_reg.registrar_movimiento(datos.usuario, f"Actualizó productos: {len(res_actualizados)} actualizados, {len(res_errores)} errores", "Productos")
+
+        # Enviamos notificación a Telegram
+        message = (
+            f"🛠️ <b>Actualización de Productos</b>\n\n"
+            f"• <b>Usuario:</b> {html.escape(datos.usuario)}\n"
+            f"• <b>Actualizados:</b> {len(res_actualizados)}\n"
+            f"• <b>Errores:</b> {len(res_errores)}"
+        )
+        asyncio.create_task(send_telegram_alert(message))
         
         return {
             "mensaje": "Actualización completada",
@@ -253,7 +263,19 @@ async def crear_producto(prod: ProdNuevoSchema):
         
         cursor.execute(sql_insert, valores)
         conn.commit()
+
         mov_reg.registrar_movimiento(prod.usuario, f"Creó producto: {prod.nombre}", "Productos")
+
+        # Enviamos notificación a Telegram
+        message = (
+            f"🆕 <b>Nuevo Producto Creado</b>\n\n"
+            f"• <b>SKU:</b> {html.escape(prod.sku)}\n"
+            f"• <b>Nombre:</b> {html.escape(prod.nombre)}\n"
+            f"• <b>Categoría:</b> {html.escape(prod.categoria)}\n"
+            f"• <b>Usuario:</b> {html.escape(prod.usuario)}"
+        )
+        asyncio.create_task(send_telegram_alert(message))
+
         return {
             "mensaje": "Producto creado exitosamente",
             "sku": prod.sku,
@@ -419,6 +441,18 @@ async def registrar_devolucion(sku: str, datos: DevolucionSchema):
         conn.commit()
         
         mov_reg.registrar_movimiento(datos.usuario, f"Registró devolución para SKU '{sku}'", "Productos")
+
+        # Enviamos notificación a Telegram
+        message = (
+            f"↩️ <b>Devolución Registrada</b>\n\n"
+            f"• <b>SKU:</b> {html.escape(sku)}\n"
+            f"• <b>Producto:</b> {html.escape(datos.producto)}\n"
+            f"• <b>Cantidad:</b> {datos.cantidad}\n"
+            f"• <b>Plataforma:</b> {html.escape(datos.plataforma)}\n"
+            f"• <b>Reingreso:</b> {datos.reingreso}\n"
+            f"• <b>Usuario:</b> {html.escape(datos.usuario)}"
+        )
+        asyncio.create_task(send_telegram_alert(message))
 
         if datos.reingreso == True:
             # Si es reingreso, también actualizo el stock_bodega del producto sumando 1

@@ -1,9 +1,9 @@
-import mysql.connector
+import mysql.connector, os, mov_reg, html, asyncio
 from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException
 from typing import List
-import os, mov_reg
 from dotenv import load_dotenv
+from servicios.telegram.notificacion import send_telegram_alert
 
 router =APIRouter(tags=["/traspasos"],responses={404: {"Mensaje":"No encontrado"}})
 load_dotenv()
@@ -64,7 +64,18 @@ async def traspaso_multiple(lote: LoteTraspaso):
 
         # D. Si TODO salió bien, guardamos cambios en MySQL
         connection.commit()
+
         mov_reg.registrar_movimiento(lote.usuario, f"Realizó traspaso de {len(lote.movimientos)} items", "Traspasos")
+
+        # Enviamos notificación a Telegram
+        message = (
+            f"🔄 <b>Traspaso de Stock</b>\n\n"
+            f"• <b>Usuario:</b> {html.escape(lote.usuario)}\n"
+            f"• <b>Almacén:</b> {html.escape(lote.almacen)}\n"
+            f"• <b>Movimientos:</b> {len(lote.movimientos)}"
+        )
+        asyncio.create_task(send_telegram_alert(message))
+
         return {"status": "success", "mensaje": f"{len(lote.movimientos)} movimientos procesados"}
 
     except Exception as e:
@@ -138,7 +149,18 @@ async def traspaso_multiple(lote: LoteTraspaso):
 
         # D. Si TODO salió bien, guardamos cambios en MySQL
         connection.commit()
+
         mov_reg.registrar_movimiento(lote.usuario, f"Realizó traspaso a clean de {len(lote.movimientos)} items", "Traspasos")
+
+        # Enviamos notificación a Telegram
+        message = (
+            f"🔄 <b>Traspaso de Stock a Clean</b>\n\n"
+            f"• <b>Usuario:</b> {html.escape(lote.usuario)}\n"
+            f"• <b>Almacén:</b> {html.escape(lote.almacen)}\n"
+            f"• <b>Movimientos:</b> {len(lote.movimientos)}"
+        )
+        asyncio.create_task(send_telegram_alert(message))
+
         return {"status": "success", "mensaje": f"{len(lote.movimientos)} movimientos procesados"}
 
     except Exception as e:

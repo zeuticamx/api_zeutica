@@ -1,5 +1,5 @@
 import mysql.connector
-import base64
+import base64, html, asyncio
 from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
@@ -9,6 +9,7 @@ from typing import Optional, List
 import mov_reg
 from cotizacion_service import generar_nuevo_codigo, guardar_cotizacion_db
 from pdf_cotizacion import generar_pdf_cotizacion
+from servicios.telegram.notificacion import send_telegram_alert
 
 # Obtiene la ruta del directorio padre (la raíz)
 #sys.path.append(os.path.abspath(os.path.join(os.path.dirname(mov_reg.__file__), '..')))
@@ -78,6 +79,20 @@ async def genera_cotizacion(coti: CotizacionSchema):
             f"Generó y registró cotización: {coti.codigo_cotizacion}",
             "Cotizaciones",
         )
+
+        # Enviamos notificación a Telegram
+        empresa_safe = html.escape(str(coti.empresa))
+        usuario_safe = html.escape(str(coti.usuario))
+        codigo_safe = html.escape(str(coti.codigo_cotizacion))
+
+        message = (
+            f"📋 <b>Nueva cotización generada</b>\n\n"
+            f"• <b>Código:</b> <code>{codigo_safe}</code>\n"
+            f"• <b>Cliente:</b> {empresa_safe}\n"
+            f"• <b>Total:</b> <b>${coti.total:,.2f}</b>\n"
+            f"• <b>Usuario:</b> {usuario_safe}"
+        )
+        asyncio.create_task(send_telegram_alert(message))
 
         # Devolvemos el binario para que el navegador/cliente lo descargue.
         return Response(

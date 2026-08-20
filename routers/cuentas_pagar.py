@@ -1,9 +1,10 @@
-import mysql.connector
+import mysql.connector, html, asyncio
 from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException
 from datetime import date, timedelta
 import os
 from dotenv import load_dotenv
+from servicios.telegram.notificacion import send_telegram_alert
 
 router = APIRouter(tags=["/cuentas-pagar"], responses={404: {"Mensaje": "No encontrado"}})
 load_dotenv()
@@ -254,6 +255,16 @@ async def registrar_pago(datos: PagoProveedor):
         )
 
         conn.commit()
+
+        # Enviamos notificación a Telegram
+        message = (
+            f"💰 <b>Pago a proveedor registrado</b>\n\n"
+            f"• <b>ID Cuenta:</b> {html.escape(str(datos.id_cuenta))}\n"
+            f"• <b>Monto:</b> ${datos.monto:,.2f}\n"
+            f"• <b>Nuevo saldo pendiente:</b> ${nuevo_saldo:,.2f}\n"
+            f"• <b>Estado:</b> {html.escape(nuevo_estado)}"
+        )
+        asyncio.create_task(send_telegram_alert(message))
 
         return {
             "mensaje": "Pago registrado correctamente",

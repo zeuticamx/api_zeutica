@@ -1,11 +1,8 @@
-import mysql.connector
+import mysql.connector, os, mov_reg
 from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException
-import os, sys
 from dotenv import load_dotenv
 from typing import Optional
-import mov_reg
-
 
 router =APIRouter(tags=["/proveedores"],responses={404: {"Mensaje":"No encontrado"}})
 load_dotenv()

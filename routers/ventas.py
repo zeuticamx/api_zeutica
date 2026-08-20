@@ -1,8 +1,8 @@
-import mysql.connector
+import mysql.connector, os, mov_reg, html, asyncio
 from fastapi import APIRouter, HTTPException
-import os, mov_reg
 from pydantic import BaseModel
 from dotenv import load_dotenv
+from servicios.telegram.notificacion import send_telegram_alert
 
 router =APIRouter(tags=["/ventas"],responses={404: {"Mensaje":"No encontrado"}})
 load_dotenv() # Carga de credenciales .env
@@ -174,7 +174,15 @@ async def registrar_venta(venta: VentaSchema):
 
             # D. Confirmar cambios
             connection.commit()
-            mov_reg.registrar_movimiento(venta.usuario, f"Registró venta para SKU '{venta.sku}'", "Ventas")
+
+            mov_reg.registrar_movimiento(
+                venta.usuario,
+                f"Registró venta para SKU '{venta.sku}'",
+                "Ventas"
+            )
+
+            asyncio.create_task(send_telegram_alert(f"🔄 <b>Venta Registrada</b>\n\n• <b>Usuario:</b> {html.escape(venta.usuario)}\n• <b>SKU:</b> {html.escape(venta.sku)}\n• <b>Cantidad:</b> {venta.stock_bodega}\n• <b>Saldo Pendiente:</b> {saldo_inicial}"))
+
             return {
                 "message": "Venta aplicada exitosamente", 
                 "sku": venta.sku, 

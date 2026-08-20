@@ -1,9 +1,10 @@
-import mysql.connector
+import mysql.connector, html, asyncio
 from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException
 from typing import Optional, List
 import os, mov_reg
 from dotenv import load_dotenv
+from servicios.telegram.notificacion import send_telegram_alert
 
 router =APIRouter(tags=["/clientes"],responses={404: {"Mensaje":"No encontrado"}})
 load_dotenv()
@@ -202,8 +203,22 @@ async def cliente_nuevo(cliente: clienteRfc, usuario: str):
     try:
         cursor.execute(query, valores)
         conn.commit() # ¡Vital para guardar en MySQL!
+
         mov_reg.registrar_movimiento(usuario, f"Registró un nuevo cliente: {cliente.nombre}", "Clientes")
-        return {"mensaje": "Cliente agregado con éxito ", "id ": cursor.lastrowid}
+
+        # Enviamos notificación a Telegram
+        empresa_safe = html.escape(str(cliente.empresa))
+        usuario_safe = html.escape(str(cliente.usuario))
+
+        message = (
+            f"📋 <b>Cliente Nuevo Registrado</b>\n\n"
+            f"• <b>Código:</b> <code>{cursor.lastrowid}</code>\n"
+            f"• <b>Empresa:</b> {empresa_safe}\n"
+            f"• <b>Usuario:</b> {usuario_safe}"
+        )
+        asyncio.create_task(send_telegram_alert(message))
+
+        return {"mensaje": "Cliente agregado con éxito ", "id ": cursor.lastrowid , "nombre": cliente.nombre, "empresa": cliente.empresa, "usuario": cliente.usuario}
     
     except mysql.connector.Error as err:
         conn.rollback() # Si falla, cancelamos la operación
@@ -236,11 +251,25 @@ async def edit_cliente(cliente: clienteEditar, usuario: str):
 
     try:
         cursor.execute(query, valores)
-        conn.commit() # ¡Vital para guardar en MySQL!
-        mov_reg.registrar_movimiento(usuario, f"Actualizó el cliente: {cliente.nombre}", "Clientes")
+        conn.commit() # ¡Vital para guardar en MySQL!        
+
+        # Enviamos notificación a Telegram
+        empresa_safe = html.escape(str(cliente.empresa))
+        usuario_safe = html.escape(str(cliente.usuario))
+
+        message = (
+            f"📋 <b>Cliente Actualizado</b>\n\n"
+            f"• <b>Código:</b> <code>{cliente.id}</code>\n"
+            f"• <b>Empresa:</b> {empresa_safe}\n"
+            f"• <b>Usuario:</b> {usuario_safe}"
+        )
+        asyncio.create_task(send_telegram_alert(message))
+
         # Aquí checo si realmente se actualizó un registro
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail="Cliente no encontrado")
+
+        mov_reg.registrar_movimiento(usuario, f"Actualizó el cliente: {cliente.nombre}", "Clientes")
         
         return {"mensaje": "Cliente actualizado con éxito", "id": cliente.id}
     
