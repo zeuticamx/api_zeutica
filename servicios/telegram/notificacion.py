@@ -1,8 +1,11 @@
-import httpx
+import httpx, os
 import logging
+from dotenv import load_dotenv
 
-TELEGRAM_BOT_TOKEN = "8310554646:AAGh2Y2OmRRh-5mvlV_qyGJAfUyHPN8JkIo"
-TELEGRAM_CHAT_ID = "-5187355645"  # Puede ser ID de usuario o grupo (-100xxxx)
+load_dotenv()
+
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_GROUP_ID")
 
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
