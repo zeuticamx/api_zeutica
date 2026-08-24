@@ -412,6 +412,7 @@ async def editar_ubicacion(id: str, datos: UbicacionEditSchema):
 
     except mysql.connector.Error as err:
         conn.rollback()
+        print(f"Error al actualizar ubicación: {err}")
         raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
 
     finally:
@@ -517,6 +518,7 @@ async def obtener_ubicaciones_registro(sku: str):
         return ubicaciones
 
     except mysql.connector.Error as err:
+        print(f"Error al obtener ubicaciones registradas: {err}")
         raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
 
     finally:

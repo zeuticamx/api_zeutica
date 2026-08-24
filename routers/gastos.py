@@ -76,6 +76,27 @@ async def registrar_gasto(gasto: Gasto):
         cursor.close()
         conn.close()
 
+@router.get("/gastos") # Endpoint para listar todos los gastos operativos (dashboards/reportes)
+async def listar_gastos():
+    """
+    Devuelve todos los gastos operativos registrados, con fecha, sin filtrar por usuario.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        query = "SELECT descripcion, costo, cantidad, total, usuario_registro, fecha_registro FROM gastos ORDER BY fecha_registro DESC"
+        cursor.execute(query)
+        return cursor.fetchall()
+
+    except mysql.connector.Error as err:
+        print(f"Error en consulta: {err}")
+        raise HTTPException(status_code=500, detail=f"Error en consulta: {err}")
+
+    finally:
+        cursor.close()
+        conn.close()
+
 @router.get("/consultagastos") # Endpoint para consultar gastos del usuario actual
 async def cons_gastos(usuario: str):
     """
@@ -87,14 +108,14 @@ async def cons_gastos(usuario: str):
 
     try:
         if usuario == "fparra" or usuario == "gerencia":  # Usuarios con permisos para ver todos los gastos
-            query = "SELECT descripcion, costo, cantidad, total, usuario_registro FROM gastos ORDER BY fecha_registro DESC"
+            query = "SELECT descripcion, costo, cantidad, total, usuario_registro, fecha_registro FROM gastos ORDER BY fecha_registro DESC"
 
             cursor.execute(query)
             registros = cursor.fetchall()
 
         else:
             # Aquí traigo solo los gastos del usuario que consulta
-            query = "SELECT descripcion, costo, cantidad, total, usuario_registro FROM gastos WHERE usuario_registro = %s ORDER BY fecha_registro DESC"    
+            query = "SELECT descripcion, costo, cantidad, total, usuario_registro, fecha_registro FROM gastos WHERE usuario_registro = %s ORDER BY fecha_registro DESC"    
     
             cursor.execute(query, (usuario,))
             registros = cursor.fetchall()

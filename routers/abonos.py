@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException
 import os
 from dotenv import load_dotenv
 import mov_reg
+import notificaciones_service
 from servicios.telegram.notificacion import send_telegram_alert
 
 # Obtiene la ruta del directorio padre (la raíz)
@@ -126,19 +127,22 @@ async def registrar_abono(abono: abono): # Cambié el nombre de la función para
         mov_reg.registrar_movimiento(abono.usuario, f"Registró un abono de {abono.saldo_abonado} para la venta {abono.id_ventas}", "Abonos")
 
         # --- seccion de notificaciones ---
+        # Guarda en MySQL y empuja por WebSocket al empleado 2 si esta conectado.
         if saldo_restante <= 0:
-            cursor.execute(
-                "INSERT INTO notificaciones (empleado_id, titulo, mensaje, tipo) VALUES (%s, %s, %s, %s)",
-                (2, "Deuda Saldada", f"La venta {abono.id_ventas} ha sido liquidada totalmente. usuario: {abono.usuario}", "credito")
+            await notificaciones_service.crear_y_notificar(
+                2,
+                "Deuda Saldada",
+                f"La venta {abono.id_ventas} ha sido liquidada totalmente. usuario: {abono.usuario}",
+                "credito"
             )
-            conn.commit()
             return {"mensaje": "Deuda saldada", "saldo_pendiente": 0}
 
-        cursor.execute(
-            "INSERT INTO notificaciones (empleado_id, titulo, mensaje, tipo) VALUES (%s, %s, %s, %s)",
-            (2, "Abono Realizado", f"Se ha realizado un abono para la venta {abono.id_ventas}. usuario: {abono.usuario}", "credito")
+        await notificaciones_service.crear_y_notificar(
+            2,
+            "Abono Realizado",
+            f"Se ha realizado un abono para la venta {abono.id_ventas}. usuario: {abono.usuario}",
+            "credito"
         )
-        conn.commit()
         return {"mensaje": "Abono realizado", "saldo_pendiente": saldo_restante}
 
     except mysql.connector.Error as err:
