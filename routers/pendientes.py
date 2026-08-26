@@ -172,3 +172,50 @@ async def eliminar_pendiente(id_pendiente: int):
     finally:
         cursor.close()
         conn.close()
+
+# Endpoints para notificar por telegram cuando un pendiente es tomado o terminado
+@router.post("/pendientes-tomar/{id_pendiente}")
+async def tomar_pendiente(id_pendiente: int, observaciones: str, usuario: str):
+    """
+    Tomo un pendiente y notifico por telegram.
+
+    """   
+    try:
+            # Enviamos notificación a Telegram
+        message = (
+            f"✅ <b>Pendiente Tomado</b>\n\n"
+            f"• <b>ID:</b> {html.escape(str(id_pendiente))}\n"
+            f"• <b>Usuario:</b> {html.escape(usuario)}\n"
+            f"• <b>Observaciones:</b> {html.escape(observaciones)}\n"
+            f"• <b>Estado:</b> En Proceso"
+        )
+        asyncio.create_task(send_telegram_alert(message))
+
+        return {"mensaje": "Pendiente tomado exitosamente."}
+
+    except mysql.connector.Error as err:
+        print(f"Error en telegram: {err}")
+        raise HTTPException(status_code=500, detail="Error en modulo telegram")  
+    
+@router.post("/pendientes-terminar/{id_pendiente}")
+async def terminar_pendiente(id_pendiente: int, observaciones: str, usuario: str):
+    """
+    Termino un pendiente y notifico por telegram.
+
+    """   
+    try:
+            # Enviamos notificación a Telegram
+        message = (
+            f"✅ <b>Pendiente Terminado</b>\n\n"
+            f"• <b>ID:</b> {html.escape(str(id_pendiente))}\n"
+            f"• <b>Usuario:</b> {html.escape(usuario)}\n"
+            f"• <b>Observaciones:</b> {html.escape(observaciones)}\n"
+            f"• <b>Estado:</b> Terminado"
+        )
+        asyncio.create_task(send_telegram_alert(message))
+
+        return {"mensaje": "Pendiente terminado exitosamente."}
+
+    except mysql.connector.Error as err:
+        print(f"Error en telegram: {err}")
+        raise HTTPException(status_code=500, detail="Error en modulo telegram")    
