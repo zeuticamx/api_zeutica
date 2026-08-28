@@ -181,7 +181,24 @@ async def registrar_venta(venta: VentaSchema):
                 "Ventas"
             )
 
-            asyncio.create_task(send_telegram_alert(f"🔄 <b>Venta Registrada</b>\n\n• <b>Usuario:</b> {html.escape(venta.usuario)}\n• <b>SKU:</b> {html.escape(venta.sku)}\n• <b>Cantidad:</b> {venta.stock_bodega}\n• <b>Saldo Pendiente:</b> {saldo_inicial}"))
+            asyncio.create_task(send_telegram_alert(
+                f"🔄 <b>Venta Registrada</b>\n\n"
+                f"• <b>ID Venta:</b> {venta.id_venta}\n"
+                f"• <b>Usuario:</b> {html.escape(venta.usuario)}\n"
+                f"• <b>SKU:</b> {html.escape(venta.sku)}\n"
+                f"• <b>Producto:</b> {html.escape(venta.producto)}\n"
+                f"• <b>Cantidad:</b> {venta.stock_bodega}\n"
+                f"• <b>Precio Unitario:</b> ${venta.precio:,.2f}\n"
+                f"• <b>Total:</b> ${total_operacion:,.2f}\n"                
+                f"• <b>Nombre Comprador:</b> {html.escape(venta.nombreComprador)}\n"
+                f"• <b>Otros:</b> {html.escape(venta.otros)}\n"
+                f"• <b>Plataforma:</b> {html.escape(venta.plataforma)}\n"
+                f"• <b>Fecha:</b> {html.escape(venta.fecha)}\n"
+                f"• <b>Usuario Registro:</b> {html.escape(venta.usuario)}\n"
+                f"• <b>Condición de Pago:</b> {html.escape(venta.condicion_pago)}\n"
+                f"• <b>Saldo Inicial:</b> ${saldo_inicial:,.2f}\n"
+                f"• <b>Saldo Pendiente:</b> ${saldo_inicial:,.2f}"
+            ))
 
             return {
                 "message": "Venta aplicada exitosamente", 

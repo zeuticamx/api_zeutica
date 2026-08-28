@@ -65,14 +65,14 @@ async def traspaso_multiple(lote: LoteTraspaso):
         # D. Si TODO salió bien, guardamos cambios en MySQL
         connection.commit()
 
-        mov_reg.registrar_movimiento(lote.usuario, f"Realizó traspaso de {len(lote.movimientos)} items", "Traspasos")
+        mov_reg.registrar_movimiento(lote.usuario, f"Realizó traspaso de full {chr(10).join(f'• SKU: {s.sku}, Cantidad: {s.stock_bodega}' for s in lote.movimientos)} items", "Traspasos")
 
         # Enviamos notificación a Telegram
         message = (
             f"🔄 <b>Traspaso de Stock</b>\n\n"
             f"• <b>Usuario:</b> {html.escape(lote.usuario)}\n"
             f"• <b>Almacén:</b> {html.escape(lote.almacen)}\n"
-            f"• <b>Movimientos:</b> {len(lote.movimientos)}"
+            f"• <b>Movimientos:</b> \n{chr(10).join(f'• SKU: {s.sku}, Cantidad: {s.stock_bodega}' for s in lote.movimientos)}\n"
         )
         asyncio.create_task(send_telegram_alert(message))
 
@@ -150,14 +150,14 @@ async def traspaso_multiple(lote: LoteTraspaso):
         # D. Si TODO salió bien, guardamos cambios en MySQL
         connection.commit()
 
-        mov_reg.registrar_movimiento(lote.usuario, f"Realizó traspaso a clean de {len(lote.movimientos)} items", "Traspasos")
+        mov_reg.registrar_movimiento(lote.usuario, f"Realizó traspaso a clean de {chr(10).join(f'• SKU: {s.sku}, Cantidad: {s.stock_bodega}' for s in lote.movimientos)} items", "Traspasos")
 
         # Enviamos notificación a Telegram
         message = (
             f"🔄 <b>Traspaso de Stock a Clean</b>\n\n"
             f"• <b>Usuario:</b> {html.escape(lote.usuario)}\n"
             f"• <b>Almacén:</b> {html.escape(lote.almacen)}\n"
-            f"• <b>Movimientos:</b> {len(lote.movimientos)}"
+            f"• <b>Movimientos:</b> \n{chr(10).join(f'• SKU: {s.sku}, Cantidad: {s.stock_bodega}' for s in lote.movimientos)}\n"
         )
         asyncio.create_task(send_telegram_alert(message))
 

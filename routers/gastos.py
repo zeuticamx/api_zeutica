@@ -56,7 +56,7 @@ async def registrar_gasto(gasto: Gasto):
 
         mov_reg.registrar_movimiento(gasto.usuario_registro, f"Registró un gasto: {gasto.descripcion} por {gasto.costo * gasto.cantidad}", "Gastos")
 
-        # Enviamos notificación a Telegram
+        """
         message = (
             f"💸 <b>Gasto Registrado</b>\n\n"
             f"• <b>Descripción:</b> {html.escape(gasto.descripcion)}\n"
@@ -66,7 +66,8 @@ async def registrar_gasto(gasto: Gasto):
             f"• <b>Usuario:</b> {html.escape(gasto.usuario_registro)}"
         )
         asyncio.create_task(send_telegram_alert(message))
-
+        """
+        
         return {"mensaje": "Gasto registrado exitosamente"}
     
     except mysql.connector.Error as err:

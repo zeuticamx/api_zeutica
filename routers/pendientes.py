@@ -173,9 +173,18 @@ async def eliminar_pendiente(id_pendiente: int):
         cursor.close()
         conn.close()
 
+class pendientes(BaseModel):
+    id_pendiente: int
+    usuario: str
+    actividad: str
+    prioridad: str  
+    estado: str
+    observaciones: Optional[str] = None
+    fecha_promesa: Optional[date] = None
+
 # Endpoints para notificar por telegram cuando un pendiente es tomado o terminado
 @router.post("/pendientes-tomar/{id_pendiente}")
-async def tomar_pendiente(id_pendiente: int, observaciones: str, usuario: str):
+async def tomar_pendiente(act: pendientes):
     """
     Tomo un pendiente y notifico por telegram.
 
@@ -184,11 +193,15 @@ async def tomar_pendiente(id_pendiente: int, observaciones: str, usuario: str):
             # Enviamos notificación a Telegram
         message = (
             f"✅ <b>Pendiente Tomado</b>\n\n"
-            f"• <b>ID:</b> {html.escape(str(id_pendiente))}\n"
-            f"• <b>Usuario:</b> {html.escape(usuario)}\n"
-            f"• <b>Observaciones:</b> {html.escape(observaciones)}\n"
-            f"• <b>Estado:</b> En Proceso"
+            f"• <b>ID:</b> {html.escape(str(act.id_pendiente))}\n"
+            f"• <b>Usuario:</b> {html.escape(act.usuario)}\n"
+            f"• <b>Actividad:</b> {html.escape(act.actividad)}\n"
+            f"• <b>Prioridad:</b> {html.escape(act.prioridad)}\n"
+            f"• <b>Estado:</b> {html.escape(act.estado)}\n"
+            f"• <b>Observaciones:</b> {html.escape(act.observaciones)}\n"
+            f"• <b>Fecha Promesa:</b> {html.escape(str(act.fecha_promesa))}"
         )
+        
         asyncio.create_task(send_telegram_alert(message))
 
         return {"mensaje": "Pendiente tomado exitosamente."}
@@ -198,7 +211,7 @@ async def tomar_pendiente(id_pendiente: int, observaciones: str, usuario: str):
         raise HTTPException(status_code=500, detail="Error en modulo telegram")  
     
 @router.post("/pendientes-terminar/{id_pendiente}")
-async def terminar_pendiente(id_pendiente: int, observaciones: str, usuario: str):
+async def terminar_pendiente(act: pendientes):
     """
     Termino un pendiente y notifico por telegram.
 
@@ -207,10 +220,13 @@ async def terminar_pendiente(id_pendiente: int, observaciones: str, usuario: str
             # Enviamos notificación a Telegram
         message = (
             f"✅ <b>Pendiente Terminado</b>\n\n"
-            f"• <b>ID:</b> {html.escape(str(id_pendiente))}\n"
-            f"• <b>Usuario:</b> {html.escape(usuario)}\n"
-            f"• <b>Observaciones:</b> {html.escape(observaciones)}\n"
-            f"• <b>Estado:</b> Terminado"
+            f"• <b>ID:</b> {html.escape(str(act.id_pendiente))}\n"
+            f"• <b>Usuario:</b> {html.escape(act.usuario)}\n"
+            f"• <b>Actividad:</b> {html.escape(act.actividad)}\n"
+            f"• <b>Prioridad:</b> {html.escape(act.prioridad)}\n"
+            f"• <b>Estado:</b> {html.escape(act.estado)}\n"
+            f"• <b>Observaciones:</b> {html.escape(act.observaciones)}\n"
+            f"• <b>Fecha Promesa:</b> {html.escape(str(act.fecha_promesa))}"
         )
         asyncio.create_task(send_telegram_alert(message))
 
