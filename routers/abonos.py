@@ -114,6 +114,7 @@ async def registrar_abono(abono: abono): # Cambié el nombre de la función para
         id_safe = html.escape(str(abono.id_ventas))
         usuario_safe = html.escape(str(abono.usuario))
         saldo_safe = html.escape(str(abono.saldo_abonado))
+        saldo_safe = float(saldo_safe)
 
         message = (
             f"📋 <b>Nuevo Abono generado</b>\n\n"
