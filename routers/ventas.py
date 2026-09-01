@@ -87,7 +87,7 @@ async def verificar_venta():
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
-    query = "SELECT id_ventas, sku, producto, cantidad, nombreComprador, saldo_pendiente, fecha, fecha_vencimiento FROM ventasRegistro WHERE saldo_pendiente > 0 "
+    query = "SELECT id_ventas, sku, producto, cantidad, nombreComprador, saldo_pendiente, fecha_vencimiento FROM ventasRegistro WHERE saldo_pendiente > 0 "
 
     try:
         cursor.execute(query)

@@ -33,28 +33,46 @@ class abono(BaseModel):
 @router.get("/abonos-registro")
 async def listar_abonos():
     """
-    Traigo todos los abonos y les pego los datos de la venta por el FK id_ventas.
-    Así en una sola lista veo qué se abonó y de qué venta vino.
+    Cartera de crédito: una fila por venta con saldo pendiente, ya con sus abonos
+    sumados. Uso LEFT JOIN para no perder las ventas que todavía no tienen abonos,
+    y agrupo para no repetir la venta una vez por cada abono.
     """
     conn = get_db_connection()
     # Uso dictionary=True para devolver llaves nombradas y armar el JSON directo
     cursor = conn.cursor(dictionary=True)
 
-    # JOIN por el FK id_ventas: del abono saco el saldo abonado, de la venta el resto
+    # Salgo de ventasRegistro (la cartera) y agrupo por venta: una venta de varios
+    # productos tiene una fila por partida y en cobranza se cobra completa.
+    # Los abonos van pre-agregados en subconsulta; si los cruzara directo, cada
+    # partida se multiplicaría por cada abono e inflaría los totales.
+    # TRIM porque hay ids capturados con espacios que si no parten la misma venta.
     query_join = """
         SELECT
-            a.id,
-            a.id_ventas,
-            a.saldo_abonado,
-            v.sku,
-            v.producto,
-            v.cantidad,
-            v.precio,
-            v.nombreComprador,
-            v.saldo_pendiente
-        FROM abonos a
-        INNER JOIN ventasRegistro v ON a.id_ventas = v.id_ventas
-        ORDER BY a.id DESC
+            MIN(v.id)                            AS id_registro,
+            TRIM(v.id_ventas)                    AS id_ventas,
+            SUM(v.total)                         AS total,
+            MIN(v.nombreComprador)               AS nombreComprador,
+            COUNT(*)                             AS partidas,
+            GROUP_CONCAT(DISTINCT v.sku ORDER BY v.sku SEPARATOR ', ') AS skus,
+            SUM(v.saldo_pendiente)               AS saldo_pendiente,
+            MIN(v.fecha_vencimiento)             AS fecha_vencimiento,
+            MIN(v.fecha)                         AS fecha,
+            COALESCE(MAX(ab.abonado), 0)         AS abonado,
+            COALESCE(MAX(ab.num_abonos), 0)      AS num_abonos,
+            MAX(ab.ultimo_abono)                 AS ultimo_abono
+        FROM ventasRegistro v
+        LEFT JOIN (
+            SELECT
+                TRIM(id_ventas)      AS id_ventas,
+                SUM(saldo_abonado)   AS abonado,
+                COUNT(*)             AS num_abonos,
+                MAX(fecha_registro)  AS ultimo_abono
+            FROM abonos
+            GROUP BY TRIM(id_ventas)
+        ) ab ON ab.id_ventas = TRIM(v.id_ventas)
+        WHERE v.saldo_pendiente > 0
+        GROUP BY TRIM(v.id_ventas)
+        ORDER BY MIN(v.fecha_vencimiento) IS NULL, MIN(v.fecha_vencimiento) ASC, MIN(v.id) DESC;
     """
 
     try:
