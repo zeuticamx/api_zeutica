@@ -50,11 +50,11 @@ async def listar_abonos():
         SELECT
             MIN(v.id)                            AS id_registro,
             TRIM(v.id_ventas)                    AS id_ventas,
-            SUM(v.total)                         AS total,
+            MAX(v.total)                         AS total, -- Corregido: MAX en lugar de SUM
             MIN(v.nombreComprador)               AS nombreComprador,
             COUNT(*)                             AS partidas,
             GROUP_CONCAT(DISTINCT v.sku ORDER BY v.sku SEPARATOR ', ') AS skus,
-            SUM(v.saldo_pendiente)               AS saldo_pendiente,
+            MAX(v.saldo_pendiente)               AS saldo_pendiente, -- Corregido: MAX en lugar de SUM
             MIN(v.fecha_vencimiento)             AS fecha_vencimiento,
             MIN(v.fecha)                         AS fecha,
             COALESCE(MAX(ab.abonado), 0)         AS abonado,
