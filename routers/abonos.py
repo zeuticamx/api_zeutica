@@ -47,32 +47,51 @@ async def listar_abonos():
     # partida se multiplicaría por cada abono e inflaría los totales.
     # TRIM porque hay ids capturados con espacios que si no parten la misma venta.
     query_join = """
-        SELECT
-            MIN(v.id)                            AS id_registro,
-            TRIM(v.id_ventas)                    AS id_ventas,
-            MAX(v.total)                         AS total, -- Corregido: MAX en lugar de SUM
-            MIN(v.nombreComprador)               AS nombreComprador,
-            COUNT(*)                             AS partidas,
-            GROUP_CONCAT(DISTINCT v.sku ORDER BY v.sku SEPARATOR ', ') AS skus,
-            MAX(v.saldo_pendiente)               AS saldo_pendiente, -- Corregido: MAX en lugar de SUM
-            MIN(v.fecha_vencimiento)             AS fecha_vencimiento,
-            MIN(v.fecha)                         AS fecha,
-            COALESCE(MAX(ab.abonado), 0)         AS abonado,
-            COALESCE(MAX(ab.num_abonos), 0)      AS num_abonos,
-            MAX(ab.ultimo_abono)                 AS ultimo_abono
-        FROM ventasRegistro v
-        LEFT JOIN (
-            SELECT
-                TRIM(id_ventas)      AS id_ventas,
-                SUM(saldo_abonado)   AS abonado,
-                COUNT(*)             AS num_abonos,
-                MAX(fecha_registro)  AS ultimo_abono
-            FROM abonos
-            GROUP BY TRIM(id_ventas)
-        ) ab ON ab.id_ventas = TRIM(v.id_ventas)
-        WHERE v.saldo_pendiente > 0
-        GROUP BY TRIM(v.id_ventas)
-        ORDER BY MIN(v.fecha_vencimiento) IS NULL, MIN(v.fecha_vencimiento) ASC, MIN(v.id) DESC;
+    SELECT 
+        v.id_registro,
+        v.id_ventas,
+        v.total,
+        v.nombreComprador,
+        v.partidas,
+        v.skus,
+        v.saldo_pendiente,
+        v.fecha_vencimiento,
+        v.fecha,
+        COALESCE(ab.abonado, 0) AS abonado,
+        COALESCE(ab.num_abonos, 0) AS num_abonos,
+        ab.ultimo_abono
+    FROM (
+        -- 1. Agrupamos EXCLUSIVAMENTE las ventas primero
+        SELECT 
+            MIN(id) AS id_registro,
+            TRIM(id_ventas) AS id_ventas,
+            MAX(total) AS total,
+            MIN(nombreComprador) AS nombreComprador,
+            COUNT(*) AS partidas,
+            GROUP_CONCAT(DISTINCT sku ORDER BY sku SEPARATOR ', ') AS skus,
+            MAX(saldo_pendiente) AS saldo_pendiente,
+            MIN(fecha_vencimiento) AS fecha_vencimiento,
+            MIN(fecha) AS fecha
+        FROM ventasRegistro
+        WHERE saldo_pendiente > 0
+        GROUP BY TRIM(id_ventas)
+    ) v
+    LEFT JOIN (
+        -- 2. Agrupamos EXCLUSIVAMENTE los abonos
+        SELECT 
+            TRIM(id_ventas) AS id_ventas,
+            SUM(saldo_abonado) AS abonado,
+            COUNT(*) AS num_abonos,
+            MAX(fecha_registro) AS ultimo_abono
+        FROM abonos
+        GROUP BY TRIM(id_ventas)
+    ) ab ON v.id_ventas = ab.id_ventas
+    
+    -- 3. Ordenamiento final
+    ORDER BY 
+        v.fecha_vencimiento IS NULL, 
+        v.fecha_vencimiento ASC, 
+        v.id_registro DESC;
     """
 
     try:
