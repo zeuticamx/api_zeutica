@@ -109,42 +109,49 @@ async def listar_abonos():
         conn.close()
 
 @router.post("/abonos")
-async def registrar_abono(abono: abono): # Cambié el nombre de la función para que sea más descriptivo
+async def registrar_abono(abono: abono):
     """
-    Agrega abono de saldo a crédito para clientes con este beneficio
+    Agrega abono de saldo a crédito para clientes con este beneficio.
+    Reglas blindadas en backend (sin triggers).
     """
     conn = get_db_connection()
-    # Forzamos dictionary=False aquí para asegurar que fetchone() devuelva una tupla indexada por posición
-    cursor = conn.cursor(dictionary=False) 
-
-    query_insert = """
-        INSERT INTO abonos (id_ventas, saldo_abonado) 
-        VALUES (%s, %s)
-    """
-    valores_insert = (str(abono.id_ventas), abono.saldo_abonado)
+    cursor = conn.cursor(dictionary=False)
 
     try:
-        # 1. Registrar el abono en el historial
-        cursor.execute(query_insert, valores_insert)
-
-        # 2. Restar lo abonado al saldo pendiente (Forzamos a string el id_ventas para evitar el 1292)
-        query_update = "UPDATE ventasRegistro SET saldo_pendiente = saldo_pendiente - %s WHERE id_ventas = %s"
-        cursor.execute(query_update, (abono.saldo_abonado, str(abono.id_ventas)))
-
-        # 3. Consultar el saldo que quedó
-        query_select = "SELECT saldo_pendiente FROM ventasRegistro WHERE id_ventas = %s"
-        cursor.execute(query_select, (str(abono.id_ventas),))
+        # 1. Obtenemos el saldo actual de la venta (MAX para evitar problemas de múltiples SKUs)
+        query_check = "SELECT MAX(saldo_pendiente) FROM ventasRegistro WHERE id_ventas = %s"
+        cursor.execute(query_check, (str(abono.id_ventas),))
         res = cursor.fetchone()
 
-        # 4. Validar la respuesta ANTES de hacer el commit definitivo
-        if res is None:
-            conn.rollback() # Si la venta no existe, deshacemos el INSERT que hicimos arriba
-            raise HTTPException(status_code=404, detail="Venta no encontrada en ventasRegistro")
+        # REGLA 1: Validamos si la venta no existe en la tabla
+        if res[0] is None:
+            raise HTTPException(status_code=404, detail="Operación rechazada: No se encontró el id_ventas.")
+        
+        saldo_actual = float(res[0])
 
-        # Como forzamos dictionary=False, res[0] es completamente seguro
-        saldo_restante = res[0]
+        # REGLA 2: Validamos si la venta ya está liquidada
+        if saldo_actual <= 0:
+            raise HTTPException(status_code=400, detail="Operación rechazada: La venta ya fue liquidada.")
+        
+        # REGLA 3: Validamos que el abono no deje el saldo en negativo
+        if (saldo_actual - abono.saldo_abonado) < 0:
+            raise HTTPException(status_code=400, detail="Operación rechazada: El abono es mayor al saldo pendiente actual.")
 
-        # 5. Si todo está perfecto, guardamos los cambios en la base de datos de AWS
+        # 2. Si pasó todas las reglas, hacemos el UPDATE para restar el abono
+        query_update = "UPDATE ventasRegistro SET saldo_pendiente = saldo_pendiente - %s WHERE TRIM(id_ventas) = %s"
+        cursor.execute(query_update, (abono.saldo_abonado, str(abono.id_ventas)))
+
+        # 3. Registramos el abono en el historial
+        query_insert = """
+            INSERT INTO abonos (id_ventas, saldo_abonado) 
+            VALUES (%s, %s)
+        """
+        cursor.execute(query_insert, (str(abono.id_ventas), abono.saldo_abonado))
+
+        # Calculamos el saldo restante matemáticamente para las notificaciones
+        saldo_restante = saldo_actual - abono.saldo_abonado
+
+        # 4. Confirmamos la transacción (Se guardan el UPDATE y el INSERT al mismo tiempo)
         conn.commit()
 
         # Enviamos notificación a Telegram
@@ -161,11 +168,10 @@ async def registrar_abono(abono: abono): # Cambié el nombre de la función para
         )
         asyncio.create_task(send_telegram_alert(message))
 
-        # Registramos el movimiento en el historial de movimientos
+        # Registramos el movimiento en el historial
         mov_reg.registrar_movimiento(abono.usuario, f"Registró un abono de {abono.saldo_abonado} para la venta {abono.id_ventas}", "Abonos")
 
-        # --- seccion de notificaciones ---
-        # Guarda en MySQL y empuja por WebSocket al empleado 2 si esta conectado.
+        # --- sección de notificaciones ---
         if saldo_restante <= 0:
             await notificaciones_service.crear_y_notificar(
                 2,
