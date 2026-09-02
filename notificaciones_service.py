@@ -124,6 +124,36 @@ def marcar_leida(notificacion_id: int) -> bool:
             conn.close()
 
 
+def id_de_usuario(nombre_usuario: str) -> Optional[int]:
+    """
+    `usuarios.id` a partir del nombre de login. Es el mismo id que usan
+    `notificaciones.empleado_id` y el indice del manager WebSocket, asi que sirve
+    para dirigir una notificacion cuando el router solo tiene el nombre del
+    usuario que hizo el movimiento. None si el usuario no existe.
+    """
+    if not nombre_usuario:
+        return None
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(
+            "SELECT id FROM usuarios WHERE nombre_usuario = %s",
+            (nombre_usuario,)
+        )
+        fila = cursor.fetchone()
+        return fila["id"] if fila else None
+    except mysql.connector.Error as err:
+        print(f"Error interno DB (id_de_usuario): {err}")
+        return None
+    finally:
+        if cursor:
+            cursor.close()
+        if conn and conn.is_connected():
+            conn.close()
+
+
 def crear(empleado_id: int, titulo: str, mensaje: str, tipo: str) -> Optional[dict]:
     """
     Inserta la notificacion y devuelve la fila ya serializada (con su id y

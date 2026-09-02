@@ -407,6 +407,13 @@ async def editar_embarque(embarque_id: int, payload: EmbarqueCabeceraIn):
     cursor = conn.cursor()
 
     try:
+        # La existencia se valida con SELECT, no con rowcount del UPDATE: si solo
+        # cambian invoices/proveedores la cabecera queda igual y MySQL reporta
+        # 0 filas afectadas, lo que devolvia un 404 falso.
+        cursor.execute("SELECT id FROM embarques WHERE id = %s", (embarque_id,))
+        if cursor.fetchone() is None:
+            raise HTTPException(status_code=404, detail="Embarque no encontrado")
+
         cursor.execute(
             """
             UPDATE embarques
@@ -419,9 +426,6 @@ async def editar_embarque(embarque_id: int, payload: EmbarqueCabeceraIn):
                 payload.fecha_llegada_real, payload.fecha_de_recibido, embarque_id
             )
         )
-
-        if cursor.rowcount == 0:
-            raise HTTPException(status_code=404, detail="Embarque no encontrado")
 
         cursor.execute("DELETE FROM embarque_invoices WHERE embarque_id = %s", (embarque_id,))
         for invoice in payload.invoices:
@@ -462,6 +466,12 @@ async def eliminar_embarque(embarque_id: int, usuario: str = "sistema"):
     cursor = conn.cursor()
 
     try:
+        # Se valida antes de borrar: si se valida despues del commit, un id
+        # inexistente igual dispara el borrado de sus hijos huerfanos.
+        cursor.execute("SELECT id FROM embarques WHERE id = %s", (embarque_id,))
+        if cursor.fetchone() is None:
+            raise HTTPException(status_code=404, detail="Embarque no encontrado")
+
         cursor.execute("DELETE FROM embarque_invoices WHERE embarque_id = %s", (embarque_id,))
         cursor.execute("DELETE FROM embarque_proveedores WHERE embarque_id = %s", (embarque_id,))
         cursor.execute("DELETE FROM embarque_items WHERE embarque_id = %s", (embarque_id,))
@@ -469,9 +479,6 @@ async def eliminar_embarque(embarque_id: int, usuario: str = "sistema"):
         cursor.execute("DELETE FROM embarque_estatus WHERE embarque_id = %s", (embarque_id,))
         cursor.execute("DELETE FROM embarques WHERE id = %s", (embarque_id,))
         conn.commit()
-
-        if cursor.rowcount == 0:
-            raise HTTPException(status_code=404, detail="Embarque no encontrado")
 
         mov_reg.registrar_movimiento(usuario, f"Elimino embarque #{embarque_id}", "Importaciones")
         return {"mensaje": "Embarque eliminado exitosamente"}
@@ -525,15 +532,21 @@ async def editar_item(embarque_id: int, item_id: int, item: EmbarqueItemIn):
     cursor = conn.cursor()
 
     try:
+        # Igual que en editar_embarque: rowcount 0 tambien significa "sin cambios",
+        # no solo "no existe"; guardar el item sin modificarlo daba un 404 falso.
+        cursor.execute(
+            "SELECT id FROM embarque_items WHERE id = %s AND embarque_id = %s",
+            (item_id, embarque_id)
+        )
+        if cursor.fetchone() is None:
+            raise HTTPException(status_code=404, detail="Item no encontrado en este embarque")
+
         cursor.execute(
             "UPDATE embarque_items SET sku = %s, qty = %s, cbm = %s, pct_contenedor = %s "
             "WHERE id = %s AND embarque_id = %s",
             (item.sku, item.qty, item.cbm, item.pct_contenedor, item_id, embarque_id)
         )
         conn.commit()
-
-        if cursor.rowcount == 0:
-            raise HTTPException(status_code=404, detail="Item no encontrado en este embarque")
 
         return {"mensaje": "Item actualizado exitosamente"}
 

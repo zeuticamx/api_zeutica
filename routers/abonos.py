@@ -30,6 +30,29 @@ class abono(BaseModel):
     id_ventas: int
     saldo_abonado: float
 
+
+# Usuario de cobranza que debe enterarse de todos los abonos, sea quien sea que
+# los capture. Se resuelve por nombre y no por id fijo: antes iba hardcodeado al
+# id 2 y cualquier otro usuario (fparra, ventas) no recibia nada por WebSocket
+# ni lo veia en su snapshot, porque `no_leidas` filtra por empleado_id.
+USUARIO_COBRANZA = "gerencia"
+
+
+async def notificar_abono(usuario: str, titulo: str, mensaje: str) -> None:
+    """
+    Manda la notificacion a cobranza y a quien registro el abono (sin duplicar
+    si son el mismo). Los destinatarios que no existan en `usuarios` se ignoran:
+    la notificacion no es critica y no debe tumbar el abono ya commiteado.
+    """
+    destinatarios = []
+    for nombre in (USUARIO_COBRANZA, usuario):
+        empleado_id = notificaciones_service.id_de_usuario(nombre)
+        if empleado_id is not None and empleado_id not in destinatarios:
+            destinatarios.append(empleado_id)
+
+    for empleado_id in destinatarios:
+        await notificaciones_service.crear_y_notificar(empleado_id, titulo, mensaje, "credito")
+
 @router.get("/abonos-registro")
 async def listar_abonos():
     """
@@ -152,40 +175,24 @@ async def registrar_abono(abono: abono):
         saldo_restante = saldo_actual - abono.saldo_abonado
 
         # 4. Confirmamos la transacción (Se guardan el UPDATE y el INSERT al mismo tiempo)
-        conn.commit()
-
-        # Enviamos notificación a Telegram
-        id_safe = html.escape(str(abono.id_ventas))
-        usuario_safe = html.escape(str(abono.usuario))
-        saldo_safe = html.escape(str(abono.saldo_abonado))
-        saldo_safe = float(saldo_safe)
-
-        message = (
-            f"📋 <b>Nuevo Abono generado</b>\n\n"
-            f"• <b>Código:</b> <code>{id_safe}</code>\n"           
-            f"• <b>Saldo Abonado:</b> <b>${saldo_safe:,.2f}</b>\n"
-            f"• <b>Usuario:</b> {usuario_safe}"
-        )
-        asyncio.create_task(send_telegram_alert(message))
+        conn.commit()        
 
         # Registramos el movimiento en el historial
         mov_reg.registrar_movimiento(abono.usuario, f"Registró un abono de {abono.saldo_abonado} para la venta {abono.id_ventas}", "Abonos")
 
         # --- sección de notificaciones ---
         if saldo_restante <= 0:
-            await notificaciones_service.crear_y_notificar(
-                2,
+            await notificar_abono(
+                abono.usuario,
                 "Deuda Saldada",
-                f"La venta {abono.id_ventas} ha sido liquidada totalmente. usuario: {abono.usuario}",
-                "credito"
+                f"La venta {abono.id_ventas} ha sido liquidada totalmente. usuario: {abono.usuario}"
             )
             return {"mensaje": "Deuda saldada", "saldo_pendiente": 0}
 
-        await notificaciones_service.crear_y_notificar(
-            2,
+        await notificar_abono(
+            abono.usuario,
             "Abono Realizado",
-            f"Se ha realizado un abono para la venta {abono.id_ventas}. usuario: {abono.usuario}",
-            "credito"
+            f"Se ha realizado un abono para la venta {abono.id_ventas}. usuario: {abono.usuario}"
         )
         return {"mensaje": "Abono realizado", "saldo_pendiente": saldo_restante}
 
