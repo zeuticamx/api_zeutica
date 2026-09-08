@@ -24,7 +24,7 @@ class traspaso(BaseModel): # molde para recibir informacion de traspaso
 class LoteTraspaso(BaseModel):
     usuario: str
     movimientos: List[traspaso]
-    almacen: str
+    #almacen: str
 
 @router.post("/traspaso")
 async def traspaso_multiple(lote: LoteTraspaso):
@@ -50,16 +50,15 @@ async def traspaso_multiple(lote: LoteTraspaso):
             # B. Actualización doble: Resta de 'cantidad', suma a 'full'
             sql_update = """
                 UPDATE productos 
-                SET stock_bodega = stock_bodega - %s, 
-                    stock_full = stock_full + %s 
+                SET stock_bodega = stock_bodega - %s                     
                 WHERE sku = %s
             """
-            cursor.execute(sql_update, (item.stock_bodega,item.stock_bodega, item.sku))
+            cursor.execute(sql_update, (item.stock_bodega, item.sku))
 
             # C. Historial
             cursor.execute(
-                "INSERT INTO stock_actual (sku, cantidad, almacen, usuario) VALUES (%s, %s, %s, %s)",
-                (item.sku, item.stock_bodega,lote.almacen, lote.usuario)
+                "INSERT INTO stock_actual (sku, cantidad, usuario) VALUES (%s, %s, %s)",
+                (item.sku, item.stock_bodega, lote.usuario)
             )
 
         # D. Si TODO salió bien, guardamos cambios en MySQL
@@ -71,7 +70,7 @@ async def traspaso_multiple(lote: LoteTraspaso):
         message = (
             f"🔄 <b>Traspaso de Stock</b>\n\n"
             f"• <b>Usuario:</b> {html.escape(lote.usuario)}\n"
-            f"• <b>Almacén:</b> {html.escape(lote.almacen)}\n"
+            f"• <b>Almacén:</b> A FULL\n"
             f"• <b>Movimientos:</b> \n{chr(10).join(f'• SKU: {s.sku}, Cantidad: {s.stock_bodega}' for s in lote.movimientos)}\n"
         )
         asyncio.create_task(send_telegram_alert(message))
@@ -80,6 +79,7 @@ async def traspaso_multiple(lote: LoteTraspaso):
 
     except Exception as e:
         connection.rollback() # Si uno falla, ninguno se guarda (mantiene integridad)
+        print(f"Error en traspaso: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         cursor.close()
@@ -143,8 +143,8 @@ async def traspaso_multiple(lote: LoteTraspaso):
 
             # C. Historial
             cursor.execute(
-                "INSERT INTO stock_actual (sku, cantidad, almacen, usuario) VALUES (%s, %s, %s, %s)",
-                (item.sku, item.stock_bodega, lote.almacen, lote.usuario)
+                "INSERT INTO stock_actual (sku, cantidad, usuario) VALUES (%s, %s, %s)",
+                (item.sku, item.stock_bodega, lote.usuario)
             )
 
         # D. Si TODO salió bien, guardamos cambios en MySQL
@@ -156,7 +156,7 @@ async def traspaso_multiple(lote: LoteTraspaso):
         message = (
             f"🔄 <b>Traspaso de Stock a Clean</b>\n\n"
             f"• <b>Usuario:</b> {html.escape(lote.usuario)}\n"
-            f"• <b>Almacén:</b> {html.escape(lote.almacen)}\n"
+            f"• <b>Almacén:</b> A FULL\n"
             f"• <b>Movimientos:</b> \n{chr(10).join(f'• SKU: {s.sku}, Cantidad: {s.stock_bodega}' for s in lote.movimientos)}\n"
         )
         asyncio.create_task(send_telegram_alert(message))

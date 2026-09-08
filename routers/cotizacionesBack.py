@@ -154,22 +154,24 @@ async def consulta_cotizacion():
             # Agregamos c.id al SELECT para poder usarlo en Python
             cursor.execute("""
                 SELECT 
-                    c.id, 
-                    c.codigo_cotizacion, 
-                    c.relacion_factura,
-                    c.metodo_pago,
-                    c.forma_pago,
-                    c.fecha_pago,
-                    c.empresa,
-                    c.fecha,
-                    c.subtotal,
-                    c.total,
-                    c.firma_envio,
-                    c.vendido,
-                    i.nombre_producto
-                FROM cotizaciones c                  
-                JOIN cotizacion_items i ON c.id = i.cotizacion_id 
-                ORDER BY c.codigo_cotizacion DESC;
+                c.id, 
+                c.codigo_cotizacion, 
+                c.relacion_factura,
+                c.metodo_pago,
+                c.forma_pago,
+                c.fecha_pago,
+                c.empresa,
+                c.fecha,
+                c.subtotal,
+                c.total,
+                c.firma_envio,
+                c.vendido,
+                c.seguimiento,
+                i.nombre_producto
+            FROM cotizaciones c                  
+            JOIN cotizacion_items i ON c.id = i.cotizacion_id 
+            WHERE c.fecha_vencimiento >= CURDATE()
+            ORDER BY c.codigo_cotizacion DESC;
             """)
             
             # CORREGIDO: Un solo fetchall trae toda la información combinada
@@ -195,6 +197,7 @@ async def consulta_cotizacion():
                         "fecha_pago": str(fila["fecha_pago"]) if isinstance(fila["fecha_pago"], (datetime.date, datetime.datetime)) else fila["fecha_pago"],
                         "firma_envio": fila["firma_envio"],
                         "vendido": fila["vendido"],
+                        "seguimiento": fila["seguimiento"],
                         "empresa": fila["empresa"],
                         "fecha": str(fila["fecha"]) if isinstance(fila["fecha"], (datetime.date, datetime.datetime)) else fila["fecha"],
                         "subtotal": str(fila["subtotal"]) if isinstance(fila["subtotal"], Decimal) else fila["subtotal"],
@@ -349,6 +352,40 @@ async def obtener_items_cotizacion(cotizacion_id: int):
             status_code=500,
             detail=f"Error al obtener items: {str(e)}"
         )
+    finally:
+        connection.close()
+
+class SeguimientoUpdate(BaseModel):
+    codigo_cotizacion: str
+    seguimiento: Optional[str] = None
+    usuario: Optional[str] = None
+
+@router.post("/cotizaciones/seguimiento")
+async def actualizar_seguimiento(datos: SeguimientoUpdate):
+    """
+    Actualiza el texto de seguimiento libre de una cotización.
+    """
+    connection = get_db_connection()
+    try:
+        with connection.cursor() as cursor:
+            sql = "UPDATE cotizaciones SET seguimiento = %s WHERE codigo_cotizacion = %s"
+            cursor.execute(sql, (datos.seguimiento, datos.codigo_cotizacion))
+
+            if cursor.rowcount == 0:
+                raise HTTPException(status_code=404, detail=f"Cotización {datos.codigo_cotizacion} no encontrada")
+
+            connection.commit()
+
+            mov_reg.registrar_movimiento(datos.usuario or "", f"Actualizó seguimiento de cotización {datos.codigo_cotizacion}", "Cotizaciones")
+
+            return {"status": "success", "mensaje": f"Seguimiento actualizado en {datos.codigo_cotizacion}"}
+
+    except HTTPException:
+        raise
+    except mysql.connector.Error as err:
+        connection.rollback()
+        print(f"Error BD al actualizar seguimiento: {err}")
+        raise HTTPException(status_code=500, detail=f"Error BD: {str(err)}")
     finally:
         connection.close()
 

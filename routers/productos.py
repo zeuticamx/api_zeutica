@@ -59,7 +59,7 @@ async def consultar_inventario_completo():
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True) # Usamos dictionary=True para que devuelva claves como 'sku'
     
-    query = "SELECT sku, nombre, categoria, medida, ubicacion, stock_minimo, stock_bodega, stock_full, stock_fba, stock_clean, stock_total, numero_referencia, costo_total, precio, precio_2, precio_3, precio_amazon, precio_clean FROM productos"
+    query = "SELECT sku, nombre, categoria, medida, ubicacion, stock_minimo, stock_bodega, stock_fba, stock_clean, stock_total, numero_referencia, costo_total, precio, precio_2, precio_3, precio_amazon, precio_clean FROM productos"
     
     try:
         cursor.execute(query) 
