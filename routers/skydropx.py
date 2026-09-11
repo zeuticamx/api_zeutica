@@ -7,6 +7,7 @@
 from typing import Any, Dict, List, Optional
 
 import mov_reg
+import notificaciones_service
 import skydropx_envios
 import skydropx_service
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -18,6 +19,10 @@ router = APIRouter(tags=["skydropx-envios"], responses={404: {"Mensaje": "No enc
 # Router aparte para el webhook: lo llama Skydropx, no el panel, asi que no puede
 # ir detras de obtener_usuario_actual. Se autentica con la firma HMAC del cuerpo.
 router_webhook = APIRouter(tags=["skydropx-webhook"], responses={404: {"Mensaje": "No encontrado"}})
+
+# Destinatarios que deben enterarse de todo cambio de estatus de guia, sea quien
+# sea que la haya generado. Mismo patron que USUARIO_COBRANZA en abonos.py.
+USUARIOS_ENVIO_SIEMPRE = ("gerencia", "fparra")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -354,6 +359,36 @@ async def recibir_webhook(request: Request):
         f"estatus={datos.get('estatus')} aplicado={resultado.get('aplicado')} "
         f"envio_encontrado={resultado.get('envio_encontrado')}"
     )
+
+    # Avisa en vivo al usuario que genero la guia y a los destinatarios fijos
+    # (gerencia, fparra), reutilizando el mismo canal de notificaciones
+    # (WebSocket /ws/notificaciones) que ya usan abonos.py, etc. Solo en
+    # evento_nuevo=True: la huella en skydropx_envios evita que un reintento de
+    # Skydropx (mismo tracking+estatus) duplique el aviso. Si algo aqui falla no
+    # debe tumbar la respuesta al webhook.
+    if resultado.get("aplicado") and resultado.get("evento_nuevo"):
+        try:
+            destinatarios = []
+            for nombre in (resultado.get("usuario"), *USUARIOS_ENVIO_SIEMPRE):
+                if not nombre:
+                    continue
+                empleado_id = notificaciones_service.id_de_usuario(nombre)
+                if empleado_id is not None and empleado_id not in destinatarios:
+                    destinatarios.append(empleado_id)
+
+            if destinatarios:
+                info_estatus = skydropx_envios.describir_estatus(datos.get("estatus"))
+                referencia = (
+                    resultado.get("codigo_cotizacion")
+                    or datos.get("tracking_number")
+                    or ""
+                )
+                titulo = f"Guía Skydropx: {info_estatus['estatus_texto']}"
+                mensaje = f"{referencia} — {datos.get('descripcion') or info_estatus['estatus_texto']}"
+                for empleado_id in destinatarios:
+                    await notificaciones_service.crear_y_notificar(empleado_id, titulo, mensaje, "envio")
+        except Exception as err:
+            print(f"Error notificando webhook Skydropx: {err}")
 
     # 200 rapido: Skydropx reintenta si tarda o si responde error.
     return {"status": "success", "recibido": True, **resultado}

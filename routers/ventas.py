@@ -124,24 +124,26 @@ async def registrar_venta(venta: VentaSchema):
     """
     Registro de venta, se verifica que el stock sea suficiente para continuar.
     """
+    if venta.stock_bodega <= 0:
+        raise HTTPException(status_code=400, detail="La cantidad a descontar debe ser mayor a 0")
+
     connection = get_db_connection()
     try:
         with connection.cursor(dictionary=True) as cursor:
-            
-            # A. Verificar stock (Se mantiene igual)
-            sql_check = "SELECT stock_bodega FROM productos WHERE sku = %s"
+
+            # A. Verificar stock y bloquear la fila (FOR UPDATE) para evitar que dos ventas
+            # concurrentes del mismo SKU lean el mismo stock y ambas pasen la validación
+            sql_check = "SELECT stock_bodega FROM productos WHERE sku = %s FOR UPDATE"
             cursor.execute(sql_check, (venta.sku,))
             resultado = cursor.fetchone()
 
             if not resultado:
+                connection.rollback()
                 raise HTTPException(status_code=404, detail="Producto no encontrado")
-            
+
             if resultado['stock_bodega'] < venta.stock_bodega:
+                connection.rollback()
                 raise HTTPException(status_code=400, detail=f"Stock insuficiente. Solo hay {resultado['stock_bodega']}")
-        
-            # B. Aplicar el descuento al inventario (Se mantiene igual)
-            sql_restar = "UPDATE productos SET stock_bodega = stock_bodega - %s WHERE sku = %s" 
-            cursor.execute(sql_restar, (venta.stock_bodega, venta.sku))
 
             # --- NUEVA LÓGICA DE CRÉDITO ---
             # Calculamos el saldo inicial. Si es CRÉDITO, el saldo es el total (precio * cantidad)
@@ -149,28 +151,43 @@ async def registrar_venta(venta: VentaSchema):
             total_operacion = venta.precio * venta.stock_bodega
             saldo_inicial = total_operacion if venta.condicion_pago == "CREDITO" else 0.00
 
-            # C. Registrar venta en el historial (Actualizado con nuevas columnas)            
+            # B. Registrar venta en el historial primero. Si id_ventas ya existe, INSERT IGNORE
+            # no inserta nada: es un reintento (doble clic, timeout, reenvío) y NO debe volver
+            # a descontar stock, o el inventario se descuadra en cada reintento.
             sql_insert = """
-                INSERT IGNORE INTO ventasRegistro 
-                (id_ventas, sku, producto, cantidad, precio, fecha, nombreComprador, otros, plataforma, usuario, condicion_pago, saldo_pendiente) 
+                INSERT IGNORE INTO ventasRegistro
+                (id_ventas, sku, producto, cantidad, precio, fecha, nombreComprador, otros, plataforma, usuario, condicion_pago, saldo_pendiente)
                 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             """
-            
+
             valores = (
-                venta.id_venta, 
-                venta.sku, 
-                venta.producto, 
-                venta.stock_bodega, 
-                venta.precio, 
-                venta.fecha, 
-                venta.nombreComprador, 
-                venta.otros, 
-                venta.plataforma, 
+                venta.id_venta,
+                venta.sku,
+                venta.producto,
+                venta.stock_bodega,
+                venta.precio,
+                venta.fecha,
+                venta.nombreComprador,
+                venta.otros,
+                venta.plataforma,
                 venta.usuario,
                 venta.condicion_pago, # Nuevo campo
                 saldo_inicial         # Nuevo campo calculado
             )
             cursor.execute(sql_insert, valores)
+
+            if cursor.rowcount == 0:
+                connection.rollback()
+                raise HTTPException(status_code=409, detail=f"La venta '{venta.id_venta}' ya fue registrada previamente")
+
+            # C. Aplicar el descuento al inventario, solo ahora que sabemos que la venta es nueva.
+            # La condición stock_bodega >= %s es una segunda barrera de seguridad ante carreras.
+            sql_restar = "UPDATE productos SET stock_bodega = stock_bodega - %s WHERE sku = %s AND stock_bodega >= %s"
+            cursor.execute(sql_restar, (venta.stock_bodega, venta.sku, venta.stock_bodega))
+
+            if cursor.rowcount == 0:
+                connection.rollback()
+                raise HTTPException(status_code=409, detail="Stock insuficiente al confirmar la venta, intente nuevamente")
 
             # D. Confirmar cambios
             connection.commit()

@@ -201,7 +201,10 @@ def registrar_evento_webhook(evento: Dict[str, Any], payload_crudo: Optional[str
 
     if not tracking and not shipment_id:
         print("Webhook Skydropx sin tracking_number ni shipment_id: no hay como ligarlo.")
-        return {"aplicado": False, "envio_encontrado": False, "evento_nuevo": False}
+        return {
+            "aplicado": False, "envio_encontrado": False, "evento_nuevo": False,
+            "usuario": None, "codigo_cotizacion": None,
+        }
 
     # Huella para no duplicar el mismo evento cuando Skydropx reintenta.
     huella = hashlib.sha1(
@@ -272,13 +275,40 @@ def registrar_evento_webhook(evento: Dict[str, Any], payload_crudo: Optional[str
                      evento.get("etiqueta_url") or "", evento.get("tracking_url") or "")
                 )
 
+        # Dueno del envio, para poder avisarle por notificaciones_service. Se
+        # busca por cualquiera de las dos llaves porque la fila puede haberse
+        # localizado o creado por una u otra segun lo que trajo el evento.
+        usuario_dueno = None
+        codigo_cotizacion = None
+        if estatus:
+            cursor.execute(
+                """
+                SELECT usuario, codigo_cotizacion FROM skydropx_envios
+                WHERE tracking_number = %s OR shipment_id = %s
+                LIMIT 1
+                """,
+                (tracking, shipment_id)
+            )
+            fila = cursor.fetchone()
+            if fila:
+                usuario_dueno, codigo_cotizacion = fila[0], fila[1]
+
         conn.commit()
-        return {"aplicado": True, "envio_encontrado": encontrado, "evento_nuevo": evento_nuevo}
+        return {
+            "aplicado": True,
+            "envio_encontrado": encontrado,
+            "evento_nuevo": evento_nuevo,
+            "usuario": usuario_dueno,
+            "codigo_cotizacion": codigo_cotizacion,
+        }
     except mysql.connector.Error as err:
         if conn:
             conn.rollback()
         print(f"Error aplicando webhook Skydropx: {err}")
-        return {"aplicado": False, "envio_encontrado": False, "evento_nuevo": False}
+        return {
+            "aplicado": False, "envio_encontrado": False, "evento_nuevo": False,
+            "usuario": None, "codigo_cotizacion": None,
+        }
     finally:
         if cursor:
             cursor.close()
