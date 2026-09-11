@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager  # <-- Añadido para el lifespan
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from routers import cotizacionesBack, productos, ventas, clientes, traspaso, gastos, compras, cleanest, cuentas_pendientes,\
-      abonos, estadisticas, inventario, empleados, notificaciones, cuentas_pagar, consulta_registros, pendientes, proveedores, genera_cotizacion, sofi_conversaciones, embarques, sofi_notificaciones, whatsapp_plantillas
+      abonos, estadisticas, inventario, empleados, notificaciones, cuentas_pagar, consulta_registros, pendientes, proveedores, genera_cotizacion, sofi_conversaciones, embarques, sofi_notificaciones, whatsapp_plantillas, skydropx
 import mysql.connector
 from fastapi.middleware.cors import CORSMiddleware
 import os, secrets
@@ -103,9 +103,12 @@ app.include_router(genera_cotizacion.router, dependencies=[Depends(obtener_usuar
 app.include_router(sofi_conversaciones.router, dependencies=[Depends(obtener_usuario_actual)])  # <-- Añadido para la ruta de conversaciones
 app.include_router(embarques.router, dependencies=[Depends(obtener_usuario_actual)])
 app.include_router(whatsapp_plantillas.router, dependencies=[Depends(obtener_usuario_actual)])
+app.include_router(skydropx.router, dependencies=[Depends(obtener_usuario_actual)])
 # Sin obtener_usuario_actual a proposito: el WebSocket valida el token por query
 # param y el POST de escalacion valida X-API-Key (n8n no tiene sesion de usuario).
 app.include_router(sofi_notificaciones.router)
+# Mismo caso: el webhook lo llama Skydropx, no el panel. Valida firma HMAC-SHA512.
+app.include_router(skydropx.router_webhook)
 
 app.add_middleware( 
     CORSMiddleware,
