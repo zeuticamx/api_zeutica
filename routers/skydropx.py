@@ -7,6 +7,7 @@
 from typing import Any, Dict, List, Optional
 
 import mov_reg
+import skydropx_envios
 import skydropx_service
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -45,17 +46,30 @@ class Direccion(BaseModel):
     company: Optional[str] = None
     phone: Optional[str] = None
     email: Optional[str] = None
-    reference: Optional[str] = Field(default=None, description="Referencia para el repartidor")
+    # Opcional para cotizar; Skydropx lo exige (no puede venir en blanco) al
+    # generar la guia, tanto en address_from como en address_to. Confirmado en
+    # sandbox: sin el, 422 "reference: no puede estar en blanco".
+    reference: Optional[str] = Field(default=None, description="Referencia para el repartidor. Requerida para generar guia.")
 
 
 class Paquete(BaseModel):
-    """Medidas en centimetros y peso en kilogramos, que es lo que espera Skydropx."""
+    """
+    Medidas en centimetros y peso en kilogramos, que es lo que espera Skydropx.
+
+    consignment_note y package_type quedan opcionales aqui porque la cotizacion
+    no los exige (Skydropx cotiza sin ellos); la generacion de guia si los exige
+    -- confirmado en sandbox: sin ellos responde 422 "consignment_note es
+    requerido en todos los paquetes" / "package_type es requerido en todos los
+    paquetes". El frontend los manda siempre con default al generar la guia.
+    """
     model_config = ConfigDict(extra="allow")
 
     length: float = Field(gt=0, description="Largo en cm")
     width: float = Field(gt=0, description="Ancho en cm")
     height: float = Field(gt=0, description="Alto en cm")
     weight: float = Field(gt=0, description="Peso en kg")
+    consignment_note: Optional[str] = Field(default=None, description="Contenido del paquete (carta porte). Requerido para generar guia.")
+    package_type: Optional[str] = Field(default=None, description="Codigo de embalaje del catalogo de Skydropx. Requerido para generar guia.")
 
 
 class CotizacionRequest(BaseModel):
@@ -82,6 +96,19 @@ class EnvioRequest(BaseModel):
     extras: Optional[Dict[str, Any]] = None
     usuario: Optional[str] = Field(default=None, description="Solo para la bitacora de movimientos")
     referencia: Optional[str] = Field(default=None, description="Referencia interna para la bitacora")
+    # Liga la guia con la cotizacion que la origino. Es lo que permite pintar el
+    # estatus en el renglon correcto del panel cuando llega el webhook.
+    codigo_cotizacion: Optional[str] = Field(default=None, description="Cotizacion que origina el envio")
+    # Datos de la tarifa elegida, solo para guardarlos junto a la guia: Skydropx
+    # no los repite en la respuesta del envio. Van aparte de `extras` a proposito,
+    # porque `extras` se reenvia tal cual al API de Skydropx.
+    servicio: Optional[str] = Field(default=None, description="Nombre del servicio de la tarifa elegida")
+    costo: Optional[float] = Field(default=None, description="Costo de la tarifa elegida")
+    # Skydropx valida estos dos a nivel shipment (no por paquete). Si el panel
+    # no los manda aqui, se toman del primer parcel, que es donde los captura
+    # el modal. Ver nota en skydropx_service.crear_envio().
+    consignment_note: Optional[str] = Field(default=None, description="Contenido del envio (carta porte)")
+    package_type: Optional[str] = Field(default=None, description="Codigo de embalaje del catalogo de Skydropx")
 
 
 def _a_dict(modelo: Optional[BaseModel]) -> Optional[Dict[str, Any]]:
@@ -171,21 +198,54 @@ async def crear_envio(datos: EnvioRequest):
     OJO: en ambiente de produccion esto contrata el envio con el carrier y se
     cobra. No hay cancelacion desde este endpoint.
     """
+    # Nivel shipment: si no vienen explicitos, se heredan del primer paquete
+    # (el modal los captura ahi). Skydropx los exige a este nivel.
+    primer_paquete = datos.parcels[0] if datos.parcels else None
+    consignment_note = datos.consignment_note or (primer_paquete.consignment_note if primer_paquete else None)
+    package_type = datos.package_type or (primer_paquete.package_type if primer_paquete else None)
+
     try:
         envio = await skydropx_service.crear_envio(
             rate_id=datos.rate_id,
             address_from=_a_dict(datos.address_from),
             address_to=_a_dict(datos.address_to),
             parcels=[p.model_dump(exclude_none=True) for p in datos.parcels] if datos.parcels else None,
+            consignment_note=consignment_note,
+            package_type=package_type,
             extras=datos.extras,
         )
     except SkydropxServiceError as err:
         raise HTTPException(status_code=err.status, detail=err.detalle)
 
+    tracking = _leer_tracking(envio)
+    codigo = datos.codigo_cotizacion or datos.referencia
+
+    # Se guarda para que el webhook tenga donde aterrizar el estatus despues.
+    # Si falla, la respuesta sigue: la guia ya se contrato y se cobro, y devolver
+    # un 500 haria que el usuario la generara otra vez.
+    guardado = False
+    try:
+        guardado = skydropx_envios.guardar_envio(
+            codigo_cotizacion=codigo,
+            tracking_number=tracking,
+            shipment_id=_leer_id(envio),
+            carrier=_leer_carrier(envio),
+            servicio=datos.servicio,
+            costo=datos.costo,
+            etiqueta_url=_leer_campo_envio(envio, "label_url", "label", "pdf_url"),
+            # PDF de remision / packing slip. Viene junto a label_url, a nivel
+            # general o dentro de los paquetes de `included`.
+            orden_detalle_url=_leer_campo_envio(envio, "order_detail_url", "order_detail"),
+            tracking_url=_leer_campo_envio(envio, "tracking_url_provider", "tracking_url"),
+            usuario=datos.usuario or "sistema",
+        )
+    except Exception as err:
+        print(f"Error al guardar envio Skydropx en BD: {err}")
+
     # Bitacora. Si el registro falla no se tumba la respuesta: la guia ya se genero
     # y ocultarla con un 500 haria que el usuario la generara de nuevo (y pagara doble).
     try:
-        referencia = datos.referencia or _leer_tracking(envio) or datos.rate_id
+        referencia = codigo or tracking or datos.rate_id
         mov_reg.registrar_movimiento(
             datos.usuario or "sistema",
             f"Genero guia Skydropx ({referencia})",
@@ -194,7 +254,44 @@ async def crear_envio(datos: EnvioRequest):
     except Exception as err:
         print(f"Error al registrar movimiento de guia Skydropx: {err}")
 
-    return {"status": "success", "envio": envio}
+    return {"status": "success", "envio": envio, "guardado": guardado}
+
+
+@router.get("/skydropx/envios")
+async def listar_envios(
+    codigo_cotizacion: Optional[str] = Query(default=None, description="Filtra por cotizacion"),
+):
+    """
+    Envios registrados con su ultimo estatus (el que dejo el webhook).
+
+    Es lo que el panel consulta al abrir Cotizaciones para pintar el estatus de
+    cada renglon. Devuelve `estatus_texto` y `estatus_tono` ya traducidos para
+    que el front no tenga que conocer el catalogo de Skydropx.
+    """
+    return {"status": "success", "envios": skydropx_envios.listar_envios(codigo_cotizacion)}
+
+
+@router.get("/skydropx/envios/{tracking_number}/eventos")
+async def listar_eventos(tracking_number: str):
+    """Linea de tiempo de una guia, armada con los eventos que mando el webhook."""
+    return {"status": "success", "eventos": skydropx_envios.eventos_de(tracking_number)}
+
+
+@router.get("/skydropx/saldo")
+async def consultar_saldo():
+    """
+    Saldo disponible en la cuenta de Skydropx. De aqui se descuenta cada guia.
+
+    Devuelve el monto ya normalizado mas la respuesta cruda: si Skydropx cambia
+    el nombre de la llave, `saldo` llega en null y el panel puede mostrar el
+    cuerpo tal cual en vez de pintar un cero que se leeria como "sin saldo".
+    """
+    try:
+        respuesta = await skydropx_service.obtener_saldo()
+    except SkydropxServiceError as err:
+        raise HTTPException(status_code=err.status, detail=err.detalle)
+
+    return {"status": "success", **skydropx_service.extraer_saldo(respuesta), "crudo": respuesta}
 
 
 @router.get("/skydropx/rastreo")
@@ -221,8 +318,9 @@ async def recibir_webhook(request: Request):
     contra SKYDROPX_WEBHOOK_SECRET; sin ese secreto configurado el endpoint
     responde 503 y no acepta nada.
 
-    Hoy solo valida y deja rastro en log. Cuando se decida que hacer con el evento
-    (actualizar una tabla, notificar por WebSocket), el enganche va aqui abajo.
+    El evento actualiza el estatus del envio en skydropx_envios y se agrega a la
+    bitacora skydropx_envio_eventos, que es de donde el panel arma la linea de
+    tiempo de cada guia.
     """
     cuerpo_crudo = await request.body()
     cabecera = skydropx_service._config()["cabecera_firma"]
@@ -237,11 +335,28 @@ async def recibir_webhook(request: Request):
     except Exception:
         raise HTTPException(status_code=400, detail="El webhook de Skydropx no trae JSON valido.")
 
-    tipo = evento.get("type") or evento.get("event") if isinstance(evento, dict) else None
-    print(f"Webhook Skydropx recibido: tipo={tipo} cuerpo={evento}")
+    datos = skydropx_service.extraer_evento_webhook(evento)
+
+    # Guardar nunca debe tumbar la respuesta: si contestamos error, Skydropx
+    # reintenta el mismo evento y se acumulan reintentos por una falla nuestra
+    # de base de datos. Se responde 200 y queda el rastro en el log.
+    resultado = {"aplicado": False}
+    try:
+        resultado = skydropx_envios.registrar_evento_webhook(
+            datos,
+            payload_crudo=cuerpo_crudo.decode("utf-8", errors="replace")[:4000],
+        )
+    except Exception as err:
+        print(f"Error procesando webhook Skydropx: {err}")
+
+    print(
+        f"Webhook Skydropx: tracking={datos.get('tracking_number')} "
+        f"estatus={datos.get('estatus')} aplicado={resultado.get('aplicado')} "
+        f"envio_encontrado={resultado.get('envio_encontrado')}"
+    )
 
     # 200 rapido: Skydropx reintenta si tarda o si responde error.
-    return {"status": "success", "recibido": True}
+    return {"status": "success", "recibido": True, **resultado}
 
 
 def _leer_id(cotizacion: Dict[str, Any]) -> Optional[str]:
@@ -256,18 +371,47 @@ def _leer_id(cotizacion: Dict[str, Any]) -> Optional[str]:
     return str(valor) if valor is not None else None
 
 
-def _leer_tracking(envio: Dict[str, Any]) -> Optional[str]:
-    """Numero de rastreo para la bitacora. Best effort: si no aparece, se usa el rate_id."""
+def _leer_campo_envio(envio: Dict[str, Any], *claves: str) -> Optional[str]:
+    """
+    Busca un campo en la respuesta del envio sin casarse con la forma exacta:
+    puede venir en la raiz, bajo `data`, bajo `shipment`, dentro de `attributes`
+    de cualquiera de esos, o como recurso relacionado en `included`.
+    """
     if not isinstance(envio, dict):
         return None
-    for candidato in (envio, envio.get("data") if isinstance(envio.get("data"), dict) else {},
-                      envio.get("shipment") if isinstance(envio.get("shipment"), dict) else {}):
-        if not isinstance(candidato, dict):
-            continue
-        valor = candidato.get("tracking_number")
-        if valor:
-            return str(valor)
+
+    candidatos = [envio]
+    for llave in ("data", "shipment"):
+        anidado = envio.get(llave)
+        if isinstance(anidado, dict):
+            candidatos.append(anidado)
+
+    for candidato in list(candidatos):
         atributos = candidato.get("attributes")
-        if isinstance(atributos, dict) and atributos.get("tracking_number"):
-            return str(atributos["tracking_number"])
+        if isinstance(atributos, dict):
+            candidatos.append(atributos)
+
+    incluidos = envio.get("included")
+    if isinstance(incluidos, list):
+        for item in incluidos:
+            if isinstance(item, dict):
+                candidatos.append(item)
+                if isinstance(item.get("attributes"), dict):
+                    candidatos.append(item["attributes"])
+
+    for clave in claves:
+        for candidato in candidatos:
+            valor = candidato.get(clave)
+            if valor:
+                return str(valor)
     return None
+
+
+def _leer_tracking(envio: Dict[str, Any]) -> Optional[str]:
+    """Numero de rastreo de la guia recien generada."""
+    return _leer_campo_envio(envio, "tracking_number")
+
+
+def _leer_carrier(envio: Dict[str, Any]) -> Optional[str]:
+    """Carrier que quedo en la guia. Hace falta para poder rastrearla despues."""
+    return _leer_campo_envio(envio, "provider", "carrier", "carrier_name")

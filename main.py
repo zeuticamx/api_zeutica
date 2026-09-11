@@ -6,6 +6,7 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from routers import cotizacionesBack, productos, ventas, clientes, traspaso, gastos, compras, cleanest, cuentas_pendientes,\
       abonos, estadisticas, inventario, empleados, notificaciones, cuentas_pagar, consulta_registros, pendientes, proveedores, genera_cotizacion, sofi_conversaciones, embarques, sofi_notificaciones, whatsapp_plantillas, skydropx
 import mysql.connector
+import skydropx_envios
 from fastapi.middleware.cors import CORSMiddleware
 import os, secrets
 from dotenv import load_dotenv
@@ -43,6 +44,9 @@ async def lifespan(app: FastAPI):
 
     # Crea tablas del modulo de embarques si no existen (MySQL, sin FK)
     embarques.crear_tablas_embarques()
+
+    # Tablas de envios Skydropx: guardan el estatus que manda el webhook.
+    skydropx_envios.crear_tablas_skydropx()
 
     yield  # Aquí corre la aplicación normal
 

@@ -153,25 +153,25 @@ async def consulta_cotizacion():
         with connection.cursor(dictionary=True) as cursor:
             # Agregamos c.id al SELECT para poder usarlo en Python
             cursor.execute("""
-                SELECT 
-                c.id, 
-                c.codigo_cotizacion, 
-                c.relacion_factura,
-                c.metodo_pago,
-                c.forma_pago,
-                c.fecha_pago,
-                c.empresa,
-                c.fecha,
-                c.subtotal,
-                c.total,
-                c.firma_envio,
-                c.vendido,
-                c.seguimiento,
-                i.nombre_producto
-            FROM cotizaciones c                  
-            JOIN cotizacion_items i ON c.id = i.cotizacion_id 
-            WHERE c.fecha_vencimiento >= CURDATE()
-            ORDER BY c.codigo_cotizacion DESC;
+                SELECT
+                    c.id,
+                    c.codigo_cotizacion,
+                    c.relacion_factura,
+                    c.metodo_pago,
+                    c.forma_pago,
+                    c.fecha_pago,
+                    c.empresa,
+                    c.fecha,
+                    c.subtotal,
+                    c.total,
+                    c.firma_envio,
+                    c.vendido,
+                    c.seguimiento,
+                    c.fecha_vencimiento,
+                    i.nombre_producto
+                FROM cotizaciones c
+                JOIN cotizacion_items i ON c.id = i.cotizacion_id
+                ORDER BY c.codigo_cotizacion DESC;
             """)
             
             # CORREGIDO: Un solo fetchall trae toda la información combinada
@@ -181,9 +181,9 @@ async def consulta_cotizacion():
                 raise HTTPException(status_code=404, detail="No se encontraron cotizaciones")
 
             # Estructura para agrupar los ítems dentro de su cotización correspondiente
-            cotizaciones_acumuladas = {}
+            cotizaciones_acumuladas = {} 
 
-            for fila in filas_combinadas:
+            for fila in filas_combinadas: 
                 id_cotizacion = fila["id"]
                 
                 # Si es la primera vez que vemos esta cotización, creamos su base
@@ -198,6 +198,9 @@ async def consulta_cotizacion():
                         "firma_envio": fila["firma_envio"],
                         "vendido": fila["vendido"],
                         "seguimiento": fila["seguimiento"],
+                        # Se devuelve sin filtrar por fecha: el panel decide que
+                        # mostrar con sus pestañas Vigentes / Vencidas / Todas.
+                        "fecha_vencimiento": str(fila["fecha_vencimiento"]) if isinstance(fila["fecha_vencimiento"], (datetime.date, datetime.datetime)) else fila["fecha_vencimiento"],
                         "empresa": fila["empresa"],
                         "fecha": str(fila["fecha"]) if isinstance(fila["fecha"], (datetime.date, datetime.datetime)) else fila["fecha"],
                         "subtotal": str(fila["subtotal"]) if isinstance(fila["subtotal"], Decimal) else fila["subtotal"],

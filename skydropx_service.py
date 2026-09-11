@@ -38,6 +38,7 @@ RUTA_TOKEN = "/api/v1/oauth/token"
 RUTA_COTIZACIONES = "/api/v1/quotations"
 RUTA_ENVIOS = "/api/v1/shipments"
 RUTA_RASTREO = "/api/v1/shipments/tracking"
+RUTA_SALDO = "/api/v1/finance/credits"
 
 # Generar una guia puede tardar: el carrier responde por debajo de Skydropx.
 TIMEOUT = httpx.Timeout(30.0)
@@ -83,7 +84,7 @@ def _config() -> Dict[str, str]:
     """
     client_id = (os.getenv("SKYDROPX_CLIENT_ID") or os.getenv("SKYDROP_API_KEY") or "").strip()
     client_secret = (os.getenv("SKYDROPX_CLIENT_SECRET") or os.getenv("SKYDROP_API_SECRET") or "").strip()
-    base_url = (os.getenv("SKYDROPX_BASE_URL") or BASE_URL_POR_DEFECTO).strip().rstrip("/")
+    base_url = (os.getenv("SKYDROPX_BASE_URL")).strip().rstrip("/")
     return {
         "client_id": client_id,
         "client_secret": client_secret,
@@ -404,6 +405,8 @@ async def crear_envio(
     address_from: Optional[Dict[str, Any]] = None,
     address_to: Optional[Dict[str, Any]] = None,
     parcels: Optional[List[Dict[str, Any]]] = None,
+    consignment_note: Optional[str] = None,
+    package_type: Optional[str] = None,
     extras: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """
@@ -412,6 +415,14 @@ async def crear_envio(
     OJO: en produccion esto cuesta dinero y no se puede deshacer desde aqui.
     Las direcciones son opcionales porque el rate ya trae las de la cotizacion;
     se mandan solo si el llamador quiere sobreescribir datos de contacto.
+
+    consignment_note y package_type van a NIVEL SHIPMENT, no dentro de cada
+    parcel. Comprobado contra el sandbox: mandandolos solo dentro de parcels[]
+    Skydropx seguia respondiendo 422 "El atributo X es requerido en todos los
+    paquetes", y sus errores llegaban como llaves de primer nivel -- a
+    diferencia de address_from/address_to, que si venian anidados. Se siguen
+    mandando tambien dentro de cada parcel porque ahi ya los aceptaba sin
+    quejarse, y asi queda cubierto si algun carrier los lee por bulto.
     """
     envio: Dict[str, Any] = {"rate_id": rate_id}
     if address_from:
@@ -420,6 +431,10 @@ async def crear_envio(
         envio["address_to"] = address_to
     if parcels:
         envio["parcels"] = parcels
+    if consignment_note:
+        envio["consignment_note"] = consignment_note
+    if package_type:
+        envio["package_type"] = package_type
     if extras:
         envio.update(extras)
     return await _pedir("POST", RUTA_ENVIOS, json={"shipment": envio})
@@ -434,9 +449,107 @@ async def rastrear(tracking_number: str, carrier_name: str) -> Dict[str, Any]:
     )
 
 
+async def obtener_saldo() -> Dict[str, Any]:
+    """Saldo de la cuenta en Skydropx. De aqui se descuenta cada guia generada."""
+    return await _pedir("GET", RUTA_SALDO)
+
+
+def extraer_saldo(respuesta: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Saca el monto disponible sin casarse con la forma exacta de la respuesta:
+    puede venir plano, bajo `data`, dentro de `attributes` (JSON:API), o con el
+    monto bajo distintos nombres segun la version del endpoint.
+
+    Devuelve {"saldo": float|None, "moneda": str}. Si no se reconoce ninguna
+    llave, `saldo` queda en None y el panel muestra la respuesta cruda en vez de
+    inventar un cero, que se leeria como "no hay saldo" y es peor que no saber.
+    """
+    if not isinstance(respuesta, dict):
+        return {"saldo": None, "moneda": "MXN"}
+
+    candidatos: List[Dict[str, Any]] = [respuesta]
+    datos = respuesta.get("data")
+    if isinstance(datos, dict):
+        candidatos.append(datos)
+        if isinstance(datos.get("attributes"), dict):
+            candidatos.append(datos["attributes"])
+    elif isinstance(datos, list) and datos and isinstance(datos[0], dict):
+        candidatos.append(datos[0])
+        if isinstance(datos[0].get("attributes"), dict):
+            candidatos.append(datos[0]["attributes"])
+    if isinstance(respuesta.get("attributes"), dict):
+        candidatos.append(respuesta["attributes"])
+
+    llaves = ("balance", "available_credits", "available_balance", "credits",
+              "credit", "saldo", "amount", "total")
+    for candidato in candidatos:
+        for llave in llaves:
+            valor = candidato.get(llave)
+            if valor is None or isinstance(valor, (dict, list, bool)):
+                continue
+            try:
+                monto = float(str(valor).replace(",", "").replace("$", "").strip())
+            except (TypeError, ValueError):
+                continue
+            moneda = None
+            for c in candidatos:
+                moneda = moneda or c.get("currency") or c.get("currency_code") or c.get("moneda")
+            return {"saldo": monto, "moneda": str(moneda or "MXN")}
+
+    return {"saldo": None, "moneda": "MXN"}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Webhook
 # ─────────────────────────────────────────────────────────────────────────────
+
+def extraer_evento_webhook(evento: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Saca los datos utiles del evento del webhook. Formato real de Skydropx
+    (JSON:API), confirmado con el payload de prueba de su panel:
+
+        {"data": {"id": "<package_id>", "type": "packages",
+                  "attributes": {"status": "created", "tracking_number": "...",
+                                 "tracking_url_provider": "...", "label_url": "",
+                                 "event_description": ""},
+                  "relationships": {"shipment": {"data": {"id": "<shipment_id>"}}}}}
+
+    Se lee defensivamente (raiz o `data`, con o sin `attributes`) para que un
+    cambio de forma no tire el estatus.
+    """
+    if not isinstance(evento, dict):
+        return {}
+
+    datos = evento.get("data") if isinstance(evento.get("data"), dict) else evento
+    atributos = datos.get("attributes") if isinstance(datos.get("attributes"), dict) else {}
+
+    def leer(*claves):
+        for k in claves:
+            for origen in (atributos, datos, evento):
+                if isinstance(origen, dict) and origen.get(k) not in (None, ""):
+                    return origen[k]
+        return None
+
+    # El shipment vive en relationships; el `data.id` de la raiz es el package.
+    shipment_id = None
+    relaciones = datos.get("relationships")
+    if isinstance(relaciones, dict):
+        envio_rel = relaciones.get("shipment")
+        if isinstance(envio_rel, dict) and isinstance(envio_rel.get("data"), dict):
+            shipment_id = envio_rel["data"].get("id")
+    if not shipment_id:
+        shipment_id = leer("shipment_id")
+
+    return {
+        "package_id": datos.get("id") if isinstance(datos, dict) else None,
+        "shipment_id": str(shipment_id) if shipment_id else None,
+        "tracking_number": leer("tracking_number"),
+        "estatus": leer("status", "estatus"),
+        "descripcion": leer("event_description", "description", "status_details"),
+        "etiqueta_url": leer("label_url"),
+        "tracking_url": leer("tracking_url_provider", "tracking_url"),
+    }
+
 
 def verificar_firma_webhook(cuerpo_crudo: bytes, firma_recibida: Optional[str]) -> None:
     """
@@ -444,8 +557,10 @@ def verificar_firma_webhook(cuerpo_crudo: bytes, firma_recibida: Optional[str]) 
     cualquier cambio de espacios o de orden de llaves rompe la firma).
 
     Lanza SkydropxServiceError si no cuadra. Acepta la firma en hex o en base64,
-    con o sin prefijo "sha512=", porque el formato varia segun como quedo dado de
-    alta el webhook.
+    con o sin esquema al frente, porque el formato varia segun como quedo dado
+    de alta el webhook:
+      - Skydropx real: "Authorization: HMAC <hex>"  (esquema "HMAC ")
+      - Otras integraciones documentan: "sha512=<hex>"
     """
     cfg = _config()
     _exigir(cfg, "webhook_secret")
@@ -457,7 +572,10 @@ def verificar_firma_webhook(cuerpo_crudo: bytes, firma_recibida: Optional[str]) 
         )
 
     firma = firma_recibida.strip()
-    if "=" in firma and firma.lower().startswith("sha512"):
+    # Esquema "HMAC <valor>" (formato real de Skydropx) o "sha512=<valor>".
+    if " " in firma and firma.split(" ", 1)[0].upper() == "HMAC":
+        firma = firma.split(" ", 1)[1].strip()
+    elif "=" in firma and firma.lower().startswith("sha512"):
         firma = firma.split("=", 1)[1].strip()
 
     digest = hmac.new(cfg["webhook_secret"].encode("utf-8"), cuerpo_crudo, hashlib.sha512)
