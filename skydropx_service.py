@@ -440,6 +440,11 @@ async def crear_envio(
     return await _pedir("POST", RUTA_ENVIOS, json={"shipment": envio})
 
 
+async def obtener_envio(shipment_id: str) -> Dict[str, Any]:
+    """Reconsulta una guia ya creada, para ver si Skydropx ya le asigno tracking_number/label_url."""
+    return await _pedir("GET", f"{RUTA_ENVIOS}/{shipment_id}")
+
+
 async def rastrear(tracking_number: str, carrier_name: str) -> Dict[str, Any]:
     """Estado actual de una guia. Skydropx pide numero de rastreo y nombre del carrier."""
     return await _pedir(

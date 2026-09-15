@@ -247,15 +247,24 @@ def registrar_evento_webhook(evento: Dict[str, Any], payload_crudo: Optional[str
                 encontrado = cursor.rowcount > 0
 
             if not encontrado and shipment_id:
+                # Mismos campos que la rama de arriba (por tracking_number): si no se
+                # actualizan aqui tambien, un envio cuyo PRIMER evento trae tracking_number
+                # Y label_url a la vez (caso comun: "label_created" como unico evento)
+                # se queda con etiqueta_url en NULL para siempre, porque esta rama es la
+                # que lo encuentra (todavia no tenia tracking_number guardado) y no
+                # llegara un segundo evento que la vuelva a mandar.
                 cursor.execute(
                     """
                     UPDATE skydropx_envios
                     SET estatus = %s,
                         estatus_descripcion = COALESCE(%s, estatus_descripcion),
-                        tracking_number = COALESCE(tracking_number, %s)
+                        tracking_number = COALESCE(tracking_number, %s),
+                        etiqueta_url = COALESCE(NULLIF(%s, ''), etiqueta_url),
+                        tracking_url = COALESCE(NULLIF(%s, ''), tracking_url)
                     WHERE shipment_id = %s
                     """,
-                    (estatus, descripcion, tracking, shipment_id)
+                    (estatus, descripcion, tracking,
+                     evento.get("etiqueta_url") or "", evento.get("tracking_url") or "", shipment_id)
                 )
                 encontrado = cursor.rowcount > 0
 

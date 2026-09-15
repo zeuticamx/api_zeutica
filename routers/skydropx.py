@@ -6,6 +6,8 @@
 # ni con ningun otro modulo.
 from typing import Any, Dict, List, Optional
 
+import asyncio
+
 import mov_reg
 import notificaciones_service
 import skydropx_envios
@@ -22,7 +24,7 @@ router_webhook = APIRouter(tags=["skydropx-webhook"], responses={404: {"Mensaje"
 
 # Destinatarios que deben enterarse de todo cambio de estatus de guia, sea quien
 # sea que la haya generado. Mismo patron que USUARIO_COBRANZA en abonos.py.
-USUARIOS_ENVIO_SIEMPRE = ("gerencia", "fparra")
+USUARIOS_ENVIO_SIEMPRE = ("gerencia", "fparra", "ventas")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -221,6 +223,25 @@ async def crear_envio(datos: EnvioRequest):
         )
     except SkydropxServiceError as err:
         raise HTTPException(status_code=err.status, detail=err.detalle)
+
+    # El POST inicial casi siempre contesta antes de que Skydropx termine de
+    # generar la guia con el carrier: tracking_number y label_url llegan vacios
+    # (confirmado en su propia documentacion del webhook, que muestra
+    # "label_url": "" en el primer evento). Se reconsulta un par de veces -mismo
+    # patron que esperar_tarifas() para cotizaciones- para no devolverle al panel
+    # una guia sin numero de rastreo cuando Skydropx la resuelve en pocos segundos.
+    # Si sigue sin llegar, la guia ya se genero (y se cobro) de todos modos: el
+    # webhook la completara despues.
+    shipment_id = _leer_id(envio)
+    if not _leer_tracking(envio) and shipment_id:
+        for _ in range(3):
+            await asyncio.sleep(1.5)
+            try:
+                envio = await skydropx_service.obtener_envio(shipment_id)
+            except SkydropxServiceError:
+                break  # no tumbar la respuesta: la guia ya se genero y se cobro
+            if _leer_tracking(envio):
+                break
 
     tracking = _leer_tracking(envio)
     codigo = datos.codigo_cotizacion or datos.referencia
