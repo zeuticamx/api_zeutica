@@ -405,6 +405,7 @@ async def crear_envio(
     address_from: Optional[Dict[str, Any]] = None,
     address_to: Optional[Dict[str, Any]] = None,
     parcels: Optional[List[Dict[str, Any]]] = None,
+    packages: Optional[List[Dict[str, Any]]] = None,
     consignment_note: Optional[str] = None,
     package_type: Optional[str] = None,
     extras: Optional[Dict[str, Any]] = None,
@@ -423,6 +424,16 @@ async def crear_envio(
     diferencia de address_from/address_to, que si venian anidados. Se siguen
     mandando tambien dentro de cada parcel porque ahi ya los aceptaba sin
     quejarse, y asi queda cubierto si algun carrier los lee por bulto.
+
+    `packages` es la forma que exige el contrato de Skydropx para envios
+    MULTIPAQUETE (varios bultos en una sola guia): una lista con un objeto por
+    bulto, cada uno con su `package_number` (1, 2, 3...). Es mutuamente
+    excluyente con `parcels` -- routers/skydropx.py decide cual de los dos
+    mandar segun cuantos bultos pidio el panel, para no arriesgar el flujo de
+    un solo paquete (`parcels`) que ya esta confirmado contra el sandbox. La
+    forma `packages` NO se ha probado todavia contra esta cuenta; si Skydropx
+    la rechaza, revisar si en su lugar espera `parcels` con `package_number`
+    incluido en cada elemento.
     """
     envio: Dict[str, Any] = {"rate_id": rate_id}
     if address_from:
@@ -431,6 +442,8 @@ async def crear_envio(
         envio["address_to"] = address_to
     if parcels:
         envio["parcels"] = parcels
+    if packages:
+        envio["packages"] = packages
     if consignment_note:
         envio["consignment_note"] = consignment_note
     if package_type:
