@@ -31,7 +31,7 @@ async def pendientes(estado: str):
 
     # JOIN por el FK id_ventas: del pendiente saco el saldo pendiente, de la venta el resto
     query = """
-        SELECT * FROM pendientes WHERE estado = %s ORDER BY fecha ASC LIMIT 100
+        SELECT * FROM pendientes WHERE estado = %s ORDER BY id DESC
     """
 
     try:

@@ -59,7 +59,9 @@ async def consultar_inventario_completo():
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True) # Usamos dictionary=True para que devuelva claves como 'sku'
     
-    query = "SELECT sku, nombre, categoria, medida, ubicacion, stock_minimo, stock_bodega, stock_fba, stock_clean, stock_total, numero_referencia, costo_total, precio, precio_2, precio_3, precio_amazon, precio_clean FROM productos"
+    query = "SELECT sku, nombre, categoria, medida, ubicacion, stock_minimo," \
+    " stock_bodega, stock_fba, stock_clean, stock_total, numero_referencia, costo_total, precio, " \
+    "precio_2, precio_3, precio_amazon, precio_clean FROM productos ORDER BY sku ASC"
     
     try:
         cursor.execute(query) 
@@ -86,7 +88,7 @@ async def obtener_producto_por_sku(sku: str):
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)  
     # Usamos %s para prevenir inyección SQL
-    query = "SELECT id, sku, nombre, stock_bodega, stock_full, stock_fba, stock_clean, stock_total, precio, precio_2, precio_3 FROM productos WHERE sku = %s"
+    query = "SELECT id, sku, nombre, stock_bodega, stock_fba, stock_clean, stock_total, precio, precio_2, precio_3 FROM productos WHERE sku = %s"
     try:
         cursor.execute(query, (sku,))    
         resultado = cursor.fetchone()
@@ -100,7 +102,6 @@ async def obtener_producto_por_sku(sku: str):
             "sku": resultado['sku'],            
             "nombre": resultado['nombre'],
             "stock_bodega": resultado['stock_bodega'],
-            "stock_full": resultado['stock_full'],
             "stock_fba": resultado['stock_fba'],
             "stock_clean":resultado['stock_clean'],
             "stock_total": resultado['stock_total'],
@@ -147,7 +148,7 @@ async def actualizar_productos(datos: ProdEditSchema):
                     continue
                 
                 # Construyo la consulta dinámicamente según qué campos vinieron
-                columnas_protegidas = ["id", "sku", "in_full", "stock_total"]
+                columnas_protegidas = ["id", "sku", "stock_total"]
                 campos_actualizar = []
                 valores = []
                 
@@ -190,12 +191,12 @@ async def actualizar_productos(datos: ProdEditSchema):
         # Confirmo todos los cambios de una vez
         conn.commit()
         mov_reg.registrar_movimiento(datos.usuario, f"Actualizó productos: {len(res_actualizados)} actualizados, {len(res_errores)} errores", "Productos")
-
+      
         # Enviamos notificación a Telegram
         message = (
             f"🛠️ <b>Actualización de Productos</b>\n\n"
             f"• <b>Usuario:</b> {html.escape(datos.usuario)}\n"
-            f"• <b>Actualizados:</b> {len(res_actualizados)}\n"
+            f"• <b>Actualizados:</b>\n{len(res_actualizados)}\n"
             f"• <b>Errores:</b> {len(res_errores)}"
         )
         asyncio.create_task(send_telegram_alert(message))
@@ -239,11 +240,11 @@ async def crear_producto(prod: ProdNuevoSchema):
             raise HTTPException(status_code=400, detail=f"El SKU '{prod.sku}' ya existe en la BD")
         
         # Inserto el nuevo producto
-        # Nota: stock_bodega, stock_full, stock_fba y stock_total empiezan en 0
+        # Nota: stock_bodega, stock_fba, stock_clean y stock_total empiezan en 0
         sql_insert = """
             INSERT INTO productos 
             (sku, nombre, categoria, medida, ubicacion, stock_minimo, numero_referencia, 
-             costo_total, precio, precio_2, precio_3, stock_bodega, stock_full, stock_fba)
+             costo_total, precio, precio_2, precio_3, stock_bodega, stock_fba, stock_clean)
             VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 0, 0, 0)
         """
         
