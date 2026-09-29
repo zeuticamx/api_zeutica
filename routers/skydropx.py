@@ -1,10 +1,11 @@
 # Endpoints del modulo de envios (Skydropx Pro).
 # La logica de Skydropx vive en skydropx_service.py; aqui solo va el contrato HTTP.
 #
-# Este router es aditivo: no lee ni escribe la base de datos del sistema, salvo la
-# bitacora de movimientos al generar una guia. No comparte estado con embarques.py
-# ni con ningun otro modulo.
-from typing import Any, Dict, List, Optional
+# Este router es aditivo: solo escribe sus propias tablas (skydropx_envios.py:
+# guias y recolecciones) y la bitacora de movimientos. No comparte estado con
+# embarques.py ni con ningun otro modulo.
+from datetime import date
+from typing import Any, Dict, List, Literal, Optional
 
 import asyncio
 
@@ -128,11 +129,71 @@ class EnvioRequest(BaseModel):
     # el modal. Ver nota en skydropx_service.crear_envio().
     consignment_note: Optional[str] = Field(default=None, description="Contenido del envio (carta porte)")
     package_type: Optional[str] = Field(default=None, description="Codigo de embalaje del catalogo de Skydropx")
-    # Mismo campo y mismo criterio que en CotizacionRequest: con 1 (default) el
-    # flujo es identico al de siempre (un solo parcel, sin `packages`). Con mas
-    # de 1, se arma el arreglo `packages` con `package_number` correlativo --
-    # ver crear_envio() en este archivo y en skydropx_service.py.
+    # Mismo campo y mismo criterio que en CotizacionRequest. Siempre se arma el
+    # arreglo `packages` de V2 con `package_number` correlativo, aunque sea 1.
     cantidad_bultos: int = Field(default=1, ge=1, le=20, description="Cantidad de bultos del envio (multipaquete)")
+
+
+class RecoleccionRequest(BaseModel):
+    """
+    Paso 2 de la recoleccion: el horario elegido de entre los que devolvio
+    GET /skydropx/recolecciones/cobertura. Se vuelve a validar contra la
+    cobertura antes de agendar, porque el horario pudo cerrarse mientras el
+    usuario decidia.
+    """
+    shipment_id: str = Field(description="Shipment de Skydropx generado por este sistema")
+    fecha: date = Field(description="Fecha de recoleccion (YYYY-MM-DD)")
+    hora_inicio: str = Field(pattern=r"^\d{2}:\d{2}$", description="Inicio de la ventana, HH:MM")
+    hora_fin: str = Field(pattern=r"^\d{2}:\d{2}$", description="Fin de la ventana, HH:MM")
+    peso_total: float = Field(gt=0, description="Peso total a recolectar en kg")
+    # Si no viene, se usa cuantas guias (paquetes) tiene guardadas ese shipment.
+    paquetes: Optional[int] = Field(default=None, ge=1, le=99)
+    usuario: Optional[str] = None
+
+
+class DireccionPlantilla(BaseModel):
+    """
+    Direccion para guardar en la libreta de Skydropx. Los obligatorios son los
+    que Skydropx exige para dar de alta la plantilla (medido en sandbox: sin
+    ellos responde 400 "X no puede estar en blanco"); company es opcional.
+    """
+    model_config = ConfigDict(extra="ignore")
+
+    country_code: str = Field(default="MX")
+    postal_code: str = Field(pattern=r"^\d{5}$", description="Codigo postal, 5 digitos")
+    area_level1: str = Field(min_length=1, description="Estado")
+    area_level2: str = Field(min_length=1, description="Municipio o alcaldia")
+    area_level3: str = Field(min_length=1, description="Colonia")
+    street1: str = Field(min_length=1, description="Calle y numero")
+    name: str = Field(min_length=1, description="Nombre de contacto")
+    phone: str = Field(min_length=1)
+    email: str = Field(min_length=3)
+    reference: str = Field(min_length=1, description="Referencia visual para el repartidor")
+    company: Optional[str] = None
+    street_number: Optional[str] = None
+    apartment_number: Optional[str] = None
+    rfc: Optional[str] = None
+
+
+class PlantillaDireccionRequest(BaseModel):
+    """Alta de una direccion en la libreta de la cuenta de Skydropx (address_templates)."""
+    alias_name: str = Field(min_length=1, max_length=60, description="Alias con el que aparece en el selector")
+    address_type: Literal["from", "to"] = Field(description="from = origen/remitente, to = destino")
+    default: bool = False
+    address: DireccionPlantilla
+    usuario: Optional[str] = Field(default=None, description="Solo para la bitacora de movimientos")
+
+
+class CajaRequest(BaseModel):
+    """Medida de caja para los botones de presets del modal (catalogo propio, en MySQL)."""
+    nombre: str = Field(min_length=1, max_length=60, description="Texto del boton, ej. Caja chica")
+    length: float = Field(gt=0, le=500, description="Largo en cm")
+    width: float = Field(gt=0, le=500, description="Ancho en cm")
+    height: float = Field(gt=0, le=500, description="Alto en cm")
+    weight: float = Field(gt=0, le=1000, description="Peso estimado en kg")
+    package_type: str = Field(default="4G", min_length=1, max_length=10,
+                              description="Codigo de embalaje de Skydropx (4G = caja de carton)")
+    usuario: Optional[str] = None
 
 
 def _a_dict(modelo: Optional[BaseModel]) -> Optional[Dict[str, Any]]:
@@ -236,17 +297,16 @@ async def obtener_cotizacion(cotizacion_id: str):
 @router.post("/skydropx/envios")
 async def crear_envio(datos: EnvioRequest):
     """
-    Genera la guia a partir de un rate_id.
+    Genera la(s) guia(s) a partir de un rate_id, siempre contra
+    POST /api/v2/shipments (ver skydropx_service.crear_envio).
 
     OJO: en ambiente de produccion esto contrata el envio con el carrier y se
     cobra. No hay cancelacion desde este endpoint.
 
-    Multipaquete (cantidad_bultos > 1): el envio se manda con `packages` en
-    vez de `parcels` (ver skydropx_service.crear_envio) y la respuesta puede
-    traer varias guias (una por bulto). El flujo de 1 bulto (default) usa
-    exactamente el mismo camino que antes de este feature -- no pasa por
-    _leer_paquetes_envio ni por `packages`, para no arriesgar el comportamiento
-    ya confirmado contra el sandbox.
+    V2 responde `data` como arreglo: con cantidad_bultos > 1 puede traer un
+    shipment por bulto ("multishipment") o uno solo con varios paquetes
+    ("multipackage"). En los dos casos `paquetes` trae una entrada por guia,
+    cada una con su shipment_id, y se guarda un renglon por guia.
     """
     # Nivel shipment: si no vienen explicitos, se heredan del primer paquete
     # (el modal los captura ahi). Skydropx los exige a este nivel.
@@ -259,22 +319,14 @@ async def crear_envio(datos: EnvioRequest):
         datos.cantidad_bultos,
     )
     cantidad_bultos = max(datos.cantidad_bultos or 1, len(parcels_dicts))
-    multipaquete = cantidad_bultos > 1
-
-    packages_dicts = None
-    if multipaquete:
-        packages_dicts = [{**p, "package_number": i + 1} for i, p in enumerate(parcels_dicts)]
-        parcels_dicts = None  # multipaquete va por `packages`, no por `parcels`
-    elif not parcels_dicts:
-        parcels_dicts = None
+    packages = _armar_packages(parcels_dicts, cantidad_bultos, consignment_note, package_type)
 
     try:
         envio = await skydropx_service.crear_envio(
             rate_id=datos.rate_id,
+            packages=packages,
             address_from=_a_dict(datos.address_from),
             address_to=_a_dict(datos.address_to),
-            parcels=parcels_dicts,
-            packages=packages_dicts,
             consignment_note=consignment_note,
             package_type=package_type,
             extras=datos.extras,
@@ -282,77 +334,52 @@ async def crear_envio(datos: EnvioRequest):
     except SkydropxServiceError as err:
         raise HTTPException(status_code=err.status, detail=err.detalle)
 
-    shipment_id = _leer_id(envio)
+    guias = skydropx_service.extraer_guias(envio)
+    if not guias:
+        # 2xx sin shipments reconocibles: la guia pudo haberse cobrado, asi que
+        # no se contesta error (el usuario la generaria otra vez); se devuelve
+        # el cuerpo crudo para que se vea que paso.
+        print(f"Respuesta V2 de Skydropx sin shipments reconocibles: {str(envio)[:500]}")
 
-    def _paquete_unico(env: Dict[str, Any]) -> List[Dict[str, Any]]:
-        # Mismo dato y mismas funciones que el flujo original de un solo
-        # paquete -- no se toca para no cambiar su comportamiento.
-        return [{
-            "package_number": 1,
-            "tracking_number": _leer_tracking(env),
-            "etiqueta_url": _leer_campo_envio(env, "label_url", "label", "pdf_url"),
-            "shipment_id": _leer_id(env) or shipment_id,
-        }]
-
-    def _completos(pqs: List[Dict[str, Any]]) -> bool:
-        return len(pqs) >= cantidad_bultos and all(p.get("tracking_number") for p in pqs)
-
-    paquetes = _leer_paquetes_envio(envio) if multipaquete else _paquete_unico(envio)
-    if not paquetes:
-        paquetes = _paquete_unico(envio)  # red de seguridad si Skydropx no trajo `included`/`data` reconocibles
-
-    # El POST inicial casi siempre contesta antes de que Skydropx termine de
-    # generar la guia con el carrier: tracking_number y label_url llegan vacios
-    # (confirmado en su propia documentacion del webhook, que muestra
-    # "label_url": "" en el primer evento). Se reconsulta un par de veces -mismo
-    # patron que esperar_tarifas() para cotizaciones- para no devolverle al panel
-    # una guia sin numero de rastreo cuando Skydropx la resuelve en pocos segundos.
-    # Si sigue sin llegar, la guia ya se genero (y se cobro) de todos modos: el
-    # webhook la completara despues.
-    if not _completos(paquetes) and shipment_id:
-        for _ in range(3):
-            await asyncio.sleep(1.5)
+    # El POST casi siempre contesta antes de que el carrier asigne tracking y
+    # etiqueta (sandbox: "in_creation" con tracking_number null). Se reconsulta
+    # cada shipment pendiente un par de veces; si sigue sin llegar, el webhook
+    # lo completara despues.
+    for _ in range(3):
+        pendientes = _shipments_sin_tracking(guias)
+        if not pendientes:
+            break
+        await asyncio.sleep(1.5)
+        for sid in pendientes:
             try:
-                envio = await skydropx_service.obtener_envio(shipment_id)
+                actualizado = await skydropx_service.obtener_envio(sid)
             except SkydropxServiceError:
-                break  # no tumbar la respuesta: la guia ya se genero y se cobro
-            paquetes = _leer_paquetes_envio(envio) if multipaquete else _paquete_unico(envio)
-            if not paquetes:
-                paquetes = _paquete_unico(envio)
-            if _completos(paquetes):
-                break
+                continue  # no tumbar la respuesta: la guia ya se genero y se cobro
+            guias = _reemplazar_guias_de(guias, sid, skydropx_service.extraer_guias(actualizado))
 
-    tracking = paquetes[0].get("tracking_number") if paquetes else None
     codigo = datos.codigo_cotizacion or datos.referencia
-    carrier = _leer_carrier(envio)
-    orden_detalle_url = _leer_campo_envio(envio, "order_detail_url", "order_detail")
-    tracking_url_general = _leer_campo_envio(envio, "tracking_url_provider", "tracking_url")
 
-    # Un renglon en skydropx_envios por bulto generado. La tabla ya soportaba
-    # varias guias por cotizacion (para cuando el webhook llegaba antes de que
-    # guardaramos la guia), asi que no hizo falta tocar el esquema para esto.
-    # costo/servicio son los de la tarifa elegida, que cubre el envio completo
-    # (Skydropx no los desglosa por bulto): se repiten igual en cada renglon. Si
-    # algun reporte llega a sumar esta columna por cotizacion, debe dedupear por
-    # shipment_id en vez de sumarla tal cual.
+    # Un renglon en skydropx_envios por guia. costo/servicio son los de la
+    # tarifa elegida, que cubre el envio completo (Skydropx no los desglosa por
+    # bulto): se repiten igual en cada renglon. Si algun reporte llega a sumar
+    # esta columna por cotizacion, debe dedupear por shipment_id.
     #
     # Nunca lanza: la guia ya se contrato y se cobro, y fallar aqui haria que el
     # usuario la generara de nuevo.
     guardado = False
-    for paquete_resp in paquetes:
+    for guia in guias:
         try:
             if skydropx_envios.guardar_envio(
                 codigo_cotizacion=codigo,
-                tracking_number=paquete_resp.get("tracking_number"),
-                shipment_id=paquete_resp.get("shipment_id") or shipment_id,
-                carrier=carrier,
-                servicio=datos.servicio,
+                tracking_number=guia.get("tracking_number"),
+                shipment_id=guia.get("shipment_id"),
+                package_id=guia.get("package_id"),
+                carrier=guia.get("carrier"),
+                servicio=datos.servicio or guia.get("servicio"),
                 costo=datos.costo,
-                etiqueta_url=paquete_resp.get("etiqueta_url"),
-                # PDF de remision / packing slip. Viene junto a label_url, a
-                # nivel general del envio (no por bulto).
-                orden_detalle_url=orden_detalle_url,
-                tracking_url=tracking_url_general,
+                etiqueta_url=guia.get("etiqueta_url"),
+                orden_detalle_url=guia.get("orden_detalle_url"),
+                tracking_url=guia.get("tracking_url"),
                 usuario=datos.usuario or "sistema",
             ):
                 guardado = True
@@ -362,8 +389,9 @@ async def crear_envio(datos: EnvioRequest):
     # Bitacora. Si el registro falla no se tumba la respuesta: la guia ya se genero
     # y ocultarla con un 500 haria que el usuario la generara de nuevo (y pagara doble).
     try:
+        tracking = next((g["tracking_number"] for g in guias if g.get("tracking_number")), None)
         referencia = codigo or tracking or datos.rate_id
-        sufijo = f" multipaquete x{cantidad_bultos}" if multipaquete else ""
+        sufijo = f" x{len(guias)} guias" if len(guias) > 1 else ""
         mov_reg.registrar_movimiento(
             datos.usuario or "sistema",
             f"Genero guia Skydropx{sufijo} ({referencia})",
@@ -372,7 +400,14 @@ async def crear_envio(datos: EnvioRequest):
     except Exception as err:
         print(f"Error al registrar movimiento de guia Skydropx: {err}")
 
-    return {"status": "success", "envio": envio, "guardado": guardado, "paquetes": paquetes}
+    return {
+        "status": "success",
+        "envio": envio,
+        "guardado": guardado,
+        # Mismo contrato que antes para el panel, mas package_id y carrier.
+        "paquetes": guias,
+        "shipment_ids": list(dict.fromkeys(g["shipment_id"] for g in guias if g.get("shipment_id"))),
+    }
 
 
 @router.get("/skydropx/envios")
@@ -424,6 +459,225 @@ async def rastrear_envio(
         raise HTTPException(status_code=err.status, detail=err.detalle)
 
     return {"status": "success", "rastreo": rastreo}
+
+
+@router.get("/skydropx/direcciones")
+async def listar_direcciones(
+    address_type: Optional[Literal["from", "to"]] = Query(default=None, description="Solo origen (from) o destino (to)"),
+):
+    """
+    Libreta de direcciones guardada en la cuenta de Skydropx (address_templates),
+    ya en el mismo formato que address_from/address_to. Cache de 5 min.
+    """
+    try:
+        direcciones = await skydropx_service.listar_direcciones(address_type)
+    except SkydropxServiceError as err:
+        raise HTTPException(status_code=err.status, detail=err.detalle)
+    return {"status": "success", "direcciones": direcciones}
+
+
+@router.post("/skydropx/direcciones")
+async def guardar_direccion(datos: PlantillaDireccionRequest):
+    """
+    Guarda una direccion en la libreta de la cuenta de Skydropx para reusarla
+    despues desde el selector del modal. Devuelve la plantilla ya normalizada.
+    """
+    try:
+        plantilla = await skydropx_service.crear_direccion(
+            alias=datos.alias_name.strip(),
+            tipo=datos.address_type,
+            direccion=datos.address.model_dump(exclude_none=True),
+            por_defecto=datos.default,
+        )
+    except SkydropxServiceError as err:
+        raise HTTPException(status_code=err.status, detail=err.detalle)
+
+    try:
+        mov_reg.registrar_movimiento(
+            datos.usuario or "sistema",
+            f"Guardo direccion Skydropx '{plantilla['alias']}' ({datos.address_type})",
+            "Envios Skydropx",
+        )
+    except Exception as err:
+        print(f"Error al registrar movimiento de direccion Skydropx: {err}")
+
+    return {"status": "success", "direccion": plantilla}
+
+
+@router.get("/skydropx/cajas")
+async def listar_cajas():
+    """Medidas de caja predefinidas (catalogo propio) para los botones del modal."""
+    try:
+        cajas = skydropx_envios.listar_cajas()
+    except Exception as err:
+        print(f"Error consultando cajas Skydropx: {err}")
+        raise HTTPException(status_code=503, detail="No se pudo leer el catalogo de cajas.")
+    return {"status": "success", "cajas": cajas}
+
+
+@router.post("/skydropx/cajas")
+async def guardar_caja(datos: CajaRequest):
+    """Da de alta una medida de caja nueva. 409 si ya existe una con ese nombre."""
+    nombre = " ".join(datos.nombre.split())
+    try:
+        caja = skydropx_envios.guardar_caja(
+            nombre=nombre,
+            length=datos.length,
+            width=datos.width,
+            height=datos.height,
+            weight=datos.weight,
+            package_type=datos.package_type.strip().upper(),
+            usuario=datos.usuario,
+        )
+    except skydropx_envios.CajaDuplicada:
+        raise HTTPException(status_code=409, detail=f"Ya existe una caja llamada '{nombre}'.")
+    except Exception as err:
+        print(f"Error guardando caja Skydropx: {err}")
+        raise HTTPException(status_code=503, detail="No se pudo guardar la caja.")
+
+    try:
+        mov_reg.registrar_movimiento(datos.usuario or "sistema", f"Registro caja Skydropx '{nombre}'", "Envios Skydropx")
+    except Exception as err:
+        print(f"Error al registrar movimiento de caja Skydropx: {err}")
+
+    return {"status": "success", "caja": caja}
+
+
+@router.get("/skydropx/embalajes")
+async def listar_embalajes():
+    """Tipos de embalaje estandar (codigo para package_type + nombre). Cache de 30 min."""
+    try:
+        embalajes = await skydropx_service.listar_embalajes()
+    except SkydropxServiceError as err:
+        raise HTTPException(status_code=err.status, detail=err.detalle)
+    return {"status": "success", "embalajes": embalajes}
+
+
+@router.get("/skydropx/recolecciones")
+async def listar_recolecciones(
+    codigo_cotizacion: str = Query(description="Cotizacion cuyas recolecciones se consultan"),
+):
+    """Recolecciones ya agendadas para los envios de una cotizacion."""
+    return {"status": "success", "recolecciones": skydropx_envios.listar_recolecciones(codigo_cotizacion)}
+
+
+@router.get("/skydropx/recolecciones/cobertura")
+async def cobertura_recoleccion(
+    shipment_id: str = Query(description="Shipment de Skydropx generado por este sistema"),
+):
+    """
+    Paso 1 de la recoleccion: fechas y ventanas horarias que ofrece el carrier
+    para ese shipment. No agenda nada.
+    """
+    if not skydropx_envios.envios_de_shipment(shipment_id):
+        raise HTTPException(status_code=404, detail="Ese envio no se genero desde este sistema.")
+    try:
+        cobertura = await skydropx_service.consultar_cobertura_recoleccion(shipment_id)
+    except SkydropxServiceError as err:
+        raise HTTPException(status_code=err.status, detail=err.detalle)
+    return {
+        "status": "success",
+        "shipment_id": shipment_id,
+        "carrier": cobertura.get("carrier") if isinstance(cobertura, dict) else None,
+        "horarios": skydropx_service.extraer_horarios_recoleccion(cobertura),
+        "recoleccion": skydropx_envios.recoleccion_de(shipment_id),
+    }
+
+
+@router.post("/skydropx/recolecciones")
+async def agendar_recoleccion(datos: RecoleccionRequest):
+    """
+    Paso 2: agenda la recoleccion ligada a un shipment ya generado.
+
+    Antes de llamar a Skydropx:
+      - el shipment debe existir en skydropx_envios (lo genero este sistema);
+      - no debe tener ya una recoleccion agendada (409, evita recolecciones dobles);
+      - el horario debe seguir dentro de la cobertura (se vuelve a consultar).
+    Skydropx rechaza con 422 si la guia todavia no termina de crearse con el
+    carrier ("El estado del envio no es exitoso"); ese mensaje llega tal cual.
+    """
+    guias = skydropx_envios.envios_de_shipment(datos.shipment_id)
+    if not guias:
+        raise HTTPException(status_code=404, detail="Ese envio no se genero desde este sistema.")
+    existente = skydropx_envios.recoleccion_de(datos.shipment_id)
+    if existente:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Ese envio ya tiene recoleccion agendada para {existente.get('fecha')} "
+                   f"{existente.get('hora_inicio')}-{existente.get('hora_fin')}.",
+        )
+
+    fecha = datos.fecha.isoformat()
+    try:
+        cobertura = await skydropx_service.consultar_cobertura_recoleccion(datos.shipment_id)
+    except SkydropxServiceError as err:
+        raise HTTPException(status_code=err.status, detail=err.detalle)
+    horarios = skydropx_service.extraer_horarios_recoleccion(cobertura)
+    if not skydropx_service.ventana_en_cobertura(horarios, fecha, datos.hora_inicio, datos.hora_fin):
+        disponibles = ", ".join(f"{h['fecha']} {h['hora_inicio']}-{h['hora_fin']}" for h in horarios) or "ninguno"
+        raise HTTPException(
+            status_code=422,
+            detail=f"El horario {fecha} {datos.hora_inicio}-{datos.hora_fin} no esta en la cobertura "
+                   f"del carrier. Disponibles: {disponibles}.",
+        )
+
+    paquetes = datos.paquetes or len(guias)
+    try:
+        respuesta = await skydropx_service.crear_recoleccion(
+            shipment_id=datos.shipment_id,
+            paquetes=paquetes,
+            peso_total=datos.peso_total,
+            fecha=fecha,
+            hora_inicio=datos.hora_inicio,
+            hora_fin=datos.hora_fin,
+        )
+    except SkydropxServiceError as err:
+        raise HTTPException(status_code=err.status, detail=err.detalle)
+
+    info = skydropx_service.extraer_recoleccion(respuesta)
+    codigo = guias[0].get("codigo_cotizacion")
+    carrier = (cobertura.get("carrier") if isinstance(cobertura, dict) else None) or guias[0].get("carrier")
+    guardado = skydropx_envios.guardar_recoleccion(
+        shipment_id=datos.shipment_id,
+        codigo_cotizacion=codigo,
+        pickup_id=info["pickup_id"],
+        estatus=info["estatus"],
+        confirmacion=info["confirmacion"],
+        carrier=carrier,
+        fecha=fecha,
+        hora_inicio=datos.hora_inicio,
+        hora_fin=datos.hora_fin,
+        paquetes=paquetes,
+        peso_total=datos.peso_total,
+        usuario=datos.usuario or "sistema",
+        respuesta=respuesta,
+    )
+
+    try:
+        mov_reg.registrar_movimiento(
+            datos.usuario or "sistema",
+            f"Agendo recoleccion Skydropx {fecha} {datos.hora_inicio}-{datos.hora_fin} ({codigo or datos.shipment_id})",
+            "Envios Skydropx",
+        )
+    except Exception as err:
+        print(f"Error al registrar movimiento de recoleccion Skydropx: {err}")
+
+    return {
+        "status": "success",
+        "guardado": guardado,
+        "recoleccion": {
+            **info,
+            "shipment_id": datos.shipment_id,
+            "codigo_cotizacion": codigo,
+            "carrier": carrier,
+            "fecha": fecha,
+            "hora_inicio": datos.hora_inicio,
+            "hora_fin": datos.hora_fin,
+            "paquetes": paquetes,
+            "peso_total": datos.peso_total,
+        },
+        "respuesta": respuesta,
+    }
 
 
 @router_webhook.post("/skydropx/webhook")
@@ -519,97 +773,61 @@ def _leer_id(cotizacion: Dict[str, Any]) -> Optional[str]:
     return str(valor) if valor is not None else None
 
 
-def _leer_campo_envio(envio: Dict[str, Any], *claves: str) -> Optional[str]:
+def _armar_packages(
+    parcels: List[Dict[str, Any]],
+    cantidad: int,
+    consignment_note: Optional[str],
+    package_type: Optional[str],
+) -> List[Dict[str, Any]]:
     """
-    Busca un campo en la respuesta del envio sin casarse con la forma exacta:
-    puede venir en la raiz, bajo `data`, bajo `shipment`, dentro de `attributes`
-    de cualquiera de esos, o como recurso relacionado en `included`.
+    Arreglo `packages` para POST /api/v2/shipments: un objeto por bulto con
+    package_number correlativo, consignment_note y package_type. Solo esos
+    campos -- es la forma probada en sandbox; medidas y peso ya vienen de la
+    cotizacion del rate.
     """
-    if not isinstance(envio, dict):
-        return None
-
-    candidatos = [envio]
-    for llave in ("data", "shipment"):
-        anidado = envio.get(llave)
-        if isinstance(anidado, dict):
-            candidatos.append(anidado)
-
-    for candidato in list(candidatos):
-        atributos = candidato.get("attributes")
-        if isinstance(atributos, dict):
-            candidatos.append(atributos)
-
-    incluidos = envio.get("included")
-    if isinstance(incluidos, list):
-        for item in incluidos:
-            if isinstance(item, dict):
-                candidatos.append(item)
-                if isinstance(item.get("attributes"), dict):
-                    candidatos.append(item["attributes"])
-
-    for clave in claves:
-        for candidato in candidatos:
-            valor = candidato.get(clave)
-            if valor:
-                return str(valor)
-    return None
+    packages = []
+    for numero in range(1, max(cantidad, 1) + 1):
+        parcela = parcels[numero - 1] if numero <= len(parcels) else (parcels[0] if parcels else {})
+        paquete = {"package_number": numero}
+        nota = parcela.get("consignment_note") or consignment_note
+        tipo = parcela.get("package_type") or package_type
+        if nota:
+            paquete["consignment_note"] = nota
+        if tipo:
+            paquete["package_type"] = tipo
+        packages.append(paquete)
+    return packages
 
 
-def _leer_tracking(envio: Dict[str, Any]) -> Optional[str]:
-    """Numero de rastreo de la guia recien generada."""
-    return _leer_campo_envio(envio, "tracking_number")
+def _shipments_sin_tracking(guias: List[Dict[str, Any]]) -> List[str]:
+    """shipment_id de las guias que todavia no traen tracking_number, sin repetir."""
+    return list(dict.fromkeys(
+        g["shipment_id"] for g in guias if g.get("shipment_id") and not g.get("tracking_number")
+    ))
 
 
-def _leer_paquetes_envio(envio: Dict[str, Any]) -> List[Dict[str, Any]]:
+def _reemplazar_guias_de(
+    guias: List[Dict[str, Any]],
+    shipment_id: str,
+    nuevas: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
     """
-    Extrae una entrada por bulto de la respuesta de POST/GET shipments, para
-    envios MULTIPAQUETE donde cada paquete trae su propio tracking_number y
-    label_url. Solo se usa cuando cantidad_bultos > 1 -- el flujo de 1 bulto
-    sigue usando _leer_tracking/_leer_campo_envio tal cual estaban.
-
-    No confirmado contra esta cuenta (el sandbox no se probo todavia con mas
-    de un bulto). Formas que Skydropx documenta segun la version del endpoint:
-      - V1: el shipment va en `data`/raiz y los paquetes como recursos
-        relacionados tipo "packages" en `included` (JSON:API), igual que en
-        extraer_evento_webhook() de skydropx_service.py.
-      - V2: `data` llega como arreglo, un recurso por paquete/guia generada.
-    Si ninguna de las dos formas aparece, se devuelve una lista vacia y el
-    llamador cae de vuelta a _paquete_unico() como red de seguridad.
+    Sustituye las guias de un shipment por las de su reconsulta, conservando el
+    orden y renumerando package_number. Si la reconsulta no trae nada
+    reconocible, se quedan las que habia.
     """
-    if not isinstance(envio, dict):
-        return []
-
-    paquetes: List[Dict[str, Any]] = []
-    shipment_id = _leer_id(envio)
-
-    incluidos = envio.get("included")
-    if isinstance(incluidos, list):
-        for item in incluidos:
-            if not isinstance(item, dict) or not str(item.get("type", "")).startswith("package"):
-                continue
-            atributos = item.get("attributes") if isinstance(item.get("attributes"), dict) else {}
-            paquetes.append({
-                "package_number": atributos.get("package_number") or item.get("package_number"),
-                "tracking_number": atributos.get("tracking_number") or item.get("tracking_number"),
-                "etiqueta_url": atributos.get("label_url") or item.get("label_url"),
-                "shipment_id": shipment_id,
-            })
-
-    if not paquetes and isinstance(envio.get("data"), list):
-        for item in envio["data"]:
-            if not isinstance(item, dict):
-                continue
-            atributos = item.get("attributes") if isinstance(item.get("attributes"), dict) else {}
-            paquetes.append({
-                "package_number": atributos.get("package_number") or item.get("package_number"),
-                "tracking_number": atributos.get("tracking_number") or item.get("tracking_number"),
-                "etiqueta_url": atributos.get("label_url") or item.get("label_url"),
-                "shipment_id": item.get("id") or shipment_id,
-            })
-
-    return paquetes
-
-
-def _leer_carrier(envio: Dict[str, Any]) -> Optional[str]:
-    """Carrier que quedo en la guia. Hace falta para poder rastrearla despues."""
-    return _leer_campo_envio(envio, "provider", "carrier", "carrier_name")
+    nuevas = [g for g in nuevas if g.get("shipment_id") == shipment_id]
+    if not nuevas:
+        return guias
+    resultado: List[Dict[str, Any]] = []
+    insertado = False
+    for g in guias:
+        if g.get("shipment_id") == shipment_id:
+            if not insertado:
+                resultado.extend(dict(n) for n in nuevas)
+                insertado = True
+            continue
+        resultado.append(g)
+    for numero, g in enumerate(resultado, start=1):
+        g["package_number"] = numero
+    return resultado

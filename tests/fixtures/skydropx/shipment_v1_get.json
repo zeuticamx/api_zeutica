@@ -1,0 +1,149 @@
+{
+ "data": {
+  "id": "8d373fa2-db02-4e58-9ccd-628b1534c7dd",
+  "type": "shipment",
+  "attributes": {
+   "id": "8d373fa2-db02-4e58-9ccd-628b1534c7dd",
+   "carrier_name": "ampm",
+   "workflow_status": "in_progress",
+   "payment_status": "paid",
+   "total": "34.95",
+   "carrier_id": "18bbe90a-1272-495e-b23d-a423d5cef87c",
+   "source": "api",
+   "service_id": "cdae80ac-aa37-4bfd-98ed-c968ee565a88",
+   "created_at": "2026-09-29T09:55:59.445-06:00",
+   "updated_at": "2026-09-29T09:57:02.204-06:00",
+   "original_shipment_id": null,
+   "on_delivery_amount": null,
+   "on_delivery_status": null,
+   "recipient_pays_shipping": false,
+   "office_delivery": null,
+   "office_pickup": null,
+   "office_pickup_point_id": null,
+   "office_delivery_point_id": null,
+   "master_tracking_number": null,
+   "service_name": "Standard",
+   "service_code": "standard_ll",
+   "shipment_scope": "national",
+   "estimated_delivery_days": 1,
+   "error_detail": null,
+   "order_detail_url": null
+  },
+  "relationships": {
+   "packages": {
+    "data": [
+     {
+      "id": "e79d7c0b-53d0-4a7d-a58d-97b9499e3dcc",
+      "type": "package"
+     }
+    ]
+   },
+   "address_from": {
+    "data": {
+     "id": "d6ec863e-a60e-4f17-a6e4-90073268395f",
+     "type": "address"
+    }
+   },
+   "address_to": {
+    "data": {
+     "id": "a49626e2-76cb-43cd-b2d3-bd8585c0d23b",
+     "type": "address"
+    }
+   }
+  }
+ },
+ "included": [
+  {
+   "id": "e79d7c0b-53d0-4a7d-a58d-97b9499e3dcc",
+   "type": "package",
+   "attributes": {
+    "id": "e79d7c0b-53d0-4a7d-a58d-97b9499e3dcc",
+    "package_type": "4G",
+    "weight": "2.0",
+    "length": "25.0",
+    "width": "20.0",
+    "height": "15.0",
+    "consignment_note": "53103200",
+    "package_content": null,
+    "declared_amount": null,
+    "created_at": "2026-09-29T09:55:59.516-06:00",
+    "updated_at": "2026-09-29T09:55:59.589-06:00",
+    "tracking_status": "in_creation",
+    "tracking_status_display_name": "En creación",
+    "tracking_url_provider": null,
+    "tracking_number": null,
+    "label_url": null
+   },
+   "relationships": {
+    "shipment": {
+     "data": {
+      "id": "8d373fa2-db02-4e58-9ccd-628b1534c7dd",
+      "type": "shipment"
+     }
+    }
+   }
+  },
+  {
+   "id": "d6ec863e-a60e-4f17-a6e4-90073268395f",
+   "type": "address",
+   "attributes": {
+    "id": "d6ec863e-a60e-4f17-a6e4-90073268395f",
+    "area_level1": "Jalisco",
+    "area_level2": "Zapopan",
+    "name": "Zeutica",
+    "country_code": "MX",
+    "address_type": "from",
+    "street1": "Blvd. De los Charros 1629",
+    "company": "Zeutica",
+    "phone": "3312995688",
+    "email": "ventas1@zeutica.com",
+    "reference": "Bodega Zeutica, porton gris",
+    "area_level3": "Belenes Norte",
+    "apartment_number": null,
+    "further_information": null,
+    "tax_id_number": null,
+    "tax_id_type": null,
+    "postal_code": "45145"
+   },
+   "relationships": {
+    "shipment": {
+     "data": {
+      "id": "8d373fa2-db02-4e58-9ccd-628b1534c7dd",
+      "type": "shipment"
+     }
+    }
+   }
+  },
+  {
+   "id": "a49626e2-76cb-43cd-b2d3-bd8585c0d23b",
+   "type": "address",
+   "attributes": {
+    "id": "a49626e2-76cb-43cd-b2d3-bd8585c0d23b",
+    "area_level1": "Jalisco",
+    "area_level2": "Guadalajara",
+    "name": "Prueba Sandbox",
+    "country_code": "MX",
+    "address_type": "to",
+    "street1": "Av. Juarez 100",
+    "company": "Prueba Sandbox",
+    "phone": "3312345678",
+    "email": "prueba@example.com",
+    "reference": "Prueba sandbox",
+    "area_level3": "Centro",
+    "apartment_number": null,
+    "further_information": null,
+    "tax_id_number": null,
+    "tax_id_type": null,
+    "postal_code": "44100"
+   },
+   "relationships": {
+    "shipment": {
+     "data": {
+      "id": "8d373fa2-db02-4e58-9ccd-628b1534c7dd",
+      "type": "shipment"
+     }
+    }
+   }
+  }
+ ]
+}

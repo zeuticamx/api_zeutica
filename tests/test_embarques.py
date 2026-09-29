@@ -10,6 +10,10 @@ from routers import embarques as embarques_router
 from routers.embarques import EtapaTipo, EtapaUpdate
 
 
+# El endpoint lee y conserva el tipo de cambio guardado en la etapa.
+SIN_TIPO_CAMBIO = {"tipo_cambio_fecha": None, "tipo_cambio_valor": None, "tipo_cambio_fecha_dato": None}
+
+
 class FakeCursor:
     """Cursor falso: entrega fetchone() en el orden en que se pide y
     registra cada UPDATE/SELECT ejecutado para poder inspeccionarlo."""
@@ -64,7 +68,7 @@ def _update_params(cursor):
 @pytest.mark.asyncio
 async def test_marcar_etapa_completada(monkeypatch):
     """Al marcar completada, se actualiza completado=True."""
-    etapa_previa = {"id": 10, "nota": None}
+    etapa_previa = {"id": 10, "nota": None, **SIN_TIPO_CAMBIO}
     etapa_final = {
         "id": 10, "embarque_id": 1, "tipo": "ANTICIPO_CHINA", "completado": True, "nota": None,
     }
@@ -85,7 +89,7 @@ async def test_marcar_etapa_completada(monkeypatch):
 @pytest.mark.asyncio
 async def test_marcar_etapa_incompleta(monkeypatch):
     """Al desmarcar, se actualiza completado=False."""
-    etapa_previa = {"id": 11, "nota": None}
+    etapa_previa = {"id": 11, "nota": None, **SIN_TIPO_CAMBIO}
     etapa_final = {
         "id": 11, "embarque_id": 1, "tipo": "LIQUIDADO_CHINA", "completado": False, "nota": None,
     }
@@ -106,7 +110,7 @@ async def test_marcar_etapa_incompleta(monkeypatch):
 @pytest.mark.asyncio
 async def test_actualizar_nota_etapa(monkeypatch):
     """Actualiza nota sin cambiar completado."""
-    etapa_previa = {"id": 12, "nota": "Nota vieja"}
+    etapa_previa = {"id": 12, "nota": "Nota vieja", **SIN_TIPO_CAMBIO}
     etapa_final = {
         "id": 12, "embarque_id": 1, "tipo": "HL_LIQUIDADA", "completado": True, "nota": "Nota nueva",
     }
@@ -132,3 +136,24 @@ async def test_marcar_etapa_embarque_inexistente_devuelve_404(monkeypatch):
         await embarques_router.marcar_etapa(999, EtapaTipo.ANTICIPO_CHINA, payload)
 
     assert exc_info.value.status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_marcar_etapa_conserva_tipo_cambio_guardado(monkeypatch):
+    """Si el payload no trae tipo de cambio, se reescribe el que ya tenia la etapa."""
+    guardado = {
+        "tipo_cambio_fecha": date(2026, 9, 1),
+        "tipo_cambio_valor": 18.5,
+        "tipo_cambio_fecha_dato": date(2026, 8, 31),
+    }
+    etapa_final = {"id": 13, "embarque_id": 1, "tipo": "ANTICIPO_CHINA", "completado": True, "nota": None, **guardado}
+    cursor = _preparar_mocks(
+        monkeypatch,
+        fetchone_secuencia=[{"id": 1}, {"id": 13, "nota": None, **guardado}, etapa_final],
+    )
+
+    payload = EtapaUpdate(completado=True, usuario="tester")
+    await embarques_router.marcar_etapa(1, EtapaTipo.ANTICIPO_CHINA, payload)
+
+    _, params = _update_params(cursor)
+    assert params[2:5] == (guardado["tipo_cambio_fecha"], guardado["tipo_cambio_valor"], guardado["tipo_cambio_fecha_dato"])

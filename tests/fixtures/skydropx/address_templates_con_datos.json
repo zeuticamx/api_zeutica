@@ -1,0 +1,62 @@
+{
+ "data": [
+  {
+   "id": "58689568-0000-4000-8000-000000000001",
+   "alias_name": "cliente prueba",
+   "address_type": "to",
+   "default": false,
+   "address": {
+    "name": "Cliente Prueba",
+    "company": "Comercial Prueba",
+    "street1": "Avenida 8 de Julio",
+    "street_number": "",
+    "apartment_number": "462",
+    "postal_code": "44100",
+    "area_level1": "Jalisco",
+    "area_level2": "Guadalajara",
+    "area_level3": "Guadalajara Centro",
+    "country_code": "MX",
+    "phone": "3300000001",
+    "email": "cliente@example.com",
+    "reference": "Entre calles de prueba",
+    "rfc": null,
+    "tax_id_number": null,
+    "tax_id_type": null
+   },
+   "verified_carriers": []
+  },
+  {
+   "id": "4de8aef1-0000-4000-8000-000000000002",
+   "alias_name": "bodega",
+   "address_type": "from",
+   "default": true,
+   "address": {
+    "name": "Contacto Bodega",
+    "company": "zeutica",
+    "street1": "Boulevard de los charros",
+    "street_number": "",
+    "apartment_number": "1629",
+    "postal_code": "45145",
+    "area_level1": "Jalisco",
+    "area_level2": "Zapopan",
+    "area_level3": "Parque Industrial Belenes Norte",
+    "country_code": "MX",
+    "phone": "3300000002",
+    "email": "bodega@example.com",
+    "reference": "porton negro",
+    "rfc": "XAXX010101000",
+    "tax_id_number": "XAXX010101000",
+    "tax_id_type": "rfc"
+   },
+   "verified_carriers": []
+  }
+ ],
+ "meta": {
+  "total_count": 2,
+  "per_page": 20,
+  "current_page": 1,
+  "total_pages": 1,
+  "next_page": null,
+  "prev_page": null
+ }
+}

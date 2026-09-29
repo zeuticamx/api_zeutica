@@ -1,0 +1,91 @@
+{
+ "data": [
+  {
+   "code": "4G",
+   "name": "Caja de cartón"
+  },
+  {
+   "code": "5H4",
+   "name": "Saco (bolsa) de película de plástico"
+  },
+  {
+   "code": "5M1",
+   "name": "Saco (bolsa) de papel de varias hojas"
+  },
+  {
+   "code": "7H1",
+   "name": "Bulto de plástico"
+  },
+  {
+   "code": "4B",
+   "name": "Caja de aluminio"
+  },
+  {
+   "code": "4C1",
+   "name": "Caja de madera natural ordinaria"
+  },
+  {
+   "code": "4C2",
+   "name": "Caja de madera natural de paredes a prueba de polvos (estancas a los pulverulentos)"
+  },
+  {
+   "code": "4D",
+   "name": "Caja de madera contrachapada"
+  },
+  {
+   "code": "4F",
+   "name": "Caja de madera reconstituida"
+  },
+  {
+   "code": "4H1",
+   "name": "Caja de plástico expandido"
+  },
+  {
+   "code": "4H2",
+   "name": "Caja de plástico rígido"
+  },
+  {
+   "code": "6HC",
+   "name": "Envase y embalaje compuesto de recipiente de plástico, con una caja de madera"
+  },
+  {
+   "code": "6HB2",
+   "name": "Envase y embalaje compuesto de recipiente de plástico, con una jaula o caja de aluminio"
+  },
+  {
+   "code": "6HD2",
+   "name": "Envase y embalaje compuesto de recipiente de plástico, con una caja de madera contrachapada"
+  },
+  {
+   "code": "6HA2",
+   "name": "Envase y embalaje compuesto de recipiente de plástico, con una jaula o caja de acero"
+  },
+  {
+   "code": "1A2",
+   "name": "Bidón (tambor) de acero 1 de tapa desmontable"
+  },
+  {
+   "code": "5M2",
+   "name": "Saco (bolsa) de papel de varias hojas, resistente al agua"
+  },
+  {
+   "code": "7L1",
+   "name": "Bulto de tela"
+  },
+  {
+   "code": "6HH1",
+   "name": "Envase y embalaje compuesto de recipiente de plástico, con un bidón (tambor) de plástico"
+  },
+  {
+   "code": "6HG2",
+   "name": "Envase y embalaje compuesto de recipiente de plástico, con una caja de cartón"
+  }
+ ],
+ "meta": {
+  "current_page": 1,
+  "next_page": 2,
+  "prev_page": null,
+  "total_pages": 3,
+  "total_count": 60
+ }
+}

@@ -75,6 +75,12 @@ def describir_estatus(estatus: Optional[str]) -> Dict[str, str]:
 # modulo ya corrio necesitan este ALTER (mismo patron que routers/embarques.py).
 _COLUMNAS_NUEVAS_ENVIOS = [
     ("orden_detalle_url", "TEXT NULL AFTER etiqueta_url"),
+    ("package_id", "VARCHAR(100) NULL AFTER shipment_id"),
+]
+
+# Indices que acompanan a columnas nuevas (mismo motivo que arriba).
+_INDICES_NUEVOS_ENVIOS = [
+    ("uq_sky_package", "UNIQUE KEY uq_sky_package (package_id)"),
 ]
 
 
@@ -83,6 +89,15 @@ def _columna_existe(cursor, tabla: str, columna: str) -> bool:
         "SELECT 1 FROM INFORMATION_SCHEMA.COLUMNS "
         "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND COLUMN_NAME = %s",
         (tabla, columna)
+    )
+    return cursor.fetchone() is not None
+
+
+def _indice_existe(cursor, tabla: str, indice: str) -> bool:
+    cursor.execute(
+        "SELECT 1 FROM INFORMATION_SCHEMA.STATISTICS "
+        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s AND INDEX_NAME = %s LIMIT 1",
+        (tabla, indice)
     )
     return cursor.fetchone() is not None
 
@@ -106,6 +121,10 @@ def crear_tablas_skydropx():
             if not _columna_existe(cursor, "skydropx_envios", columna):
                 cursor.execute(f"ALTER TABLE skydropx_envios ADD COLUMN {columna} {definicion}")
                 print(f"Columna skydropx_envios.{columna} agregada.")
+        for indice, definicion in _INDICES_NUEVOS_ENVIOS:
+            if not _indice_existe(cursor, "skydropx_envios", indice):
+                cursor.execute(f"ALTER TABLE skydropx_envios ADD {definicion}")
+                print(f"Indice skydropx_envios.{indice} agregado.")
         conn.commit()
         print("Tablas de envios Skydropx verificadas/creadas.")
     except mysql.connector.Error as err:
@@ -133,12 +152,14 @@ def guardar_envio(
     orden_detalle_url: Optional[str] = None,
     tracking_url: Optional[str] = None,
     usuario: Optional[str] = None,
+    package_id: Optional[str] = None,
 ) -> bool:
     """
     Registra la guia recien generada. Devuelve True si se guardo.
 
-    Es UPSERT: si el webhook ya creo la fila (porque Skydropx notifico antes de
-    que termináramos), se completan los datos sin pisar el estatus que ya llego.
+    Es UPSERT sobre tracking_number o package_id (los dos son UNIQUE): si el
+    webhook ya creo la fila (porque Skydropx notifico antes de que
+    termináramos), se completan los datos sin pisar el estatus que ya llego.
     Nunca lanza: la guia ya se contrato y se cobro, y fallar aqui haria que el
     usuario la generara de nuevo.
     """
@@ -151,12 +172,14 @@ def guardar_envio(
         cursor.execute(
             """
             INSERT INTO skydropx_envios
-                (codigo_cotizacion, tracking_number, shipment_id, carrier, servicio,
+                (codigo_cotizacion, tracking_number, shipment_id, package_id, carrier, servicio,
                  costo, etiqueta_url, orden_detalle_url, tracking_url, usuario)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
                 codigo_cotizacion = VALUES(codigo_cotizacion),
+                tracking_number   = COALESCE(VALUES(tracking_number), tracking_number),
                 shipment_id       = COALESCE(VALUES(shipment_id), shipment_id),
+                package_id        = COALESCE(VALUES(package_id), package_id),
                 carrier           = COALESCE(VALUES(carrier), carrier),
                 servicio          = COALESCE(VALUES(servicio), servicio),
                 costo             = COALESCE(VALUES(costo), costo),
@@ -165,7 +188,7 @@ def guardar_envio(
                 tracking_url      = COALESCE(VALUES(tracking_url), tracking_url),
                 usuario           = COALESCE(VALUES(usuario), usuario)
             """,
-            (codigo_cotizacion, tracking, shipment_id, carrier, servicio,
+            (codigo_cotizacion, tracking, shipment_id, package_id, carrier, servicio,
              costo, etiqueta_url, orden_detalle_url, tracking_url, usuario)
         )
         conn.commit()
@@ -198,6 +221,7 @@ def registrar_evento_webhook(evento: Dict[str, Any], payload_crudo: Optional[str
     estatus = (evento.get("estatus") or "").strip() or None
     descripcion = (evento.get("descripcion") or "").strip() or None
     shipment_id = evento.get("shipment_id")
+    package_id = evento.get("package_id")
 
     if not tracking and not shipment_id:
         print("Webhook Skydropx sin tracking_number ni shipment_id: no hay como ligarlo.")
@@ -229,8 +253,28 @@ def registrar_evento_webhook(evento: Dict[str, Any], payload_crudo: Optional[str
 
         encontrado = False
         if estatus:
-            # Primero por tracking (la llave que trae el webhook); si no, por shipment.
-            if tracking:
+            # Primero por package_id: con V2 la guia nace sin tracking, y en
+            # multipaquete varios paquetes comparten shipment_id, asi que es la
+            # unica llave que apunta a UNA sola fila desde el principio.
+            if package_id:
+                cursor.execute(
+                    """
+                    UPDATE skydropx_envios
+                    SET estatus = %s,
+                        estatus_descripcion = COALESCE(%s, estatus_descripcion),
+                        tracking_number = COALESCE(tracking_number, %s),
+                        etiqueta_url = COALESCE(NULLIF(%s, ''), etiqueta_url),
+                        tracking_url = COALESCE(NULLIF(%s, ''), tracking_url),
+                        shipment_id = COALESCE(shipment_id, %s)
+                    WHERE package_id = %s
+                    """,
+                    (estatus, descripcion, tracking, evento.get("etiqueta_url") or "",
+                     evento.get("tracking_url") or "", shipment_id, package_id)
+                )
+                encontrado = cursor.rowcount > 0
+
+            # Luego por tracking; si no, por shipment.
+            if tracking and not encontrado:
                 cursor.execute(
                     """
                     UPDATE skydropx_envios
@@ -273,14 +317,14 @@ def registrar_evento_webhook(evento: Dict[str, Any], payload_crudo: Optional[str
                 cursor.execute(
                     """
                     INSERT INTO skydropx_envios
-                        (codigo_cotizacion, tracking_number, shipment_id, estatus,
+                        (codigo_cotizacion, tracking_number, shipment_id, package_id, estatus,
                          estatus_descripcion, etiqueta_url, tracking_url)
-                    VALUES (NULL, %s, %s, %s, %s, NULLIF(%s, ''), NULLIF(%s, ''))
+                    VALUES (NULL, %s, %s, %s, %s, %s, NULLIF(%s, ''), NULLIF(%s, ''))
                     ON DUPLICATE KEY UPDATE
                         estatus = VALUES(estatus),
                         estatus_descripcion = COALESCE(VALUES(estatus_descripcion), estatus_descripcion)
                     """,
-                    (tracking, shipment_id, estatus, descripcion,
+                    (tracking, shipment_id, package_id, estatus, descripcion,
                      evento.get("etiqueta_url") or "", evento.get("tracking_url") or "")
                 )
 
@@ -389,6 +433,224 @@ def eventos_de(tracking_number: str) -> List[Dict[str, Any]]:
     except mysql.connector.Error as err:
         print(f"Error consultando eventos Skydropx: {err}")
         return []
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Recolecciones
+# ─────────────────────────────────────────────────────────────────────────────
+
+def envios_de_shipment(shipment_id: str) -> List[Dict[str, Any]]:
+    """
+    Guias (paquetes) guardadas para un shipment. Lista vacia = el shipment no
+    lo genero este sistema, y no se le debe agendar recoleccion desde aqui.
+    """
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(
+            "SELECT * FROM skydropx_envios WHERE shipment_id = %s ORDER BY id",
+            (shipment_id,)
+        )
+        return [_con_estatus(f) for f in cursor.fetchall()]
+    except mysql.connector.Error as err:
+        print(f"Error consultando envios del shipment {shipment_id}: {err}")
+        return []
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+def _recoleccion_serializable(fila: Dict[str, Any]) -> Dict[str, Any]:
+    fila = dict(fila)
+    fila.pop("respuesta", None)
+    for campo in ("fecha", "creado_en"):
+        if fila.get(campo) is not None:
+            fila[campo] = str(fila[campo])
+    if fila.get("peso_total") is not None:
+        fila["peso_total"] = float(fila["peso_total"])
+    return fila
+
+
+def recoleccion_de(shipment_id: str) -> Optional[Dict[str, Any]]:
+    """La recoleccion ya agendada para un shipment, o None."""
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT * FROM skydropx_recolecciones WHERE shipment_id = %s", (shipment_id,))
+        fila = cursor.fetchone()
+        return _recoleccion_serializable(fila) if fila else None
+    except mysql.connector.Error as err:
+        print(f"Error consultando recoleccion de {shipment_id}: {err}")
+        return None
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+def listar_recolecciones(codigo_cotizacion: str) -> List[Dict[str, Any]]:
+    """Recolecciones agendadas para los envios de una cotizacion."""
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(
+            "SELECT * FROM skydropx_recolecciones WHERE codigo_cotizacion = %s ORDER BY id",
+            (codigo_cotizacion,)
+        )
+        return [_recoleccion_serializable(f) for f in cursor.fetchall()]
+    except mysql.connector.Error as err:
+        print(f"Error consultando recolecciones de {codigo_cotizacion}: {err}")
+        return []
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+def guardar_recoleccion(
+    shipment_id: str,
+    codigo_cotizacion: Optional[str],
+    pickup_id: Optional[str],
+    estatus: Optional[str],
+    confirmacion: Optional[str],
+    carrier: Optional[str],
+    fecha: str,
+    hora_inicio: str,
+    hora_fin: str,
+    paquetes: int,
+    peso_total: float,
+    usuario: Optional[str],
+    respuesta: Optional[Dict[str, Any]] = None,
+) -> bool:
+    """
+    Registra la recoleccion ya agendada en Skydropx. Nunca lanza: la
+    recoleccion ya existe con el carrier y fallar aqui haria que el usuario la
+    agendara otra vez.
+    """
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO skydropx_recolecciones
+                (shipment_id, codigo_cotizacion, pickup_id, estatus, confirmacion, carrier,
+                 fecha, hora_inicio, hora_fin, paquetes, peso_total, usuario, respuesta)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+                pickup_id = VALUES(pickup_id), estatus = VALUES(estatus),
+                confirmacion = VALUES(confirmacion), fecha = VALUES(fecha),
+                hora_inicio = VALUES(hora_inicio), hora_fin = VALUES(hora_fin),
+                paquetes = VALUES(paquetes), peso_total = VALUES(peso_total),
+                respuesta = VALUES(respuesta)
+            """,
+            (shipment_id, codigo_cotizacion, pickup_id, estatus, confirmacion, carrier,
+             fecha, hora_inicio, hora_fin, paquetes, peso_total, usuario,
+             json.dumps(respuesta, ensure_ascii=False)[:4000] if respuesta is not None else None)
+        )
+        conn.commit()
+        return True
+    except mysql.connector.Error as err:
+        if conn:
+            conn.rollback()
+        print(f"Error guardando recoleccion Skydropx: {err}")
+        return False
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Catalogo de cajas (presets de medidas del modal)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class CajaDuplicada(Exception):
+    """Ya existe una caja con ese nombre (indice unico uq_sky_caja_nombre)."""
+
+
+def _caja_serializable(fila: Dict[str, Any]) -> Dict[str, Any]:
+    fila = dict(fila)
+    for campo in ("length", "width", "height", "weight"):
+        if fila.get(campo) is not None:
+            fila[campo] = float(fila[campo])
+    if fila.get("creado_en") is not None:
+        fila["creado_en"] = str(fila["creado_en"])
+    return fila
+
+
+def listar_cajas() -> List[Dict[str, Any]]:
+    """Cajas en el orden en que se dieron de alta (las 4 de semilla primero)."""
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(
+            "SELECT id, nombre, length, width, height, weight, package_type, creado_en "
+            "FROM skydropx_cajas ORDER BY id"
+        )
+        return [_caja_serializable(f) for f in cursor.fetchall()]
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+def guardar_caja(
+    nombre: str,
+    length: float,
+    width: float,
+    height: float,
+    weight: float,
+    package_type: str = "4G",
+    usuario: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Da de alta una caja y la devuelve. Lanza CajaDuplicada si el nombre ya existe."""
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(
+            """
+            INSERT INTO skydropx_cajas (nombre, length, width, height, weight, package_type, usuario)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """,
+            (nombre, length, width, height, weight, package_type, usuario)
+        )
+        nuevo_id = cursor.lastrowid
+        conn.commit()
+        cursor.execute(
+            "SELECT id, nombre, length, width, height, weight, package_type, creado_en "
+            "FROM skydropx_cajas WHERE id = %s",
+            (nuevo_id,)
+        )
+        return _caja_serializable(cursor.fetchone())
+    except mysql.connector.IntegrityError as err:
+        if conn:
+            conn.rollback()
+        if err.errno == 1062:
+            raise CajaDuplicada(nombre)
+        raise
     finally:
         if cursor:
             cursor.close()

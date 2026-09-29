@@ -1,0 +1,27 @@
+{
+ "data": {
+  "id": "f8dde869-0000-4000-8000-000000000003",
+  "alias_name": "PRUEBA",
+  "address_type": "to",
+  "default": false,
+  "address": {
+   "name": "Prueba",
+   "company": "Prueba SA",
+   "street1": "Av. Juarez",
+   "street_number": "100",
+   "apartment_number": "4B",
+   "postal_code": "44100",
+   "area_level1": "Jalisco",
+   "area_level2": "Guadalajara",
+   "area_level3": "Centro",
+   "country_code": "MX",
+   "phone": "3312345678",
+   "email": "prueba@example.com",
+   "reference": "Porton verde",
+   "rfc": null,
+   "tax_id_number": null,
+   "tax_id_type": null
+  },
+  "verified_carriers": []
+ }
+}
