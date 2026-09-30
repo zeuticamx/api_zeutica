@@ -32,10 +32,12 @@ class clienteRfc(Cliente): # molde con herencia para cliente factura
     cp: Optional[int] = None
     regimen: Optional[str] = None
     usocdfi: Optional[str] = None
+    uso_cfdi: Optional[str] = None  # nombre que envía el panel; usocdfi se conserva por compatibilidad
     frecuencia: Optional[str] = None
     usuario: str
     credito: bool
     monto_credito: Optional[int] = None
+    dias_credito: Optional[int] = None
     
 
 class clienteEditar(clienteRfc): # molde para editar cliente con id
@@ -188,23 +190,36 @@ async def cliente_nuevo(cliente: clienteRfc, usuario: str):
     """
     Dependencia para ingresar un cliente nuevo a DB.
     """
+    nombre = (cliente.nombre or "").strip()
+    if not nombre:
+        raise HTTPException(status_code=422, detail="El nombre del cliente es obligatorio")
+
     conn = get_db_connection()
     cursor = conn.cursor() 
 
     # El Query de inserción
     query = """
-        INSERT INTO clientes (nombre, email, empresa, contacto, telefono, direccion, rfc, cp, regimen, usocfdi, frecuencia, usuario, credito, monto_credito) 
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO clientes (nombre, email, empresa, contacto, telefono, direccion, rfc, cp, regimen, usocfdi, frecuencia, usuario, credito, monto_credito, dias_credito) 
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
 
+    # El panel manda uso_cfdi; usocdfi (typo histórico) sigue aceptándose
+    uso_cfdi = cliente.uso_cfdi or cliente.usocdfi
+
     # Extraemos los valores del objeto cliente
-    valores = (cliente.nombre, cliente.email, cliente.empresa, cliente.contacto, cliente.telefono, cliente.direccion, cliente.rfc, cliente.cp, cliente.regimen, cliente.usocdfi, cliente.frecuencia, cliente.usuario, cliente.credito, cliente.monto_credito)
+    valores = (nombre, cliente.email, cliente.empresa, cliente.contacto, cliente.telefono, cliente.direccion, cliente.rfc, cliente.cp, cliente.regimen, uso_cfdi, cliente.frecuencia, cliente.usuario, cliente.credito, cliente.monto_credito, cliente.dias_credito or 0)
 
     try:
+        # El selector de cotizaciones identifica al cliente por nombre: se evitan duplicados al crear
+        cursor.execute("SELECT id FROM clientes WHERE LOWER(TRIM(nombre)) = LOWER(%s) LIMIT 1", (nombre,))
+        if cursor.fetchone():
+            raise HTTPException(status_code=409, detail=f"Ya existe un cliente llamado '{nombre}'")
+
         cursor.execute(query, valores)
         conn.commit() # ¡Vital para guardar en MySQL!
+        nuevo_id = cursor.lastrowid
 
-        mov_reg.registrar_movimiento(usuario, f"Registró un nuevo cliente: {cliente.nombre}", "Clientes")
+        mov_reg.registrar_movimiento(usuario, f"Registró un nuevo cliente: {nombre}", "Clientes")
 
         # Enviamos notificación a Telegram
         empresa_safe = html.escape(str(cliente.empresa))
@@ -212,13 +227,14 @@ async def cliente_nuevo(cliente: clienteRfc, usuario: str):
 
         message = (
             f"📋 <b>Cliente Nuevo Registrado</b>\n\n"
-            f"• <b>Código:</b> <code>{cursor.lastrowid}</code>\n"
+            f"• <b>Código:</b> <code>{nuevo_id}</code>\n"
             f"• <b>Empresa:</b> {empresa_safe}\n"
             f"• <b>Usuario:</b> {usuario_safe}"
         )
         asyncio.create_task(send_telegram_alert(message))
 
-        return {"mensaje": "Cliente agregado con éxito ", "id ": cursor.lastrowid , "nombre": cliente.nombre, "empresa": cliente.empresa, "usuario": cliente.usuario}
+        # "id " (con espacio) se conserva por compatibilidad; "id" es la clave correcta
+        return {"mensaje": "Cliente agregado con éxito ", "id": nuevo_id, "id ": nuevo_id, "nombre": nombre, "empresa": cliente.empresa, "usuario": cliente.usuario}
     
     except mysql.connector.Error as err:
         conn.rollback() # Si falla, cancelamos la operación

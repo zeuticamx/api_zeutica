@@ -48,6 +48,12 @@ async def lifespan(app: FastAPI):
     # Tablas de envios Skydropx: guardan el estatus que manda el webhook.
     skydropx_envios.crear_tablas_skydropx()
 
+    # Columnas del borrado lógico de gastos (eliminado, eliminado_por, fecha_eliminado)
+    try:
+        gastos.asegurar_columnas_eliminado()
+    except Exception as e:
+        print(f"❌ No se pudieron asegurar las columnas de gastos: {e}")
+
     yield  # Aquí corre la aplicación normal
 
     # Apagar el pool al cerrar la API

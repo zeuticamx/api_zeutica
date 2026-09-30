@@ -1,9 +1,10 @@
 import mysql.connector, html, asyncio
-from pydantic import BaseModel, ConfigDict
-from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, ConfigDict, Field, field_validator
+from fastapi import APIRouter, HTTPException, Depends
 import os, mov_reg
 from dotenv import load_dotenv
 from servicios.telegram.notificacion import send_telegram_alert
+from permisos import requerir_gerencia
 
 router =APIRouter(tags=["/gastos"],responses={404: {"Mensaje":"No encontrado"}})
 load_dotenv()
@@ -23,6 +24,42 @@ class Gasto(BaseModel):
     descripcion: str
     costo: float
     cantidad: int
+
+# Modelo para editar un gasto existente (solo gerencia)
+class GastoEditar(BaseModel):
+    descripcion: str
+    costo: float = Field(ge=0)
+    cantidad: int = Field(ge=1)
+
+    @field_validator("descripcion")
+    @classmethod
+    def descripcion_no_vacia(cls, v: str) -> str:
+        v = v.strip()
+        if not v:
+            raise ValueError("La descripción no puede estar vacía")
+        return v
+
+# Columnas del borrado lógico: un gasto eliminado se conserva pero no cuenta en listados ni en $$
+COLUMNAS_ELIMINADO = {
+    "eliminado": "TINYINT(1) NOT NULL DEFAULT 0",
+    "eliminado_por": "VARCHAR(100) NULL",
+    "fecha_eliminado": "DATETIME NULL",
+}
+
+def asegurar_columnas_eliminado():
+    """Agrega a gastos las columnas del borrado lógico si faltan (se llama en el lifespan)."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'gastos'")
+        existentes = {str(fila[0]).lower() for fila in cursor.fetchall()}
+        for columna, definicion in COLUMNAS_ELIMINADO.items():
+            if columna not in existentes:
+                cursor.execute(f"ALTER TABLE gastos ADD COLUMN {columna} {definicion}")
+        conn.commit()
+    finally:
+        cursor.close()
+        conn.close()
 
 # Modelo para respuesta de gastos consultados
 class GastoResp(BaseModel):
@@ -86,7 +123,7 @@ async def listar_gastos():
     cursor = conn.cursor(dictionary=True)
 
     try:
-        query = "SELECT descripcion, costo, cantidad, total, usuario_registro, fecha_registro FROM gastos ORDER BY fecha_registro DESC"
+        query = "SELECT id, descripcion, costo, cantidad, total, usuario_registro, fecha_registro FROM gastos WHERE eliminado = 0 ORDER BY fecha_registro DESC"
         cursor.execute(query)
         return cursor.fetchall()
 
@@ -109,14 +146,14 @@ async def cons_gastos(usuario: str):
 
     try:
         if usuario == "fparra" or usuario == "gerencia":  # Usuarios con permisos para ver todos los gastos
-            query = "SELECT descripcion, costo, cantidad, total, usuario_registro, fecha_registro FROM gastos ORDER BY fecha_registro DESC"
+            query = "SELECT id, descripcion, costo, cantidad, total, usuario_registro, fecha_registro FROM gastos WHERE eliminado = 0 ORDER BY fecha_registro DESC"
 
             cursor.execute(query)
             registros = cursor.fetchall()
 
         else:
             # Aquí traigo solo los gastos del usuario que consulta
-            query = "SELECT descripcion, costo, cantidad, total, usuario_registro, fecha_registro FROM gastos WHERE usuario_registro = %s ORDER BY fecha_registro DESC"    
+            query = "SELECT id, descripcion, costo, cantidad, total, usuario_registro, fecha_registro FROM gastos WHERE eliminado = 0 AND usuario_registro = %s ORDER BY fecha_registro DESC"    
     
             cursor.execute(query, (usuario,))
             registros = cursor.fetchall()
@@ -132,6 +169,77 @@ async def cons_gastos(usuario: str):
         print(f"Error en consulta: {err}")
         raise HTTPException(status_code=500, detail=f"Error en consulta: {err}")
     
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.put("/gastos/{id}") # Endpoint para editar un gasto operativo (solo gerencia)
+async def editar_gasto(id: int, datos: GastoEditar, usuario: str = Depends(requerir_gerencia)):
+    """
+    Actualiza descripción, costo y cantidad de un gasto. El total se recalcula en BD.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        cursor.execute("SELECT id, descripcion, costo, cantidad FROM gastos WHERE id = %s AND eliminado = 0", (id,))
+        anterior = cursor.fetchone()
+        if not anterior:
+            raise HTTPException(status_code=404, detail=f"No existe el gasto con id '{id}'")
+
+        cursor.execute(
+            "UPDATE gastos SET descripcion = %s, costo = %s, cantidad = %s WHERE id = %s AND eliminado = 0",
+            (datos.descripcion, datos.costo, datos.cantidad, id),
+        )
+        conn.commit()
+
+        mov_reg.registrar_movimiento(
+            usuario,
+            f"Editó el gasto {id}: '{anterior['descripcion']}' {anterior['costo']} x {anterior['cantidad']} -> '{datos.descripcion}' {datos.costo} x {datos.cantidad}",
+            "Gastos",
+        )
+        return {"mensaje": "Gasto actualizado exitosamente", "id": id}
+
+    except mysql.connector.Error as err:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
+
+    finally:
+        cursor.close()
+        conn.close()
+
+@router.delete("/gastos/{id}") # Endpoint para eliminar (marcar como eliminado) un gasto operativo (solo gerencia)
+async def eliminar_gasto(id: int, usuario: str = Depends(requerir_gerencia)):
+    """
+    Borrado lógico: el gasto se conserva con eliminado = 1 y deja de contar en listados y totales.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        cursor.execute("SELECT id, descripcion, costo, cantidad FROM gastos WHERE id = %s AND eliminado = 0", (id,))
+        gasto = cursor.fetchone()
+        if not gasto:
+            raise HTTPException(status_code=404, detail=f"No existe el gasto con id '{id}'")
+
+        cursor.execute(
+            "UPDATE gastos SET eliminado = 1, eliminado_por = %s, fecha_eliminado = NOW() WHERE id = %s AND eliminado = 0",
+            (usuario, id),
+        )
+        conn.commit()
+
+        mov_reg.registrar_movimiento(
+            usuario,
+            f"Eliminó el gasto {id}: '{gasto['descripcion']}' {gasto['costo']} x {gasto['cantidad']}",
+            "Gastos",
+        )
+        return {"mensaje": "Gasto eliminado exitosamente", "id": id}
+
+    except mysql.connector.Error as err:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
+
     finally:
         cursor.close()
         conn.close()
