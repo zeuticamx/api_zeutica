@@ -123,9 +123,10 @@ async def test_crear_envio_usa_endpoint_v2_con_packages(monkeypatch):
     metodo, ruta = mock.await_args_list[0].args
     cuerpo = mock.await_args_list[0].kwargs["json"]["shipment"]
     assert (metodo, ruta) == ("POST", "/api/v2/shipments")
+    seguro = {"package_protected": True, "declared_value": 2500.0}
     assert cuerpo["packages"] == [
-        {"package_number": 1, "consignment_note": "53103200", "package_type": "4G"},
-        {"package_number": 2, "consignment_note": "53103200", "package_type": "4G"},
+        {"package_number": 1, "consignment_note": "53103200", "package_type": "4G", **seguro},
+        {"package_number": 2, "consignment_note": "53103200", "package_type": "4G", **seguro},
     ]
     assert "parcels" not in cuerpo
     assert cuerpo["consignment_note"] == "53103200" and cuerpo["package_type"] == "4G"
@@ -141,9 +142,33 @@ async def test_crear_envio_un_bulto_tambien_va_por_v2(monkeypatch):
 
     assert mock.await_args_list[0].args == ("POST", "/api/v2/shipments")
     assert mock.await_args_list[0].kwargs["json"]["shipment"]["packages"] == [
-        {"package_number": 1, "consignment_note": "53103200", "package_type": "4G"},
+        {"package_number": 1, "consignment_note": "53103200", "package_type": "4G",
+         "package_protected": True, "declared_value": 2500.0},
     ]
     assert [p["tracking_number"] for p in r["paquetes"]] == ["TRK-A"]
+
+
+def test_armar_packages_respeta_valor_declarado_del_panel():
+    parcels = [{"consignment_note": "53103200", "package_type": "4G",
+                "package_protected": True, "declared_value": 8000}]
+    packages = router._armar_packages(parcels, 2, None, None)
+    assert [p["declared_value"] for p in packages] == [8000.0, 8000.0]
+    assert all(p["package_protected"] is True for p in packages)
+
+
+def test_armar_packages_asegura_con_default_si_no_viene_valor():
+    packages = router._armar_packages([{"consignment_note": "53103200"}], 1, None, "4G")
+    assert packages[0]["package_protected"] is True
+    assert packages[0]["declared_value"] == router.VALOR_DECLARADO_DEFAULT
+    # Sin parcels (solo rate_id) tambien sale asegurada.
+    assert router._armar_packages([], 1, "53103200", "4G")[0]["declared_value"] == 2500.0
+
+
+def test_armar_packages_sin_seguro_si_se_apaga():
+    sin_valor = router._armar_packages([{"declared_value": 0}], 1, None, None)[0]
+    apagado = router._armar_packages([{"package_protected": False, "declared_value": 2500}], 1, None, None)[0]
+    for paquete in (sin_valor, apagado):
+        assert "package_protected" not in paquete and "declared_value" not in paquete
 
 
 @pytest.mark.asyncio

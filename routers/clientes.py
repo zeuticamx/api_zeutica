@@ -73,20 +73,23 @@ async def obtener_clientes():
         conn.close()
 
 @router.get("/clientes-potenciales")
-async def obtener_clientes_potenciales():
+async def obtener_clientes_potenciales(descartados: bool = False):
     """
     Consulta los clientes potenciales registrados en DB.
+    Por defecto excluye los descartados; con ?descartados=true devuelve solo los descartados.
     """
     conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True) 
+    cursor = conn.cursor(dictionary=True)
 
-    query = "SELECT * FROM clientes_potenciales WHERE descartado = 0 ORDER BY id DESC LIMIT 1000"  # Ordenamos por nombre de cliente
+    query = "SELECT * FROM clientes_potenciales WHERE descartado = %s ORDER BY id DESC LIMIT 1000"
 
     try:
-        cursor.execute(query)
-        clientes_potenciales = cursor.fetchall() 
+        cursor.execute(query, (1 if descartados else 0,))
+        clientes_potenciales = cursor.fetchall()
 
         if not clientes_potenciales:
+            if descartados:
+                return []  # sin descartados no es un error
             raise HTTPException(status_code=404, detail="No se han encontrado clientes potenciales en la base de datos.")  
         
         return clientes_potenciales

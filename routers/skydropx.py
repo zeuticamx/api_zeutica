@@ -27,6 +27,10 @@ router_webhook = APIRouter(tags=["skydropx-webhook"], responses={404: {"Mensaje"
 # sea que la haya generado. Mismo patron que USUARIO_COBRANZA en abonos.py.
 USUARIOS_ENVIO_SIEMPRE = ("gerencia", "fparra", "ventas")
 
+# Monto asegurado por bulto (MXN) cuando el panel no manda otro. El panel lo
+# precarga con este mismo valor y deja editarlo (skydropx-logica.js).
+VALOR_DECLARADO_DEFAULT = 2500.0
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Esquemas
@@ -71,7 +75,8 @@ class Paquete(BaseModel):
     paquetes". El frontend los manda siempre con default al generar la guia.
 
     package_protected y declared_value activan seguro en el paquete con el monto
-    a asegurar en MXN (default: 2000).
+    a asegurar en MXN (default: VALOR_DECLARADO_DEFAULT). Viajan tambien en
+    `packages` al generar la guia (ver _armar_packages).
     """
     model_config = ConfigDict(extra="allow")
 
@@ -82,7 +87,7 @@ class Paquete(BaseModel):
     consignment_note: Optional[str] = Field(default=None, description="Contenido del paquete (carta porte). Requerido para generar guia.")
     package_type: Optional[str] = Field(default=None, description="Codigo de embalaje del catalogo de Skydropx. Requerido para generar guia.")
     package_protected: Optional[bool] = Field(default=True, description="Habilitar seguro en el paquete")
-    declared_value: Optional[float] = Field(default=2500.0, description="Monto a asegurar en MXN")
+    declared_value: Optional[float] = Field(default=VALOR_DECLARADO_DEFAULT, ge=0, description="Monto a asegurar en MXN")
 
 
 class CotizacionRequest(BaseModel):
@@ -781,9 +786,14 @@ def _armar_packages(
 ) -> List[Dict[str, Any]]:
     """
     Arreglo `packages` para POST /api/v2/shipments: un objeto por bulto con
-    package_number correlativo, consignment_note y package_type. Solo esos
-    campos -- es la forma probada en sandbox; medidas y peso ya vienen de la
-    cotizacion del rate.
+    package_number correlativo, consignment_note, package_type y el seguro
+    (package_protected + declared_value). Medidas y peso no se mandan: ya
+    vienen de la cotizacion del rate.
+
+    El seguro se tiene que repetir aqui: el que va en `parcels` de la
+    cotizacion no se hereda a la guia (las guias salian sin proteccion).
+    Si el paquete no trae declared_value se asegura con el default; solo un
+    package_protected=False explicito o declared_value=0 lo apagan.
     """
     packages = []
     for numero in range(1, max(cantidad, 1) + 1):
@@ -795,6 +805,10 @@ def _armar_packages(
             paquete["consignment_note"] = nota
         if tipo:
             paquete["package_type"] = tipo
+        valor = parcela.get("declared_value", VALOR_DECLARADO_DEFAULT)
+        if parcela.get("package_protected", True) and valor and float(valor) > 0:
+            paquete["package_protected"] = True
+            paquete["declared_value"] = float(valor)
         packages.append(paquete)
     return packages
 

@@ -5,6 +5,7 @@ from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from routers import cotizacionesBack, productos, ventas, clientes, traspaso, gastos, compras, cleanest, cuentas_pendientes,\
       abonos, estadisticas, inventario, empleados, notificaciones, cuentas_pagar, consulta_registros, pendientes, proveedores, genera_cotizacion, sofi_conversaciones, embarques, sofi_notificaciones, whatsapp_plantillas, skydropx
+from routers import crm
 import mysql.connector
 import skydropx_envios
 from fastapi.middleware.cors import CORSMiddleware
@@ -53,6 +54,12 @@ async def lifespan(app: FastAPI):
         gastos.asegurar_columnas_eliminado()
     except Exception as e:
         print(f"❌ No se pudieron asegurar las columnas de gastos: {e}")
+
+    # Tablas del CRM (cartera, interacciones, historial de etapas)
+    try:
+        crm.crear_tablas_crm()
+    except Exception as e:
+        print(f"❌ No se pudieron crear las tablas del CRM: {e}")
 
     yield  # Aquí corre la aplicación normal
 
@@ -114,6 +121,7 @@ app.include_router(sofi_conversaciones.router, dependencies=[Depends(obtener_usu
 app.include_router(embarques.router, dependencies=[Depends(obtener_usuario_actual)])
 app.include_router(whatsapp_plantillas.router, dependencies=[Depends(obtener_usuario_actual)])
 app.include_router(skydropx.router, dependencies=[Depends(obtener_usuario_actual)])
+app.include_router(crm.router, dependencies=[Depends(obtener_usuario_actual)])
 # Sin obtener_usuario_actual a proposito: el WebSocket valida el token por query
 # param y el POST de escalacion valida X-API-Key (n8n no tiene sesion de usuario).
 app.include_router(sofi_notificaciones.router)
