@@ -49,6 +49,10 @@ class CotizacionSchema(BaseModel):
     comentarios: Optional[str] = None
     usuario: str
     pdf: Optional[str] = None
+    # Solo para el PDF (no se guardan): los precios de items y subtotal ya vienen con
+    # el descuento aplicado; con esto se imprime la fila "Descuento (x%)".
+    descuento_porcentaje: float = 0
+    descuento_monto: float = 0
     items: List[ItemCotizacion]
 
 @router.post("/genera-cotizacion")

@@ -266,7 +266,7 @@ async def edit_cliente(cliente: clienteEditar, usuario: str):
 
     # Extraemos los valores del objeto cliente (el id va al final)
     valores = (cliente.nombre, cliente.email, cliente.empresa, cliente.contacto, cliente.telefono, 
-               cliente.direccion, cliente.rfc, cliente.cp, cliente.regimen, cliente.usocdfi, cliente.frecuencia, cliente.credito, cliente.monto_credito, cliente.dias_credito, cliente.id)
+               cliente.direccion, cliente.rfc, cliente.cp, cliente.regimen, cliente.uso_cfdi or cliente.usocdfi, cliente.frecuencia, cliente.credito, cliente.monto_credito, cliente.dias_credito, cliente.id)
 
     try:
         cursor.execute(query, valores)

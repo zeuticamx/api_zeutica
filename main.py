@@ -133,6 +133,9 @@ app.add_middleware(
     allow_origins=["*"],    
     allow_methods=["*"],
     allow_headers=["*"],
+    # El panel lee el folio y el nombre del PDF que devuelve /genera-cotizacion;
+    # sin esto el navegador oculta esos headers en peticiones cross-origin.
+    expose_headers=["X-Codigo-Cotizacion", "X-Cotizacion-Id", "Content-Disposition"],
 )
 
 

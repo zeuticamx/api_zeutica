@@ -218,8 +218,18 @@ def generar_pdf_cotizacion(cot) -> bytes:
     # ---------- BLOQUE DE TOTALES (derecha) ----------
     w_lbl, w_val = 40, 30
     x_tot = pdf.l_margin + ancho - (w_lbl + w_val)
-    filas_tot = [
-        ("Sub-Total:", _dinero(cot.subtotal), False),
+    # Con descuento: Sub-Total es el monto antes del descuento y luego se resta,
+    # así Sub-Total - Descuento + Envío + IVA cuadra con TOTAL.
+    desc_pct = float(getattr(cot, "descuento_porcentaje", 0) or 0)
+    desc_monto = float(getattr(cot, "descuento_monto", 0) or 0)
+    if desc_pct > 0 and desc_monto > 0:
+        filas_desc = [
+            ("Sub-Total:", _dinero(float(cot.subtotal) + desc_monto), False),
+            (f"Descuento ({desc_pct:g}%):", f"-{_dinero(desc_monto)}", False),
+        ]
+    else:
+        filas_desc = [("Sub-Total:", _dinero(cot.subtotal), False)]
+    filas_tot = filas_desc + [
         ("Costo del Envío:", _dinero(cot.costo_envio), False),
         ("IVA (16%):", _dinero(cot.iva), False),
         ("TOTAL:", _dinero(cot.total), True),
