@@ -102,6 +102,8 @@ def db(monkeypatch):
     monkeypatch.setattr(ventas, "get_db_connection", lambda: base)
     monkeypatch.setattr(ventas.mov_reg, "registrar_movimiento", lambda *a, **k: None)
     monkeypatch.setattr(ventas, "send_telegram_alert", AsyncMock())
+    # El cálculo de comisiones tiene sus propios tests (test_comisiones.py)
+    monkeypatch.setattr(ventas.comisiones, "registrar_comisiones_seguro", lambda *a, **k: None)
     return base
 
 

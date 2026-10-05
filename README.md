@@ -19,6 +19,28 @@ uvicorn main:app --reload --port 8000
 pytest -v
 ```
 
+## Módulo Comisiones (`/comisiones`)
+
+Router: [`routers/comisiones.py`](routers/comisiones.py) · Cálculo puro:
+[`comisiones_calc.py`](comisiones_calc.py) · Esquema:
+[`sql/comisiones_schema.sql`](sql/comisiones_schema.sql) (se crea solo en el lifespan).
+
+- **Fórmula** por partida: `(precio con IVA × cantidad ÷ 1.16) × porcentaje ÷ 100`, en `Decimal`,
+  redondeando solo el resultado final a centavos.
+- **Matriz** `comisiones_config` (vendedor × SKU). `sku = '*'` es la tasa base del vendedor; sin
+  porcentaje ni tasa base la partida comisiona 0% y se marca `sin_tasa`. Solo gerencia la edita.
+- **Sin comisión para nadie:** Cleanest, Mercado Libre y Amazon. La lista vive en
+  `comisiones_calc.PLATAFORMAS_EXCLUIDAS` / `COMPRADORES_EXCLUIDOS`.
+- **Captura:** `routers/ventas.py` llama a `registrar_comisiones_seguro` tras confirmar la venta
+  (un fallo ahí nunca la tumba). El porcentaje queda congelado en `comisiones_ventas`.
+  `POST /comisiones/recalcular` (gerencia) rellena ventas anteriores sin tocar el CRM.
+- **Venta ↔ seguimiento:** si el cliente (por nombre exacto) tiene un seguimiento abierto del
+  vendedor, se enlaza al más reciente en `venta_seguimiento`, se cierra y el cliente pasa a `ganado`.
+  También se puede vincular a mano (`POST /comisiones/vinculos`) por seguimiento, por **folio de
+  cotización** (`codigo_cotizacion`) o por ambos. Si la venta se registra cargando una cotización en
+  el formulario, el folio se liga solo (`cotizacion` en `POST /ventas/registrar`). Un vendedor solo
+  liga cotizaciones y seguimientos suyos; ligar un folio no marca la cotización como vendida.
+
 ## Módulo Rastreo de Importaciones (`/embarques`)
 
 Router: [`routers/embarques.py`](routers/embarques.py) · Esquema BD:

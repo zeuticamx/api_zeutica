@@ -1,11 +1,12 @@
 import mysql.connector, os, mov_reg, html, asyncio
 from datetime import date, timedelta
-from typing import List
+from typing import List, Optional
 from fastapi import APIRouter, HTTPException
 from mysql.connector import errorcode
 from pydantic import BaseModel, Field, field_validator
 from dotenv import load_dotenv
 from servicios.telegram.notificacion import send_telegram_alert
+from routers import comisiones
 
 router =APIRouter(tags=["/ventas"],responses={404: {"Mensaje":"No encontrado"}})
 load_dotenv() # Carga de credenciales .env
@@ -231,6 +232,11 @@ async def registrar_venta(venta: VentaSchema):
                 "Ventas"
             )
 
+            comisiones.registrar_comisiones_seguro(
+                venta.id_venta, venta.usuario, venta.nombreComprador, venta.plataforma, venta.fecha,
+                [{"sku": venta.sku, "producto": venta.producto, "cantidad": venta.stock_bodega, "precio": venta.precio}],
+            )
+
             asyncio.create_task(send_telegram_alert(
                 f"🔄 <b>Venta Registrada</b>\n\n"
                 f"• <b>ID Venta:</b> {venta.id_venta}\n"
@@ -285,6 +291,7 @@ class VentaCompletaSchema(BaseModel):
     plataforma: str
     usuario: str
     condicion_pago: str
+    cotizacion: Optional[str] = None  # folio de la cotización cargada en el formulario, si la hubo
     items: List[ItemVentaSchema] = Field(min_length=1)
 
     @field_validator("items")
@@ -386,6 +393,12 @@ async def registrar_venta_completa(venta: VentaCompletaSchema):
             mov_reg.registrar_movimiento(venta.usuario, f"Registró venta para SKU '{item.sku}'", "Ventas")
         except mysql.connector.Error as err:
             print(f"Venta {venta.id_venta} registrada, pero falló la bitácora de '{item.sku}': {err}")
+
+    comisiones.registrar_comisiones_seguro(
+        venta.id_venta, venta.usuario, venta.nombreComprador, venta.plataforma, venta.fecha,
+        [{"sku": i.sku, "producto": i.producto, "cantidad": i.cantidad, "precio": i.precio} for i in venta.items],
+        cotizacion=venta.cotizacion,
+    )
 
     partidas = "\n".join(
         f"   - {html.escape(i.sku)} · {html.escape(i.producto)} × {i.cantidad} @ ${i.precio:,.2f}"
