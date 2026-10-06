@@ -94,7 +94,7 @@ def _resolver_cliente(cursor, comprador) -> Optional[int]:
     nombre = str(comprador or "").strip()
     if not nombre:
         return None
-    cursor.execute("SELECT id FROM clientes WHERE TRIM(nombre) = %s LIMIT 2", (nombre,))
+    cursor.execute("SELECT id FROM clientes WHERE TRIM(nombre) = %s AND eliminado = 0 LIMIT 2", (nombre,))
     filas = cursor.fetchall()
     return filas[0]["id"] if len(filas) == 1 else None
 

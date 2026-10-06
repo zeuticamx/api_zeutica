@@ -140,6 +140,13 @@ def db(monkeypatch):
     movimientos = []
     monkeypatch.setattr(crm.mov_reg, "registrar_movimiento", lambda *a, **k: movimientos.append(a))
     base.movimientos = movimientos
+    alertas = []
+
+    async def _telegram(mensaje, *a, **k):
+        alertas.append(mensaje)
+
+    monkeypatch.setattr(crm, "send_telegram_alert", _telegram)
+    base.alertas = alertas
     return base
 
 
@@ -482,3 +489,58 @@ def test_reglas_de_dueno(monkeypatch):
     assert crm.puede_gestionar("ana", "Ana") and crm.puede_gestionar("ana", None)
     assert not crm.puede_gestionar("ana", "luis")
     assert crm.puede_gestionar("gerencia", "luis")
+
+
+# ---------- Alertas de Telegram ----------
+
+def test_interaccion_envia_resumen_a_telegram(client, db):
+    client.post("/crm/interacciones", json={
+        "cliente_id": 3, "tipo": "llamada", "resultado": "interesado", "etapa": "cotizado",
+        "notas": "pidió <precios>", "proxima_accion": "Enviar cotización", "proxima_fecha": HOY.isoformat(),
+    }, headers=ANA)
+    (msg,) = db.alertas
+    assert "Llamada registrada" in msg and "ana" in msg and "Interesado" in msg
+    assert "En seguimiento → Cotizado" in msg and "Enviar cotización" in msg
+    assert "&lt;precios&gt;" in msg  # HTML escapado
+
+
+def test_interaccion_sin_cambio_de_etapa_solo_muestra_la_etapa_actual(client, db):
+    client.post("/crm/interacciones", json={"cliente_id": 3, "tipo": "correo"}, headers=ANA)
+    (msg,) = db.alertas
+    assert "→" not in msg and "En seguimiento" in msg
+
+
+def test_interaccion_invalida_o_con_error_no_envia_alerta(client, db):
+    client.post("/crm/interacciones", json={"cliente_id": 3, "tipo": "fax"}, headers=ANA)
+    db.error_en = "INSERT INTO crm_interacciones"
+    db.error = mysql.connector.Error("boom")
+    client.post("/crm/interacciones", json={"cliente_id": 3, "tipo": "llamada"}, headers=ANA)
+    assert db.alertas == []
+
+
+def test_cambio_de_etapa_alerta_con_motivo_si_se_pierde(client, db):
+    client.patch("/crm/clientes/3/etapa", json={"etapa": "perdido", "motivo_perdida": "precio"}, headers=ANA)
+    (msg,) = db.alertas
+    assert "Cambio de etapa" in msg and "En seguimiento → Perdido" in msg and "precio" in msg
+
+
+def test_misma_etapa_no_alerta(client, db):
+    client.patch("/crm/clientes/3/etapa", json={"etapa": "en_seguimiento"}, headers=ANA)
+    assert db.alertas == []
+
+
+def test_asignar_vendedor_alerta_solo_si_cambia_el_dueno(client, db):
+    client.put("/crm/clientes/4/vendedor", json={"vendedor": "ana"}, headers=GER)
+    (msg,) = db.alertas
+    assert "Cliente asignado" in msg and "luis → ana" in msg
+    client.put("/crm/clientes/4/vendedor", json={"vendedor": "ana"}, headers=GER)  # ya era de ana
+    assert len(db.alertas) == 1
+
+
+def test_eliminar_interaccion_alerta_solo_si_se_elimina(client, db):
+    client.delete("/crm/interacciones/10", headers=ANA)  # 403
+    client.delete("/crm/interacciones/999", headers=GER)  # 404
+    assert db.alertas == []
+    client.delete("/crm/interacciones/10", headers=GER)
+    (msg,) = db.alertas
+    assert "Interacción eliminada" in msg and "gerencia" in msg

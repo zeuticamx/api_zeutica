@@ -1,10 +1,11 @@
 import mysql.connector, html, asyncio
 from pydantic import BaseModel
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from typing import Optional, List
 import os, mov_reg
 from dotenv import load_dotenv
 from servicios.telegram.notificacion import send_telegram_alert
+from permisos import requerir_gerencia
 
 router =APIRouter(tags=["/clientes"],responses={404: {"Mensaje":"No encontrado"}})
 load_dotenv()
@@ -17,6 +18,29 @@ def get_db_connection():
         password=os.getenv("DB_PASSWORD"),
         database=os.getenv("DB_NAME")
     )
+
+# Columnas del borrado lógico: un cliente eliminado se conserva (ventas, CRM y cotizaciones
+# siguen apuntando a él) pero no aparece en listados, CRM ni comisiones.
+COLUMNAS_ELIMINADO = {
+    "eliminado": "TINYINT(1) NOT NULL DEFAULT 0",
+    "eliminado_por": "VARCHAR(100) NULL",
+    "fecha_eliminado": "DATETIME NULL",
+}
+
+def asegurar_columnas_eliminado():
+    """Agrega a clientes las columnas del borrado lógico si faltan (se llama en el lifespan)."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'clientes'")
+        existentes = {str(fila[0]).lower() for fila in cursor.fetchall()}
+        for columna, definicion in COLUMNAS_ELIMINADO.items():
+            if columna not in existentes:
+                cursor.execute(f"ALTER TABLE clientes ADD COLUMN {columna} {definicion}")
+        conn.commit()
+    finally:
+        cursor.close()
+        conn.close()
 
 # Definimos un modelo para recibir los datos en JSON (Body)
 class Cliente(BaseModel):    
@@ -53,7 +77,7 @@ async def obtener_clientes():
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True) 
 
-    query = "SELECT * FROM clientes ORDER BY id DESC"  # Ordenamos por nombre de cliente
+    query = "SELECT * FROM clientes WHERE eliminado = 0 ORDER BY id DESC"
 
     try:
         cursor.execute(query)
@@ -68,6 +92,21 @@ async def obtener_clientes():
         print(f"Error DB clientes: {err}")
         raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
     
+    finally:
+        cursor.close()
+        conn.close()
+
+@router.get("/clientes-eliminados")
+async def obtener_clientes_eliminados(usuario: str = Depends(requerir_gerencia)):
+    """Clientes dados de baja (solo gerencia), para poder restaurarlos. Sin eliminados devuelve []."""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT * FROM clientes WHERE eliminado = 1 ORDER BY fecha_eliminado DESC, id DESC")
+        return cursor.fetchall()
+    except mysql.connector.Error as err:
+        print(f"Error DB clientes eliminados: {err}")
+        raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
     finally:
         cursor.close()
         conn.close()
@@ -261,7 +300,7 @@ async def edit_cliente(cliente: clienteEditar, usuario: str):
         UPDATE clientes 
         SET nombre = %s, email = %s, empresa = %s, contacto = %s, telefono = %s, 
             direccion = %s, rfc = %s, cp = %s, regimen = %s, usocfdi = %s, frecuencia = %s, credito = %s, monto_credito = %s, dias_credito = %s
-        WHERE id = %s
+        WHERE id = %s AND eliminado = 0
     """
 
     # Extraemos los valores del objeto cliente (el id va al final)
@@ -301,3 +340,79 @@ async def edit_cliente(cliente: clienteEditar, usuario: str):
         conn.close()
 
 
+@router.delete("/clientes/{id}") # Endpoint para dar de baja (borrado lógico) a un cliente (solo gerencia)
+async def eliminar_cliente(id: int, usuario: str = Depends(requerir_gerencia)):
+    """
+    Borrado lógico: el cliente se conserva con eliminado = 1 y deja de aparecer en listados, CRM y comisiones.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT id, nombre, empresa FROM clientes WHERE id = %s AND eliminado = 0", (id,))
+        cliente = cursor.fetchone()
+        if not cliente:
+            raise HTTPException(status_code=404, detail=f"No existe el cliente con id '{id}'")
+
+        cursor.execute(
+            "UPDATE clientes SET eliminado = 1, eliminado_por = %s, fecha_eliminado = NOW() WHERE id = %s AND eliminado = 0",
+            (usuario, id),
+        )
+        conn.commit()
+
+        mov_reg.registrar_movimiento(usuario, f"Eliminó el cliente {id}: {cliente['nombre']}", "Clientes")
+
+        message = (
+            f"🗑️ <b>Cliente Eliminado</b>\n\n"
+            f"• <b>Código:</b> <code>{id}</code>\n"
+            f"• <b>Cliente:</b> {html.escape(str(cliente['nombre']))}\n"
+            f"• <b>Usuario:</b> {html.escape(str(usuario))}"
+        )
+        asyncio.create_task(send_telegram_alert(message))
+        return {"mensaje": "Cliente eliminado exitosamente", "id": id}
+
+    except mysql.connector.Error as err:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
+
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.post("/clientes/{id}/restaurar") # Endpoint para restaurar un cliente dado de baja (solo gerencia)
+async def restaurar_cliente(id: int, usuario: str = Depends(requerir_gerencia)):
+    """
+    Revierte la baja lógica. Si ya existe otro cliente activo con el mismo nombre responde 409
+    (el selector de cotizaciones identifica al cliente por nombre).
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT id, nombre FROM clientes WHERE id = %s AND eliminado = 1", (id,))
+        cliente = cursor.fetchone()
+        if not cliente:
+            raise HTTPException(status_code=404, detail=f"No existe un cliente eliminado con id '{id}'")
+
+        cursor.execute(
+            "SELECT id FROM clientes WHERE eliminado = 0 AND LOWER(TRIM(nombre)) = LOWER(TRIM(%s)) LIMIT 1",
+            (cliente["nombre"],),
+        )
+        if cursor.fetchone():
+            raise HTTPException(status_code=409, detail=f"Ya existe un cliente activo llamado '{cliente['nombre']}'")
+
+        cursor.execute(
+            "UPDATE clientes SET eliminado = 0, eliminado_por = NULL, fecha_eliminado = NULL WHERE id = %s AND eliminado = 1",
+            (id,),
+        )
+        conn.commit()
+
+        mov_reg.registrar_movimiento(usuario, f"Restauró el cliente {id}: {cliente['nombre']}", "Clientes")
+        return {"mensaje": "Cliente restaurado exitosamente", "id": id}
+
+    except mysql.connector.Error as err:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
+
+    finally:
+        cursor.close()
+        conn.close()

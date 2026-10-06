@@ -55,6 +55,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"❌ No se pudieron asegurar las columnas de gastos: {e}")
 
+    # Columnas del borrado lógico de clientes (eliminado, eliminado_por, fecha_eliminado)
+    try:
+        clientes.asegurar_columnas_eliminado()
+    except Exception as e:
+        print(f"❌ No se pudieron asegurar las columnas de clientes: {e}")
+
     # Tablas del CRM (cartera, interacciones, historial de etapas)
     try:
         crm.crear_tablas_crm()

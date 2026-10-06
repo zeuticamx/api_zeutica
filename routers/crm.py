@@ -8,6 +8,8 @@
 #     crm_cartera.vendedor; si el cliente aún no entra al CRM, su dueno
 #     provisional es clientes.usuario (quien lo dio de alta). Un cliente sin
 #     ninguno de los dos lo "toma" quien registre la primera interacción.
+import asyncio
+import html
 import os
 from datetime import date, datetime, timedelta, timezone
 from typing import List, Literal, Optional
@@ -20,6 +22,7 @@ from pydantic import BaseModel, Field, field_validator
 import crm_metricas
 import mov_reg
 from permisos import es_gerencia, requerir_gerencia, usuario_autenticado
+from servicios.telegram.notificacion import send_telegram_alert
 
 router = APIRouter(tags=["/crm"], responses={404: {"Mensaje": "No encontrado"}})
 load_dotenv()
@@ -196,7 +199,7 @@ def _fila_cliente(cursor, cliente_id: int):
         """SELECT c.id, c.nombre, c.empresa, c.telefono, c.email, c.usuario AS registrado_por,
                   cc.cliente_id AS en_cartera, cc.vendedor, cc.etapa, cc.motivo_perdida, cc.etapa_actualizada
            FROM clientes c LEFT JOIN crm_cartera cc ON cc.cliente_id = c.id
-           WHERE c.id = %s""",
+           WHERE c.id = %s AND c.eliminado = 0""",
         (cliente_id,),
     )
     return cursor.fetchone()
@@ -244,6 +247,80 @@ def _cambiar_etapa(cursor, cliente_id: int, anterior: str, nueva: str, motivo: O
     return nueva != anterior
 
 
+# ---------- Alertas de Telegram (resumen de lo importante) ----------
+
+_ICONOS_TIPO = {"llamada": "📞", "correo": "✉️", "whatsapp": "💬", "reunion": "🤝"}
+_ETAPAS_TXT = {
+    "contacto_inicial": "Contacto inicial", "en_seguimiento": "En seguimiento",
+    "cotizado": "Cotizado", "ganado": "Ganado ✅", "perdido": "Perdido ❌",
+}
+_RESULTADOS_TXT = {
+    "contesto": "Contestó", "no_contesto": "No contestó", "interesado": "Interesado",
+    "no_interesado": "No interesado", "pidio_cotizacion": "Pidió cotización",
+}
+
+
+def _esc(valor) -> str:
+    return html.escape(str(valor))
+
+
+def _etapa_txt(etapa) -> str:
+    return _ETAPAS_TXT.get(etapa, str(etapa))
+
+
+def _alertar(mensaje: str):
+    """Envía el aviso a Telegram sin esperar la respuesta (nunca bloquea ni rompe la petición)."""
+    asyncio.create_task(send_telegram_alert(mensaje))
+
+
+def _msg_interaccion(usuario, fila, datos, etapa_anterior, etapa_final, cambio_etapa) -> str:
+    lineas = [
+        f"{_ICONOS_TIPO.get(datos.tipo, '📋')} <b>CRM · {_esc(datos.tipo.capitalize())} registrada</b>",
+        "",
+        f"• <b>Cliente:</b> {_esc(fila['nombre'])}",
+        f"• <b>Vendedor:</b> {_esc(usuario)}",
+    ]
+    if datos.resultado:
+        lineas.append(f"• <b>Resultado:</b> {_RESULTADOS_TXT.get(datos.resultado, _esc(datos.resultado))}")
+    if cambio_etapa:
+        lineas.append(f"• <b>Etapa:</b> {_etapa_txt(etapa_anterior)} → {_etapa_txt(etapa_final)}")
+        if etapa_final == "perdido" and datos.motivo_perdida:
+            lineas.append(f"• <b>Motivo:</b> {_esc(datos.motivo_perdida)}")
+    else:
+        lineas.append(f"• <b>Etapa:</b> {_etapa_txt(etapa_final)}")
+    if datos.proxima_accion or datos.proxima_fecha:
+        siguiente = " · ".join(str(x) for x in (datos.proxima_accion, datos.proxima_fecha) if x)
+        lineas.append(f"• <b>Siguiente paso:</b> {_esc(siguiente)}")
+    if datos.notas:
+        nota = datos.notas if len(datos.notas) <= 150 else datos.notas[:147] + "..."
+        lineas.append(f"• <b>Notas:</b> {_esc(nota)}")
+    return "\n".join(lineas)
+
+
+def _msg_etapa(usuario, fila, anterior, nueva, motivo) -> str:
+    icono = {"ganado": "🎉", "perdido": "⚠️"}.get(nueva, "🔄")
+    lineas = [
+        f"{icono} <b>CRM · Cambio de etapa</b>",
+        "",
+        f"• <b>Cliente:</b> {_esc(fila['nombre'])}",
+        f"• <b>Etapa:</b> {_etapa_txt(anterior)} → {_etapa_txt(nueva)}",
+        f"• <b>Usuario:</b> {_esc(usuario)}",
+    ]
+    if nueva == "perdido" and motivo:
+        lineas.append(f"• <b>Motivo:</b> {_esc(motivo)}")
+    return "\n".join(lineas)
+
+
+def _msg_asignacion(usuario, fila, vendedor, anterior) -> str:
+    return "\n".join([
+        "👤 <b>CRM · Cliente asignado</b>",
+        "",
+        f"• <b>Cliente:</b> {_esc(fila['nombre'])}",
+        f"• <b>Vendedor:</b> {_esc(anterior or 'Sin dueño')} → {_esc(vendedor)}",
+        f"• <b>Asignó:</b> {_esc(usuario)}",
+    ])
+
+
 def _error_db(conn, err, contexto: str):
     try:
         conn.rollback()
@@ -272,7 +349,7 @@ async def crm_clientes(
     Buscador / cartera. Vendedor: sus clientes y los que no tienen dueno
     (solo_mios=true quita estos últimos). Gerencia: todos, o filtra por vendedor.
     """
-    where, params = ["1=1"], []
+    where, params = ["c.eliminado = 0"], []
     if q and q.strip():
         like = f"%{q.strip()}%"
         where.append("(c.nombre LIKE %s OR c.empresa LIKE %s OR c.contacto LIKE %s OR CAST(c.telefono AS CHAR) LIKE %s)")
@@ -359,6 +436,7 @@ async def crm_cambiar_etapa(cliente_id: int, datos: EtapaCambio, usuario: str = 
         conn.commit()
         if cambio:
             mov_reg.registrar_movimiento(usuario, f"Cambió etapa de {fila['nombre']}: {anterior} → {datos.etapa}", "CRM")
+            _alertar(_msg_etapa(usuario, fila, anterior, datos.etapa, datos.motivo_perdida))
         return {"cliente_id": cliente_id, "etapa": datos.etapa, "etapa_anterior": anterior, "cambio": cambio}
     except mysql.connector.Error as err:
         _error_db(conn, err, "etapa")
@@ -394,7 +472,10 @@ async def crm_asignar_vendedor(cliente_id: int, datos: AsignacionVendedor, usuar
             )
         conn.commit()
         mov_reg.registrar_movimiento(usuario, f"Asignó el cliente {fila['nombre']} a {vendedor}", "CRM")
-        return {"cliente_id": cliente_id, "vendedor": vendedor, "vendedor_anterior": vendedor_efectivo(fila)}
+        anterior = vendedor_efectivo(fila)
+        if (anterior or "").strip().lower() != vendedor.strip().lower():
+            _alertar(_msg_asignacion(usuario, fila, vendedor, anterior))
+        return {"cliente_id": cliente_id, "vendedor": vendedor, "vendedor_anterior": anterior}
     except mysql.connector.Error as err:
         _error_db(conn, err, "asignar")
     finally:
@@ -452,12 +533,14 @@ async def crm_registrar_interaccion(datos: InteraccionNueva, usuario: str = Depe
         nuevo_id = cursor.lastrowid
 
         etapa_final = etapa_actual
+        cambio_etapa = False
         if datos.etapa:
-            _cambiar_etapa(cursor, datos.cliente_id, etapa_actual, datos.etapa, datos.motivo_perdida, usuario)
+            cambio_etapa = _cambiar_etapa(cursor, datos.cliente_id, etapa_actual, datos.etapa, datos.motivo_perdida, usuario)
             etapa_final = datos.etapa
 
         conn.commit()
         mov_reg.registrar_movimiento(usuario, f"Registró {datos.tipo} con {fila['nombre']}", "CRM")
+        _alertar(_msg_interaccion(usuario, fila, datos, etapa_actual, etapa_final, cambio_etapa))
         return {
             "id": nuevo_id,
             "cliente_id": datos.cliente_id,
@@ -574,6 +657,11 @@ async def crm_eliminar_interaccion(interaccion_id: int, usuario: str = Depends(r
             raise HTTPException(status_code=404, detail="Interacción no encontrada")
         conn.commit()
         mov_reg.registrar_movimiento(usuario, f"Eliminó la interacción CRM {interaccion_id}", "CRM")
+        _alertar(
+            "🗑️ <b>CRM · Interacción eliminada</b>\n\n"
+            f"• <b>Interacción:</b> <code>{interaccion_id}</code>\n"
+            f"• <b>Usuario:</b> {_esc(usuario)}"
+        )
         return {"id": interaccion_id, "eliminado": True}
     except mysql.connector.Error as err:
         _error_db(conn, err, "eliminar")
