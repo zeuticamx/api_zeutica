@@ -51,6 +51,8 @@ class CotizacionSchema(BaseModel):
     pdf: Optional[str] = None
     # Solo para el PDF (no se guardan): los precios de items y subtotal ya vienen con
     # el descuento aplicado; con esto se imprime la fila "Descuento (x%)".
+    # Empresa que se imprime en el renglón EMPRESA (empresa guarda el nombre del cliente).
+    empresa_pdf: Optional[str] = None
     descuento_porcentaje: float = 0
     descuento_monto: float = 0
     items: List[ItemCotizacion]

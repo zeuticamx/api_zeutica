@@ -164,9 +164,10 @@ def generar_pdf_cotizacion(cot) -> bytes:
 
     # Datos del cliente (valores en mayúsculas como el ejemplo)
     pdf.set_text_color(*NEGRO)
+    empresa_pdf = getattr(cot, "empresa_pdf", None)
     campos = [
         ("NOMBRE:", cot.atencion),
-        ("EMPRESA:", cot.empresa),
+        ("EMPRESA:", cot.empresa if empresa_pdf is None else empresa_pdf),
         ("EMAIL:", cot.email),
         ("DOMICILIO:", cot.domicilio),
         ("TELÉFONO:", cot.telefono),
