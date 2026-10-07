@@ -1,6 +1,16 @@
 # fichero para backend
 import bcrypt, asyncpg
+import sys
 from contextlib import asynccontextmanager  # <-- Añadido para el lifespan
+
+# Consola Windows (cp1252) truena con los emojis de los print del lifespan.
+# Se fuerza UTF-8 solo para salida de texto; en Linux no cambia nada.
+if hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from routers import cotizacionesBack, productos, ventas, clientes, traspaso, gastos, compras, cleanest, cuentas_pendientes,\
@@ -184,6 +194,14 @@ def verify_password(plano_password: str, hashed_password: str) -> bool:
 @app.get("/")
 async def test_server():
     return {"Servidor Conectado..."}
+
+@app.get("/health")
+async def health():
+    # Chequeo de vida para el deploy (Easypanel/Docker): sin auth porque el
+    # healthcheck no manda token. Siempre 200 si el proceso responde; la DB
+    # se valida por request, no aquí, para que un parpadeo de MySQL no mate
+    # el contenedor.
+    return {"status": "ok", "servicio": "api_zeutica1"}
 
 @app.post("/login")
 async def login(datos: LoginSchema):

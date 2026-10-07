@@ -72,6 +72,26 @@ class FakeCursor:
             self._resultado = [{"id": params[0], "vendedor": i["vendedor"]}] if i else []
         elif q.startswith("UPDATE crm_interacciones SET eliminado = 1"):
             self.rowcount = 1 if params[0] in db.interacciones else 0
+        elif q.startswith("SELECT e.id, e.cliente_id"):
+            if "WHERE e.id = %s" in q:
+                # Autorización puntual: solo si el id coincide.
+                if db.evento and params and params[0] == db.evento.get("id"):
+                    self._resultado = [dict(db.evento)]
+            else:
+                # Lista de la agenda: sale del mecanismo genérico de respuestas.
+                for marca, filas in db.respuestas:
+                    if marca in q:
+                        self._resultado = [dict(f) for f in filas]
+                        break
+        elif q.startswith("INSERT INTO crm_eventos"):
+            db.eventos_insert.append(params)
+            self.lastrowid = 701
+            self.rowcount = 1
+        elif q.startswith("UPDATE crm_eventos SET eliminado = 1"):
+            self.rowcount = 1 if db.evento else 0
+        elif q.startswith("UPDATE crm_eventos SET"):
+            db.eventos_update.append((q, params))
+            self.rowcount = 1
         else:
             for marca, filas in db.respuestas:
                 if marca in q:
@@ -105,6 +125,10 @@ class FakeDB:
         }
         self.interacciones = {10: {"vendedor": "ana"}, 11: {"vendedor": "luis"}}
         self.abiertos = {3: 2}  # seguimientos abiertos por cliente
+        self.historial = []
+        self.evento = None            # fila única para SELECT e.id (autorización)
+        self.eventos_insert = []      # params de INSERT INTO crm_eventos
+        self.eventos_update = []      # (sql, params) de UPDATE crm_eventos
         self.historial = []
         self.respuestas = []    # (fragmento de SQL, filas) para consultas de lectura
         self.ejecutados = []
@@ -544,3 +568,110 @@ def test_eliminar_interaccion_alerta_solo_si_se_elimina(client, db):
     client.delete("/crm/interacciones/10", headers=GER)
     (msg,) = db.alertas
     assert "Interacción eliminada" in msg and "gerencia" in msg
+
+
+# ---------- Agenda / Calendario (crm_eventos) ----------
+
+def _evento_base(**extra):
+    base = {
+        "id": 5, "cliente_id": None, "vendedor": "ana", "tipo": "tarea",
+        "titulo": "Preparar lista", "descripcion": None,
+        "inicio": datetime(2026, 10, 5, 9, 0), "fin": None,
+        "todo_dia": 0, "estado": "pendiente", "origen_seguimiento_id": None,
+        "cliente": None,
+    }
+    base.update(extra)
+    return base
+
+
+def test_crear_evento_interno_sin_cliente(client, db):
+    r = client.post("/crm/eventos", json={
+        "tipo": "tarea", "titulo": "  Preparar lista  ", "inicio": "2026-10-05T09:00:00",
+    }, headers=ANA)
+    assert r.status_code == 200 and r.json()["id"] == 701
+    (p,) = db.eventos_insert
+    assert p[0] is None and p[1] == "ana" and p[2] == "tarea" and p[3] == "Preparar lista"
+    assert db.commits == 1 and len(db.alertas) == 1 and "interna" in db.alertas[0]
+
+
+def test_crear_evento_con_cliente_valida_cartera(client, db):
+    r = client.post("/crm/eventos", json={
+        "cliente_id": 3, "tipo": "cita", "titulo": "Visita planta",
+        "inicio": "2026-10-05T10:00:00", "fin": "2026-10-05T11:00:00",
+    }, headers=ANA)
+    assert r.status_code == 200
+    assert db.eventos_insert[0][0] == 3
+    # cliente de otro vendedor: 403 y no escribe
+    db.eventos_insert.clear()
+    assert client.post("/crm/eventos", json={
+        "cliente_id": 4, "tipo": "cita", "titulo": "Visita planta", "inicio": "2026-10-05T10:00:00",
+    }, headers=ANA).status_code == 403
+    assert db.eventos_insert == []
+
+
+@pytest.mark.parametrize("payload", [
+    {"tipo": "tarea", "titulo": "ab", "inicio": "2026-10-05T09:00:00"},       # título corto
+    {"tipo": "fax", "titulo": "Algo válido", "inicio": "2026-10-05T09:00:00"},  # tipo inválido
+    {"tipo": "cita", "titulo": "Visita", "inicio": "2026-10-05T11:00:00", "fin": "2026-10-05T10:00:00"},
+    {"cliente_id": 0, "tipo": "cita", "titulo": "Visita", "inicio": "2026-10-05T10:00:00"},
+    {"cliente_id": 999, "tipo": "cita", "titulo": "Visita", "inicio": "2026-10-05T10:00:00"},  # 404
+])
+def test_crear_evento_invalido_no_escribe(client, db, payload):
+    r = client.post("/crm/eventos", json=payload, headers=ANA)
+    assert r.status_code in (404, 422)
+    assert db.eventos_insert == [] and db.commits == 0 and db.alertas == []
+
+
+def test_agenda_vendedor_limitada_a_lo_suyo(client, db):
+    db.respuestas += [
+        ("FROM crm_eventos e", [{"id": 5, "titulo": "Tarea"}]),
+        ("FROM crm_interacciones i", [{"seguimiento_id": 9}]),
+    ]
+    r = client.get("/crm/agenda", params={"desde": "2026-10-01", "hasta": "2026-10-08"}, headers=ANA)
+    assert r.status_code == 200
+    assert r.json()["eventos"] == [{"id": 5, "titulo": "Tarea"}]
+    q_ev, p_ev = db.consultas("SELECT e.id")[0]
+    assert "e.vendedor = %s" in q_ev and p_ev[2] == "ana"
+    q_sg, p_sg = db.consultas("SELECT i.id AS seguimiento_id")[0]
+    assert "ana" in p_sg
+
+
+def test_agenda_gerencia_ve_todo_y_filtra_por_vendedor_y_tipo(client, db):
+    db.respuestas.append(("FROM crm_eventos e", []))
+    client.get("/crm/agenda", params={"desde": "2026-10-01", "hasta": "2026-10-08"}, headers=GER)
+    assert db.ejecutados[-2][1][:2] == (datetime(2026, 10, 1), datetime(2026, 10, 9))
+    client.get("/crm/agenda", params={"desde": "2026-10-01", "hasta": "2026-10-08",
+                                       "vendedor": "luis", "tipo": "cita"}, headers=GER)
+    q_ev, p_ev = db.consultas("SELECT e.id")[-1]
+    assert "e.vendedor = %s" in q_ev and "e.tipo IN (%s)" in q_ev
+    assert p_ev[2:] == ("luis", "cita")
+
+
+def test_mover_evento_actualiza_inicio(client, db):
+    db.evento = _evento_base()
+    r = client.patch("/crm/eventos/5", json={"inicio": "2026-10-06T09:00:00"}, headers=ANA)
+    assert r.status_code == 200 and r.json()["actualizados"] == ["inicio"]
+    assert db.commits == 1
+
+
+def test_mover_evento_con_fin_anterior_da_422(client, db):
+    db.evento = _evento_base(fin=datetime(2026, 10, 5, 10, 0))
+    assert client.patch("/crm/eventos/5", json={"fin": "2026-10-05T08:00:00"}, headers=ANA).status_code == 422
+    assert client.patch("/crm/eventos/5", json={}, headers=ANA).status_code == 422
+    assert db.commits == 0
+
+
+def test_eliminar_evento_interno_autor_si_ajeno_no(client, db):
+    db.evento = _evento_base()
+    assert client.delete("/crm/eventos/5", headers=LUIS).status_code == 403
+    assert client.delete("/crm/eventos/999", headers=ANA).status_code == 404
+    r = client.delete("/crm/eventos/5", headers=ANA)
+    assert r.status_code == 200 and r.json()["eliminado"] is True
+    assert client.delete("/crm/eventos/5", headers=GER).status_code == 200  # gerencia también puede
+
+
+def test_cerrar_evento_alerta(client, db):
+    db.evento = _evento_base()
+    r = client.patch("/crm/eventos/5", json={"estado": "hecho"}, headers=ANA)
+    assert r.status_code == 200
+    assert "hecho" in db.alertas[0].lower() or "Cerr" in db.alertas[0] or "cerr" in db.alertas[0]

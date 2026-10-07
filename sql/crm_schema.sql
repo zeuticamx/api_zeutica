@@ -48,3 +48,28 @@ CREATE TABLE IF NOT EXISTS crm_etapas_historial (
   INDEX idx_crm_hist_fecha (fecha),
   INDEX idx_crm_hist_cliente (cliente_id)
 );
+
+-- Agenda / calendario: citas y tareas con hora, con o sin cliente.
+-- cliente_id NULL = tarea interna (dueño = vendedor, sin validación de cartera).
+-- cliente_id con valor = se valida contra la cartera con puede_gestionar().
+-- origen_seguimiento_id liga opcional con crm_interacciones (convertir seguimiento en cita).
+-- Tipos: cita | tarea | llamada | reunion | whatsapp | correo
+-- Estados: pendiente | hecho | cancelado
+CREATE TABLE IF NOT EXISTS crm_eventos (
+  id                     INT          NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  cliente_id             INT          NULL,
+  vendedor               VARCHAR(50)  NOT NULL,
+  tipo                   VARCHAR(12)  NOT NULL,
+  titulo                 VARCHAR(255) NOT NULL,
+  descripcion            TEXT         NULL,
+  inicio                 DATETIME     NOT NULL,
+  fin                    DATETIME     NULL,
+  todo_dia               TINYINT(1)   NOT NULL DEFAULT 0,
+  estado                 VARCHAR(12)  NOT NULL DEFAULT 'pendiente',
+  origen_seguimiento_id  INT          NULL,
+  eliminado              TINYINT(1)   NOT NULL DEFAULT 0,
+  creado                 DATETIME     NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_crm_ev_vendedor_inicio (vendedor, inicio),
+  INDEX idx_crm_ev_cliente (cliente_id),
+  INDEX idx_crm_ev_estado_inicio (estado, inicio)
+);

@@ -35,6 +35,8 @@ DIAS_PROXIMOS = 7  # "Mis seguimientos" muestra también lo de la próxima seman
 Tipo = Literal["llamada", "correo", "whatsapp", "reunion"]
 Etapa = Literal["contacto_inicial", "en_seguimiento", "cotizado", "ganado", "perdido"]
 Resultado = Literal["contesto", "no_contesto", "interesado", "no_interesado", "pidio_cotizacion"]
+TipoEvento = Literal["cita", "tarea", "llamada", "reunion", "whatsapp", "correo"]
+EstadoEvento = Literal["pendiente", "hecho", "cancelado"]
 
 
 def get_db_connection():
@@ -155,6 +157,65 @@ class AsignacionVendedor(BaseModel):
         if not v:
             raise ValueError("El vendedor es obligatorio")
         return v
+
+
+def _fecha_hora_naive(v):
+    # datetime-local del panel llega sin zona; si trae offset se convierte a MX.
+    if v is not None and isinstance(v, datetime) and v.tzinfo is not None:
+        v = v.astimezone(_TZ_MX).replace(tzinfo=None)
+    return v.replace(microsecond=0) if isinstance(v, datetime) else v
+
+
+class EventoNuevo(BaseModel):
+    # cliente_id ausente/None = tarea interna (sin validación de cartera).
+    cliente_id: Optional[int] = Field(None, gt=0)
+    tipo: TipoEvento = "cita"
+    titulo: str = Field(min_length=3, max_length=255)
+    descripcion: Optional[str] = Field(None, max_length=2000)
+    inicio: datetime
+    fin: Optional[datetime] = None
+    todo_dia: bool = False
+    origen_seguimiento_id: Optional[int] = Field(None, gt=0)
+
+    _limpiar = field_validator("titulo", "descripcion")(_texto_opcional)
+
+    @field_validator("titulo")
+    @classmethod
+    def titulo_minimo(cls, v):
+        v = (v or "").strip()
+        if len(v) < 3:
+            raise ValueError("El título debe tener al menos 3 caracteres")
+        return v
+
+    @field_validator("inicio", "fin")
+    @classmethod
+    def naive(cls, v):
+        return _fecha_hora_naive(v)
+
+    @field_validator("fin")
+    @classmethod
+    def fin_posterior(cls, v, info):
+        inicio = (info.data or {}).get("inicio")
+        if v is not None and inicio is not None and v < inicio:
+            raise ValueError("El fin no puede ser anterior al inicio")
+        return v
+
+
+class EventoEditar(BaseModel):
+    tipo: Optional[TipoEvento] = None
+    titulo: Optional[str] = Field(None, min_length=3, max_length=255)
+    descripcion: Optional[str] = Field(None, max_length=2000)
+    inicio: Optional[datetime] = None
+    fin: Optional[datetime] = None
+    todo_dia: Optional[bool] = None
+    estado: Optional[EstadoEvento] = None
+
+    _limpiar = field_validator("titulo", "descripcion")(_texto_opcional)
+
+    @field_validator("inicio", "fin")
+    @classmethod
+    def naive(cls, v):
+        return _fecha_hora_naive(v)
 
 
 # ---------- Reglas de permisos (puras) ----------
@@ -709,6 +770,218 @@ async def crm_seguimientos(vendedor: Optional[str] = None, usuario: str = Depend
         return resultado
     except mysql.connector.Error as err:
         _error_db(conn, err, "seguimientos")
+    finally:
+        cursor.close()
+        conn.close()
+
+
+# ---------- Agenda / Calendario ----------
+
+def _evento_autorizado(cursor, evento_id: int, usuario: str):
+    """Fila del evento si el usuario puede verla/editarla. Interna: autor o gerencia.
+    Con cliente: misma regla de cartera que las interacciones."""
+    cursor.execute(
+        """SELECT e.id, e.cliente_id, e.vendedor, e.tipo, e.titulo, e.descripcion,
+                  e.inicio, e.fin, e.todo_dia, e.estado, e.origen_seguimiento_id,
+                  c.nombre AS cliente
+           FROM crm_eventos e LEFT JOIN clientes c ON c.id = e.cliente_id
+           WHERE e.id = %s AND e.eliminado = 0""",
+        (evento_id,),
+    )
+    fila = cursor.fetchone()
+    if not fila:
+        raise HTTPException(status_code=404, detail="Evento no encontrado")
+    if fila.get("cliente_id"):
+        _cliente_autorizado(cursor, fila["cliente_id"], usuario)
+    elif not es_gerencia(usuario) and str(fila.get("vendedor") or "").strip().lower() != str(usuario).strip().lower():
+        raise HTTPException(status_code=403, detail="Solo el autor o gerencia pueden gestionar este evento")
+    return fila
+
+
+def _msg_evento(accion: str, usuario: str, titulo: str, cliente, tipo, inicio) -> str:
+    icono = {"creó": "🗓️", "movió": "🔀", "cerró": "✅", "canceló": "🚫", "eliminó": "🗑️"}.get(accion, "🗓️")
+    destino = _esc(cliente) if cliente else "Tarea interna"
+    return "\n".join([
+        f"{icono} <b>CRM · Evento {accion}</b>",
+        "",
+        f"• <b>Título:</b> {_esc(titulo)}",
+        f"• <b>Cliente:</b> {destino}",
+        f"• <b>Tipo:</b> {_esc(tipo)}",
+        f"• <b>Inicio:</b> {_esc(inicio)}",
+        f"• <b>Usuario:</b> {_esc(usuario)}",
+    ])
+
+
+@router.get("/crm/agenda")
+async def crm_agenda(
+    desde: Optional[date] = None,
+    hasta: Optional[date] = None,
+    vendedor: Optional[str] = None,
+    tipo: Optional[List[TipoEvento]] = Query(None),
+    incluir_seguimientos: bool = True,
+    usuario: str = Depends(usuario_autenticado),
+):
+    """
+    Feed del calendario: eventos con hora en [desde, hasta] + seguimientos
+    abiertos (proxima_fecha en el rango) como bloques de todo el día.
+    Vendedor: solo lo suyo. Gerencia: todo o filtrado por ?vendedor=.
+    """
+    desde, hasta = validar_rango(desde, hasta)
+    ini_dt = datetime(desde.year, desde.month, desde.day)
+    fin_dt = datetime(hasta.year, hasta.month, hasta.day) + timedelta(days=1)
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        where = ["e.eliminado = 0", "e.inicio >= %s", "e.inicio < %s"]
+        params: list = [ini_dt, fin_dt]
+        if not es_gerencia(usuario):
+            where.append("e.vendedor = %s")
+            params.append(usuario)
+        elif vendedor:
+            where.append("e.vendedor = %s")
+            params.append(vendedor)
+        if tipo:
+            frag, vals = _en("e.tipo", list(tipo))
+            where.append(frag)
+            params += vals
+        filtro = " AND ".join(where)
+        cursor.execute(
+            f"""SELECT e.id, e.cliente_id, c.nombre AS cliente, e.vendedor, e.tipo,
+                       e.titulo, e.descripcion, e.inicio, e.fin, e.todo_dia, e.estado,
+                       e.origen_seguimiento_id
+                FROM crm_eventos e LEFT JOIN clientes c ON c.id = e.cliente_id
+                WHERE {filtro}
+                ORDER BY e.inicio, e.id""",
+            tuple(params),
+        )
+        eventos = cursor.fetchall()
+
+        seguimientos = []
+        if incluir_seguimientos:
+            dueno = "COALESCE(cc.vendedor, i.vendedor)"
+            w_seg = ["i.eliminado = 0", "i.seguimiento_cerrado = 0",
+                     "i.proxima_fecha IS NOT NULL", "i.proxima_fecha >= %s", "i.proxima_fecha <= %s"]
+            p_seg: list = [desde, hasta]
+            if not es_gerencia(usuario):
+                w_seg.append(f"{dueno} = %s")
+                p_seg.append(usuario)
+            elif vendedor:
+                w_seg.append(f"{dueno} = %s")
+                p_seg.append(vendedor)
+            cursor.execute(
+                f"""SELECT i.id AS seguimiento_id, i.cliente_id, c.nombre AS cliente,
+                           {dueno} AS vendedor, i.tipo,
+                           i.proxima_accion AS titulo, i.notas AS descripcion,
+                           i.proxima_fecha, cc.etapa
+                    FROM crm_interacciones i
+                    LEFT JOIN clientes c ON c.id = i.cliente_id
+                    LEFT JOIN crm_cartera cc ON cc.cliente_id = i.cliente_id
+                    WHERE {' AND '.join(w_seg)}
+                    ORDER BY i.proxima_fecha, i.id""",
+                tuple(p_seg),
+            )
+            seguimientos = cursor.fetchall()
+        return {"desde": desde.isoformat(), "hasta": hasta.isoformat(),
+                "eventos": eventos, "seguimientos": seguimientos}
+    except mysql.connector.Error as err:
+        _error_db(conn, err, "agenda")
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.post("/crm/eventos")
+async def crm_crear_evento(datos: EventoNuevo, usuario: str = Depends(usuario_autenticado)):
+    """Crea una cita o tarea, con cliente (valida cartera) o interna (cliente_id null)."""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        nombre_cliente = None
+        if datos.cliente_id is not None:
+            fila = _cliente_autorizado(cursor, datos.cliente_id, usuario)
+            nombre_cliente = fila.get("nombre")
+        cursor.execute(
+            """INSERT INTO crm_eventos
+               (cliente_id, vendedor, tipo, titulo, descripcion, inicio, fin, todo_dia, origen_seguimiento_id)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+            (datos.cliente_id, usuario, datos.tipo, datos.titulo.strip(), datos.descripcion,
+             datos.inicio, datos.fin, int(bool(datos.todo_dia)), datos.origen_seguimiento_id),
+        )
+        nuevo_id = cursor.lastrowid
+        conn.commit()
+        mov_reg.registrar_movimiento(
+            usuario,
+            f"Agendó {datos.tipo} '{datos.titulo.strip()}'" + (f" con {nombre_cliente}" if nombre_cliente else " (interna)"),
+            "CRM",
+        )
+        _alertar(_msg_evento("creó", usuario, datos.titulo.strip(), nombre_cliente, datos.tipo, datos.inicio))
+        return {"id": nuevo_id, "cliente_id": datos.cliente_id, "inicio": datos.inicio}
+    except mysql.connector.Error as err:
+        _error_db(conn, err, "crear-evento")
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.patch("/crm/eventos/{evento_id}")
+async def crm_editar_evento(evento_id: int, datos: EventoEditar, usuario: str = Depends(usuario_autenticado)):
+    """Edita título/descripción/tipo/fechas o cambia estado. Mover = mandar inicio/fin nuevos."""
+    campos = {k: getattr(datos, k) for k in datos.model_fields_set}
+    if not campos:
+        raise HTTPException(status_code=422, detail="No se envió ningún campo para actualizar")
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        fila = _evento_autorizado(cursor, evento_id, usuario)
+        nuevo_inicio = campos.get("inicio", fila["inicio"])
+        nuevo_fin = campos.get("fin", fila["fin"])
+        if nuevo_inicio is not None and nuevo_fin is not None and nuevo_fin < nuevo_inicio:
+            raise HTTPException(status_code=422, detail="El fin no puede ser anterior al inicio")
+        columnas = [c for c in ("tipo", "titulo", "descripcion", "inicio", "fin", "todo_dia", "estado") if c in campos]
+        valores = []
+        for c in columnas:
+            v = campos[c]
+            if c == "todo_dia":
+                v = int(bool(v))
+            if c == "titulo" and isinstance(v, str):
+                v = v.strip()
+            valores.append(v)
+        cursor.execute(
+            f"UPDATE crm_eventos SET {', '.join(f'{c} = %s' for c in columnas)} WHERE id = %s",
+            tuple(valores + [evento_id]),
+        )
+        conn.commit()
+        if "estado" in campos and campos["estado"] in ("hecho", "cancelado"):
+            mov_reg.registrar_movimiento(usuario, f"{'Cerró' if campos['estado'] == 'hecho' else 'Canceló'} el evento '{fila['titulo']}'", "CRM")
+            _alertar(_msg_evento("cerró" if campos["estado"] == "hecho" else "canceló",
+                                 usuario, fila["titulo"], fila.get("cliente"), fila["tipo"], fila["inicio"]))
+        elif "inicio" in campos or "fin" in campos:
+            mov_reg.registrar_movimiento(usuario, f"Movió el evento '{fila['titulo']}' al {nuevo_inicio}", "CRM")
+        return {"id": evento_id, "actualizados": columnas}
+    except mysql.connector.Error as err:
+        _error_db(conn, err, "editar-evento")
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.delete("/crm/eventos/{evento_id}")
+async def crm_eliminar_evento(evento_id: int, usuario: str = Depends(usuario_autenticado)):
+    """Borrado lógico: autor o gerencia."""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        fila = _evento_autorizado(cursor, evento_id, usuario)
+        cursor.execute("UPDATE crm_eventos SET eliminado = 1 WHERE id = %s AND eliminado = 0", (evento_id,))
+        if cursor.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Evento no encontrado")
+        conn.commit()
+        mov_reg.registrar_movimiento(usuario, f"Eliminó el evento '{fila['titulo']}'", "CRM")
+        _alertar(_msg_evento("eliminó", usuario, fila["titulo"], fila.get("cliente"), fila["tipo"], fila["inicio"]))
+        return {"id": evento_id, "eliminado": True}
+    except mysql.connector.Error as err:
+        _error_db(conn, err, "eliminar-evento")
     finally:
         cursor.close()
         conn.close()
