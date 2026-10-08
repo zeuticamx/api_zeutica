@@ -1,5 +1,6 @@
 import mysql.connector
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
+from typing import Optional
 import os
 from dotenv import load_dotenv
 
@@ -16,18 +17,44 @@ def get_db_connection():
     )
 
 @router.get("/consulta-registros")
-async def consulta_registros():
+async def consulta_registros(
+    seccion: Optional[str] = Query(default=None),
+    q: Optional[str] = Query(default=None),
+    desde: Optional[str] = Query(default=None),
+    hasta: Optional[str] = Query(default=None),
+    limite: int = Query(default=200, ge=1, le=1000),
+):
     """
-    Traigo todos los registros de la tabla movimientos_registro.
+    Auditoría visible para cualquier usuario autenticado (sin restricción de gerencia).
+    Filtros opcionales por sección/texto/fechas para conciliar inventario.
     """
     conn = get_db_connection()
     # Uso dictionary=True para devolver llaves nombradas y armar el JSON directo
     cursor = conn.cursor(dictionary=True)
 
-    query = "SELECT * FROM movimientos_registro order by fecha desc LIMIT 100"  # Limito a 100 registros para no saturar la respuestas
+    query = "SELECT * FROM movimientos_registro WHERE 1=1"
+    valores = []
+
+    if seccion:
+        query += " AND seccion = %s"
+        valores.append(seccion)
+    if q:
+        query += " AND (nombre_usuario LIKE %s OR movimiento LIKE %s OR seccion LIKE %s)"
+        like = f"%{q}%"
+        valores += [like, like, like]
+    if desde:
+        query += " AND fecha >= %s"
+        valores.append(desde)
+    if hasta:
+        # Incluye el día completo.
+        query += " AND fecha < DATE_ADD(%s, INTERVAL 1 DAY)"
+        valores.append(hasta)
+
+    query += " ORDER BY fecha DESC LIMIT %s"
+    valores.append(limite)
 
     try:
-        cursor.execute(query)
+        cursor.execute(query, tuple(valores))
         res = cursor.fetchall()        
         return res
 

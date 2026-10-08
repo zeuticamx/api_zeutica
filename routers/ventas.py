@@ -167,6 +167,9 @@ async def registrar_venta(venta: VentaSchema):
         raise HTTPException(status_code=400, detail="La cantidad a descontar debe ser mayor a 0")
 
     connection = get_db_connection()
+    stock_anterior = None
+    total_operacion = venta.precio * venta.stock_bodega
+    saldo_inicial = total_operacion if venta.condicion_pago == "CREDITO" else 0.00
     try:
         with connection.cursor(dictionary=True) as cursor:
 
@@ -186,15 +189,10 @@ async def registrar_venta(venta: VentaSchema):
                 connection.rollback()
                 raise HTTPException(status_code=404, detail="Producto no encontrado")
 
-            if resultado['stock_bodega'] < venta.stock_bodega:
+            stock_anterior = resultado['stock_bodega'] if resultado['stock_bodega'] is not None else 0
+            if stock_anterior < venta.stock_bodega:
                 connection.rollback()
-                raise HTTPException(status_code=400, detail=f"Stock insuficiente. Solo hay {resultado['stock_bodega']}")
-
-            # --- NUEVA LÓGICA DE CRÉDITO ---
-            # Calculamos el saldo inicial. Si es CRÉDITO, el saldo es el total (precio * cantidad)
-            # Si es CONTADO, el saldo es 0.
-            total_operacion = venta.precio * venta.stock_bodega
-            saldo_inicial = total_operacion if venta.condicion_pago == "CREDITO" else 0.00
+                raise HTTPException(status_code=400, detail=f"Stock insuficiente. Solo hay {stock_anterior}")
 
             # B. Registrar venta en el historial primero. INSERT normal (no IGNORE): el duplicado
             # ya se descartó arriba y así un choque de llave única o un dato inválido es un error
@@ -226,45 +224,11 @@ async def registrar_venta(venta: VentaSchema):
             # D. Confirmar cambios
             connection.commit()
 
-            mov_reg.registrar_movimiento(
-                venta.usuario,
-                f"Registró venta para SKU '{venta.sku}'",
-                "Ventas"
-            )
-
-            comisiones.registrar_comisiones_seguro(
-                venta.id_venta, venta.usuario, venta.nombreComprador, venta.plataforma, venta.fecha,
-                [{"sku": venta.sku, "producto": venta.producto, "cantidad": venta.stock_bodega, "precio": venta.precio}],
-            )
-
-            asyncio.create_task(send_telegram_alert(
-                f"🔄 <b>Venta Registrada</b>\n\n"
-                f"• <b>ID Venta:</b> {venta.id_venta}\n"
-                f"• <b>Usuario:</b> {html.escape(venta.usuario)}\n"
-                f"• <b>SKU:</b> {html.escape(venta.sku)}\n"
-                f"• <b>Producto:</b> {html.escape(venta.producto)}\n"
-                f"• <b>Cantidad:</b> {venta.stock_bodega}\n"
-                f"• <b>Precio Unitario:</b> ${venta.precio:,.2f}\n"
-                f"• <b>Total:</b> ${total_operacion:,.2f}\n"                
-                f"• <b>Nombre Comprador:</b> {html.escape(venta.nombreComprador)}\n"
-                f"• <b>Otros:</b> {html.escape(venta.otros)}\n"
-                f"• <b>Plataforma:</b> {html.escape(venta.plataforma)}\n"
-                f"• <b>Fecha:</b> {html.escape(venta.fecha)}\n"
-                f"• <b>Usuario Registro:</b> {html.escape(venta.usuario)}\n"
-                f"• <b>Condición de Pago:</b> {html.escape(venta.condicion_pago)}\n"
-                f"• <b>Saldo Inicial:</b> ${saldo_inicial:,.2f}\n"
-                f"• <b>Saldo Pendiente:</b> ${saldo_inicial:,.2f}"
-            ))
-
-            return {
-                "message": "Venta aplicada exitosamente", 
-                "sku": venta.sku, 
-                "nuevo_stock": resultado['stock_bodega'] - venta.stock_bodega,
-                "saldo_pendiente": saldo_inicial
-            }
-
     except mysql.connector.Error as err:
-        connection.rollback()
+        try:
+            connection.rollback()
+        except Exception:
+            pass
         print(f"Error SQL: {err}")
         if es_conflicto_de_venta(err):
             raise HTTPException(status_code=409, detail=mensaje_venta_duplicada(venta.id_venta))
@@ -273,6 +237,49 @@ async def registrar_venta(venta: VentaSchema):
     finally:
         if connection.is_connected():
             connection.close()
+
+    # E. Post-commit: la venta ya quedó confirmada; un fallo en bitácora no debe
+    # responder error ni provocar reintento que descuente de nuevo.
+    stock_nuevo = stock_anterior - venta.stock_bodega
+    try:
+        mov_reg.registrar_movimiento(
+            venta.usuario,
+            f"Registró venta '{venta.id_venta}' SKU '{venta.sku}' cantidad {venta.stock_bodega} (stock_bodega {stock_anterior}->{stock_nuevo})",
+            "Ventas"
+        )
+    except mysql.connector.Error as err:
+        print(f"Venta {venta.id_venta} registrada, pero falló la bitácora: {err}")
+
+    comisiones.registrar_comisiones_seguro(
+        venta.id_venta, venta.usuario, venta.nombreComprador, venta.plataforma, venta.fecha,
+        [{"sku": venta.sku, "producto": venta.producto, "cantidad": venta.stock_bodega, "precio": venta.precio}],
+    )
+
+    asyncio.create_task(send_telegram_alert(
+        f"🔄 <b>Venta Registrada</b>\n\n"
+        f"• <b>ID Venta:</b> {venta.id_venta}\n"
+        f"• <b>Usuario:</b> {html.escape(venta.usuario)}\n"
+        f"• <b>SKU:</b> {html.escape(venta.sku)}\n"
+        f"• <b>Producto:</b> {html.escape(venta.producto)}\n"
+        f"• <b>Cantidad:</b> {venta.stock_bodega}\n"
+        f"• <b>Precio Unitario:</b> ${venta.precio:,.2f}\n"
+        f"• <b>Total:</b> ${total_operacion:,.2f}\n"
+        f"• <b>Nombre Comprador:</b> {html.escape(venta.nombreComprador)}\n"
+        f"• <b>Otros:</b> {html.escape(venta.otros)}\n"
+        f"• <b>Plataforma:</b> {html.escape(venta.plataforma)}\n"
+        f"• <b>Fecha:</b> {html.escape(venta.fecha)}\n"
+        f"• <b>Usuario Registro:</b> {html.escape(venta.usuario)}\n"
+        f"• <b>Condición de Pago:</b> {html.escape(venta.condicion_pago)}\n"
+        f"• <b>Saldo Inicial:</b> ${saldo_inicial:,.2f}\n"
+        f"• <b>Saldo Pendiente:</b> ${saldo_inicial:,.2f}"
+    ))
+
+    return {
+        "message": "Venta aplicada exitosamente",
+        "sku": venta.sku,
+        "nuevo_stock": stock_nuevo,
+        "saldo_pendiente": saldo_inicial
+    }
 
 
 class ItemVentaSchema(BaseModel):
@@ -390,7 +397,9 @@ async def registrar_venta_completa(venta: VentaCompletaSchema):
     saldo_inicial = total_operacion if es_credito else 0.00
     for item in venta.items:
         try:
-            mov_reg.registrar_movimiento(venta.usuario, f"Registró venta para SKU '{item.sku}'", "Ventas")
+            anterior = stock_previo.get(item.sku, "?")
+            nuevo = anterior - item.cantidad if isinstance(anterior, int) else "?"
+            mov_reg.registrar_movimiento(venta.usuario, f"Registró venta '{venta.id_venta}' SKU '{item.sku}' cantidad {item.cantidad} (stock_bodega {anterior}->{nuevo})", "Ventas")
         except mysql.connector.Error as err:
             print(f"Venta {venta.id_venta} registrada, pero falló la bitácora de '{item.sku}': {err}")
 

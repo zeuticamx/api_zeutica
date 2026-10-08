@@ -205,3 +205,49 @@ async def avisar_leida(empleado_id: int, notificacion_id: int) -> None:
     """
     from routers.sofi_notificaciones import manager
     await manager.enviar_a(empleado_id, {"tipo": "leida", "id": notificacion_id})
+
+
+def ids_usuarios_activos() -> List[int]:
+    """Ids de `usuarios` con empleado activo (o sin fila de empleado)."""
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(
+            """
+            SELECT u.id FROM usuarios u
+            LEFT JOIN empleados e ON e.usuario = u.nombre_usuario
+            WHERE e.estatus IS NULL OR e.estatus != 0
+            """
+        )
+        return [fila["id"] for fila in cursor.fetchall()]
+    except mysql.connector.Error as err:
+        print(f"Error interno DB (ids_usuarios_activos): {err}")
+        return []
+    finally:
+        if cursor:
+            cursor.close()
+        if conn and conn.is_connected():
+            conn.close()
+
+
+async def crear_y_notificar_todos(titulo: str, mensaje: str, tipo: str) -> int:
+    """Guarda la notificación para cada usuario activo y la empuja por WebSocket.
+
+    Es como `crear_y_notificar` pero para avisos globales (jobs, webhooks):
+    el conectado lo ve en vivo y el desconectado lo trae en el snapshot.
+    Devuelve a cuántos se les guardó.
+    """
+    from routers.sofi_notificaciones import manager
+    guardadas = 0
+    for empleado_id in ids_usuarios_activos():
+        notificacion = crear(empleado_id, titulo, mensaje, tipo)
+        if not notificacion:
+            continue
+        guardadas += 1
+        try:
+            await manager.enviar_a(empleado_id, {"tipo": "notificacion", "notificacion": notificacion})
+        except Exception as err:
+            print(f"No se pudo empujar notificacion a {empleado_id}: {err}")
+    return guardadas

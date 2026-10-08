@@ -1,5 +1,5 @@
 import mysql.connector, os, mov_reg, html, asyncio
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from fastapi import APIRouter, HTTPException
 from typing import List
 from dotenv import load_dotenv
@@ -18,67 +18,131 @@ def get_db_connection():
     )
 
 class traspaso(BaseModel): # molde para recibir informacion de traspaso
-    sku: str
-    stock_bodega: int
+    sku: str = Field(min_length=1)
+    stock_bodega: int = Field(gt=0)
 
 class LoteTraspaso(BaseModel):
-    usuario: str
-    movimientos: List[traspaso]
+    usuario: str = Field(min_length=1)
+    movimientos: List[traspaso] = Field(min_length=1)
     #almacen: str
+
+
+def _validar_lote(lote: LoteTraspaso):
+    """Rechaza SKUs repetidos: obliga a consolidar cantidades en una sola partida."""
+    vistos = set()
+    for item in lote.movimientos:
+        if item.sku in vistos:
+            raise HTTPException(
+                status_code=422,
+                detail=f"el SKU '{item.sku}' viene repetido; junta las cantidades en una sola partida",
+            )
+        vistos.add(item.sku)
+
+
+def _insert_stock_actual(cursor, sku: str, cantidad: int, usuario: str, almacen: str):
+    """Historial con almacén para auditoría. Tolera esquemas sin columna almacen."""
+    try:
+        cursor.execute(
+            "INSERT INTO stock_actual (sku, cantidad, usuario, almacen) VALUES (%s, %s, %s, %s)",
+            (sku, cantidad, usuario, almacen)
+        )
+    except mysql.connector.Error as err:
+        # 1054 = columna desconocida (BD vieja sin almacen): reintento sin ella.
+        if getattr(err, "errno", None) != 1054:
+            raise
+        cursor.execute(
+            "INSERT INTO stock_actual (sku, cantidad, usuario) VALUES (%s, %s, %s)",
+            (sku, cantidad, usuario)
+        )
 
 @router.post("/traspaso")
 async def traspaso_multiple(lote: LoteTraspaso):
     """
-    Realiza traspaso de stock entre stock_bodega y stock_full.
+    Baja de stock_bodega (almacén FULL eliminado). Resta sin destino a propósito;
+    cada movimiento queda en stock_actual con almacen='BAJA' para auditoría.
     """
+    _validar_lote(lote)
+    # Orden fijo para evitar deadlocks entre lotes que comparten SKUs.
+    items = sorted(lote.movimientos, key=lambda i: i.sku)
     connection = get_db_connection()
     cursor = connection.cursor(dictionary=True)
-    
+
     try:
         # Iniciamos el proceso para todos los items
-        for item in lote.movimientos:
-            # A. Verificar stock
-            cursor.execute("SELECT stock_bodega FROM productos WHERE sku = %s", (item.sku,))
+        for item in items:
+            # A. Verificar stock bloqueando la fila.
+            cursor.execute("SELECT stock_bodega FROM productos WHERE sku = %s FOR UPDATE", (item.sku,))
             res = cursor.fetchone()
-            
-            if not res or res['stock_bodega'] < item.stock_bodega:
+
+            if not res:
+                connection.rollback()
                 raise HTTPException(
-                    status_code=400, 
-                    detail=f"Error en SKU {item.sku}: Stock insuficiente o no existe."
+                    status_code=404,
+                    detail=f"Error en SKU {item.sku}: no existe."
+                )
+            disponible = res['stock_bodega'] if res['stock_bodega'] is not None else 0
+            if disponible < item.stock_bodega:
+                connection.rollback()
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Error en SKU {item.sku}: Stock insuficiente. Disponible: {disponible}."
                 )
 
-            # B. Actualización doble: Resta de 'cantidad', suma a 'full'
+            # B. Baja: resta de bodega con guard ante carreras.
             sql_update = """
-                UPDATE productos 
-                SET stock_bodega = stock_bodega - %s                     
-                WHERE sku = %s
+                UPDATE productos
+                SET stock_bodega = stock_bodega - %s
+                WHERE sku = %s AND stock_bodega >= %s
             """
-            cursor.execute(sql_update, (item.stock_bodega, item.sku))
+            cursor.execute(sql_update, (item.stock_bodega, item.sku, item.stock_bodega))
+            if cursor.rowcount == 0:
+                connection.rollback()
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Error en SKU {item.sku}: Stock insuficiente al confirmar, intente nuevamente."
+                )
 
-            # C. Historial
-            cursor.execute(
-                "INSERT INTO stock_actual (sku, cantidad, usuario) VALUES (%s, %s, %s)",
-                (item.sku, item.stock_bodega, lote.usuario)
-            )
+            # C. Historial con anterior/nuevo para conciliar diferencias.
+            _insert_stock_actual(cursor, item.sku, -item.stock_bodega, lote.usuario, "BAJA")
 
         # D. Si TODO salió bien, guardamos cambios en MySQL
         connection.commit()
 
-        mov_reg.registrar_movimiento(lote.usuario, f"Realizó traspaso de full {chr(10).join(f'• SKU: {s.sku}, Cantidad: {s.stock_bodega}' for s in lote.movimientos)} items", "Traspasos")
+        detalle = ", ".join(f"{s.sku} x{s.stock_bodega}" for s in lote.movimientos)
+        try:
+            mov_reg.registrar_movimiento(lote.usuario, f"Realizó baja de bodega: {detalle} (almacen BAJA)", "Traspasos")
+        except mysql.connector.Error as err:
+            print(f"Baja registrada, pero falló la bitácora: {err}")
 
         # Enviamos notificación a Telegram
         message = (
-            f"🔄 <b>Traspaso de Stock</b>\n\n"
+            f"🔄 <b>Baja de Stock (ex-FULL)</b>\n\n"
             f"• <b>Usuario:</b> {html.escape(lote.usuario)}\n"
-            f"• <b>Almacén:</b> A FULL\n"
+            f"• <b>Almacén:</b> BAJA\n"
             f"• <b>Movimientos:</b> \n{chr(10).join(f'• SKU: {s.sku}, Cantidad: {s.stock_bodega}' for s in lote.movimientos)}\n"
         )
         asyncio.create_task(send_telegram_alert(message))
 
         return {"status": "success", "mensaje": f"{len(lote.movimientos)} movimientos procesados"}
 
+    except HTTPException:
+        try:
+            connection.rollback()
+        except Exception:
+            pass
+        raise
+    except mysql.connector.Error as e:
+        try:
+            connection.rollback()
+        except Exception:
+            pass
+        print(f"Error en traspaso: {e}")
+        raise HTTPException(status_code=500, detail="Error de base de datos en traspaso")
     except Exception as e:
-        connection.rollback() # Si uno falla, ninguno se guarda (mantiene integridad)
+        try:
+            connection.rollback() # Si uno falla, ninguno se guarda (mantiene integridad)
+        except Exception:
+            pass
         print(f"Error en traspaso: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:
@@ -112,24 +176,34 @@ async def consulta_traspasos():
         connection.close()
 
 @router.post("/traspaso/clean")
-async def traspaso_multiple(lote: LoteTraspaso):
+async def traspaso_multiple_clean(lote: LoteTraspaso):
     """
     Realiza traspaso stock entre stock_bodega a stock_clean.
     """
+    _validar_lote(lote)
+    items = sorted(lote.movimientos, key=lambda i: i.sku)
     connection = get_db_connection()
     cursor = connection.cursor(dictionary=True)
-    
+
     try:
         # Iniciamos el proceso para todos los items
-        for item in lote.movimientos:
-            # A. Verificar stock
-            cursor.execute("SELECT stock_bodega FROM productos WHERE sku = %s", (item.sku,))
+        for item in items:
+            # A. Verificar stock bloqueando la fila.
+            cursor.execute("SELECT stock_bodega FROM productos WHERE sku = %s FOR UPDATE", (item.sku,))
             res = cursor.fetchone()
-            
-            if not res or res['stock_bodega'] < item.stock_bodega:
+
+            if not res:
+                connection.rollback()
                 raise HTTPException(
-                    status_code=400, 
-                    detail=f"Error en SKU {item.sku}: Stock insuficiente o no existe."
+                    status_code=404,
+                    detail=f"Error en SKU {item.sku}: no existe."
+                )
+            disponible = res['stock_bodega'] if res['stock_bodega'] is not None else 0
+            if disponible < item.stock_bodega:
+                connection.rollback()
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Error en SKU {item.sku}: Stock insuficiente. Disponible: {disponible}."
                 )
 
             # B. Resta de bodega y suma a clean — COALESCE por si clean trae NULL
@@ -137,34 +211,57 @@ async def traspaso_multiple(lote: LoteTraspaso):
                 UPDATE productos
                 SET stock_bodega = stock_bodega - %s,
                     stock_clean = COALESCE(stock_clean, 0) + %s
-                WHERE sku = %s
+                WHERE sku = %s AND stock_bodega >= %s
             """
-            cursor.execute(sql_update, (item.stock_bodega, item.stock_bodega, item.sku))
+            cursor.execute(sql_update, (item.stock_bodega, item.stock_bodega, item.sku, item.stock_bodega))
+            if cursor.rowcount == 0:
+                connection.rollback()
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Error en SKU {item.sku}: Stock insuficiente al confirmar, intente nuevamente."
+                )
 
             # C. Historial
-            cursor.execute(
-                "INSERT INTO stock_actual (sku, cantidad, usuario) VALUES (%s, %s, %s)",
-                (item.sku, item.stock_bodega, lote.usuario)
-            )
+            _insert_stock_actual(cursor, item.sku, item.stock_bodega, lote.usuario, "CLEAN")
 
         # D. Si TODO salió bien, guardamos cambios en MySQL
         connection.commit()
 
-        mov_reg.registrar_movimiento(lote.usuario, f"Realizó traspaso a clean de {chr(10).join(f'• SKU: {s.sku}, Cantidad: {s.stock_bodega}' for s in lote.movimientos)} items", "Traspasos")
+        detalle = ", ".join(f"{s.sku} x{s.stock_bodega}" for s in lote.movimientos)
+        try:
+            mov_reg.registrar_movimiento(lote.usuario, f"Realizó traspaso a clean: {detalle}", "Traspasos")
+        except mysql.connector.Error as err:
+            print(f"Traspaso a clean registrado, pero falló la bitácora: {err}")
 
         # Enviamos notificación a Telegram
         message = (
             f"🔄 <b>Traspaso de Stock a Clean</b>\n\n"
             f"• <b>Usuario:</b> {html.escape(lote.usuario)}\n"
-            f"• <b>Almacén:</b> A FULL\n"
+            f"• <b>Almacén:</b> A CLEAN\n"
             f"• <b>Movimientos:</b> \n{chr(10).join(f'• SKU: {s.sku}, Cantidad: {s.stock_bodega}' for s in lote.movimientos)}\n"
         )
         asyncio.create_task(send_telegram_alert(message))
 
         return {"status": "success", "mensaje": f"{len(lote.movimientos)} movimientos procesados"}
 
+    except HTTPException:
+        try:
+            connection.rollback()
+        except Exception:
+            pass
+        raise
+    except mysql.connector.Error as e:
+        try:
+            connection.rollback()
+        except Exception:
+            pass
+        print(f"Error en traspaso a clean: {e}")
+        raise HTTPException(status_code=500, detail="Error de base de datos en traspaso a clean")
     except Exception as e:
-        connection.rollback() # Si uno falla, ninguno se guarda (mantiene integridad)
+        try:
+            connection.rollback() # Si uno falla, ninguno se guarda (mantiene integridad)
+        except Exception:
+            pass
         print(f"Error en traspaso a clean: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     finally:

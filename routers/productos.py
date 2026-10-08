@@ -1,6 +1,6 @@
 # fichero api de productos
 import mysql.connector, html, asyncio
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from fastapi import APIRouter, HTTPException
 import os, mov_reg
 from dotenv import load_dotenv
@@ -125,8 +125,14 @@ async def obtener_producto_por_sku(sku: str):
 async def actualizar_productos(datos: ProdEditSchema):
     """
     Recibo una lista de productos editados desde el frontend.
-    Actualizo los precios y stocks en la BD según lo que me manden.
+    Solo columnas de la whitelist; stocks con validación >= 0 y detalle en bitácora.
     """
+    COLUMNAS_PERMITIDAS = {
+        "nombre", "categoria", "medida", "ubicacion", "stock_minimo",
+        "numero_referencia", "costo_total", "precio", "precio_2", "precio_3",
+        "precio_amazon", "precio_clean", "stock_bodega", "stock_fba", "stock_clean",
+    }
+    COLUMNAS_STOCK = {"stock_bodega", "stock_fba", "stock_clean", "stock_minimo"}
     conn = get_db_connection()
     
     try:
@@ -147,23 +153,61 @@ async def actualizar_productos(datos: ProdEditSchema):
                     })
                     continue
                 
-                # Construyo la consulta dinámicamente según qué campos vinieron
-                columnas_protegidas = ["id", "sku", "stock_total"]
+                # Construyo la consulta solo con columnas permitidas (evita inyección y
+                # sobreescritura de id/sku/stock_total). Desconocidas se reportan.
                 campos_actualizar = []
                 valores = []
-                
+                ignoradas = []
+
                 for columna, valor in prod.items():
-                    # Solo agregamos si la columna no está en la lista negra
-                    if columna not in columnas_protegidas:
-                        campos_actualizar.append(f"{columna} = %s")
-                        valores.append(valor)
-                
-                # Si no hay campos para actualizar, lo salto
-                if campos_actualizar:                   
-                
-                    # Armo el UPDATE SQL con los campos dinámicos
-                    sql_update = f"UPDATE productos SET {', '.join(campos_actualizar)} WHERE sku = %s"
-                    valores.append(prod.get("sku"))
+                    if columna in ("id", "sku", "nombre"):
+                        continue
+                    if columna not in COLUMNAS_PERMITIDAS:
+                        ignoradas.append(columna)
+                        continue
+                    if columna in COLUMNAS_STOCK:
+                        try:
+                            if valor is None or int(valor) < 0:
+                                res_errores.append({
+                                    "sku": prod["sku"],
+                                    "nombre": prod["nombre"],
+                                    "problema": f"Campo '{columna}' debe ser entero >= 0",
+                                })
+                                campos_actualizar = None
+                                break
+                        except (TypeError, ValueError):
+                            res_errores.append({
+                                "sku": prod["sku"],
+                                "nombre": prod["nombre"],
+                                "problema": f"Campo '{columna}' debe ser entero >= 0",
+                            })
+                            campos_actualizar = None
+                            break
+                    campos_actualizar.append(f"{columna} = %s")
+                    valores.append(valor)
+
+                if campos_actualizar is None:
+                    continue
+
+                if ignoradas:
+                    res_errores.append({
+                        "sku": prod.get("sku"),
+                        "problema": f"Columnas ignoradas (no editables): {', '.join(ignoradas)}",
+                    })
+
+                # Si no hay campos para actualizar, lo salto (antes reutilizaba el
+                # UPDATE del producto anterior y corrompía otro SKU).
+                if not campos_actualizar:
+                    res_errores.append({
+                        "sku": prod["sku"],
+                        "nombre": prod["nombre"],
+                        "problema": "Sin campos actualizables",
+                    })
+                    continue
+
+                # Armo el UPDATE SQL con los campos dinámicos (ya validados por whitelist)
+                sql_update = f"UPDATE productos SET {', '.join(campos_actualizar)} WHERE sku = %s"
+                valores.append(prod.get("sku"))
                 
                 cursor.execute(sql_update, valores)
                 
@@ -190,7 +234,8 @@ async def actualizar_productos(datos: ProdEditSchema):
         
         # Confirmo todos los cambios de una vez
         conn.commit()
-        mov_reg.registrar_movimiento(datos.usuario, f"Actualizó productos: {len(res_actualizados)} actualizados, {len(res_errores)} errores", "Productos")
+        detalle_skus = ", ".join(r["sku"] for r in res_actualizados[:10])
+        mov_reg.registrar_movimiento(datos.usuario, f"Actualizó productos: {len(res_actualizados)} actualizados ({detalle_skus}), {len(res_errores)} errores", "Productos")
       
         # Enviamos notificación a Telegram
         message = (
@@ -424,25 +469,66 @@ class DevolucionSchema(BaseModel):
     """Modelo para registrar una devolución de producto"""
     sku: str
     producto: str
-    cantidad: int
+    cantidad: int = Field(gt=0)
     plataforma: str
     reingreso: bool
     usuario: str  # Usuario que registra la devolución, para registro de movimientos
 
+# La tabla devoluciones nació sin usuario (solo quedaba en la bitácora).
+COLUMNAS_DEVOLUCION = {
+    "usuario": "VARCHAR(100) NULL",
+}
+
+
+def asegurar_columnas_devolucion():
+    """Agrega a devoluciones las columnas faltantes (se llama en el lifespan)."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+                       "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'devoluciones'")
+        existentes = {str(fila[0]).lower() for fila in cursor.fetchall()}
+        for columna, definicion in COLUMNAS_DEVOLUCION.items():
+            if columna not in existentes:
+                cursor.execute(f"ALTER TABLE devoluciones ADD COLUMN {columna} {definicion}")
+        conn.commit()
+    finally:
+        cursor.close()
+        conn.close()
+
 @router.post("/producto/devolucion/{sku}")
 async def registrar_devolucion(sku: str, datos: DevolucionSchema):
     """
-    Registro una devolución de producto. Inserto una fila en devoluciones con los datos recibidos.
+    Devolución en una sola transacción: INSERT + (si reingreso) UPDATE relativo.
+    Un solo commit para no dejar devolución sin stock o viceversa.
     """
     conn = get_db_connection()
-    cursor = conn.cursor()
+    cursor = conn.cursor(dictionary=True)
 
     try:
-        sql_ins = "INSERT INTO devoluciones (sku, producto, cantidad, plataforma, reingreso) VALUES (%s, %s, %s, %s, %s)"
-        cursor.execute(sql_ins, (sku, datos.producto, datos.cantidad, datos.plataforma, datos.reingreso))
+        sql_ins = "INSERT INTO devoluciones (sku, producto, cantidad, plataforma, reingreso, usuario) VALUES (%s, %s, %s, %s, %s, %s)"
+        cursor.execute(sql_ins, (sku, datos.producto, datos.cantidad, datos.plataforma, datos.reingreso, datos.usuario))
+
+        if datos.reingreso:
+            cursor.execute("SELECT stock_bodega FROM productos WHERE sku = %s FOR UPDATE", (sku,))
+            fila = cursor.fetchone()
+            if not fila:
+                conn.rollback()
+                raise HTTPException(status_code=404, detail=f"SKU '{sku}' no existe, no se puede reingresar")
+            stock_anterior = fila["stock_bodega"] if fila["stock_bodega"] is not None else 0
+            cursor.execute("UPDATE productos SET stock_bodega = COALESCE(stock_bodega, 0) + %s WHERE sku = %s", (datos.cantidad, sku,))
+            if cursor.rowcount == 0:
+                conn.rollback()
+                raise HTTPException(status_code=404, detail=f"SKU '{sku}' no existe, no se puede reingresar")
+        else:
+            stock_anterior = None
+
         conn.commit()
-        
-        mov_reg.registrar_movimiento(datos.usuario, f"Registró devolución para SKU '{sku}'", "Productos")
+
+        if datos.reingreso:
+            mov_reg.registrar_movimiento(datos.usuario, f"Registró devolución con reingreso SKU '{sku}' cantidad {datos.cantidad} (stock_bodega {stock_anterior}->{stock_anterior + datos.cantidad})", "Productos")
+        else:
+            mov_reg.registrar_movimiento(datos.usuario, f"Registró devolución sin reingreso SKU '{sku}' cantidad {datos.cantidad}", "Productos")
 
         # Enviamos notificación a Telegram
         message = (
@@ -455,11 +541,6 @@ async def registrar_devolucion(sku: str, datos: DevolucionSchema):
             f"• <b>Usuario:</b> {html.escape(datos.usuario)}"
         )
         asyncio.create_task(send_telegram_alert(message))
-
-        if datos.reingreso == True:
-            # Si es reingreso, también actualizo el stock_bodega del producto sumando 1
-            cursor.execute("UPDATE productos SET stock_bodega = stock_bodega + %s WHERE sku = %s", (datos.cantidad, sku,))
-            conn.commit()
 
         return {
             "mensaje": "Devolución registrada",

@@ -1,10 +1,11 @@
 import mysql.connector, html, asyncio
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from fastapi import APIRouter, HTTPException
 from typing import Optional, List
 import os
 from dotenv import load_dotenv
 from datetime import date
+from mysql.connector import errorcode
 import mov_reg
 from servicios.telegram.notificacion import send_telegram_alert
 
@@ -241,11 +242,11 @@ async def actualizar_pedido(pedido_id: int, payload: OrdenUpdateModel, usuario: 
 
 # Definimos un modelo para recibir los datos en JSON (Body)
 class VentaSchema(BaseModel):
-    id_venta: str
-    sku: str
+    id_venta: str = Field(min_length=1)
+    sku: str = Field(min_length=1)
     producto: str
-    stock_clean: int
-    precio: float
+    stock_clean: int = Field(gt=0)
+    precio: float = Field(ge=0)
     fecha: str
     nombreComprador: str
     otros: str
@@ -253,37 +254,66 @@ class VentaSchema(BaseModel):
     usuario: str
     condicion_pago: str
 
+SQL_INSERT_VENTA_CLEAN = """
+    INSERT INTO ventasRegistro
+    (id_ventas, sku, producto, cantidad, precio, fecha, nombreComprador, otros, plataforma, usuario, condicion_pago, saldo_pendiente)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+"""
+
+SQL_RESTAR_CLEAN = (
+    "UPDATE productos SET stock_clean = COALESCE(stock_clean, 0) - %s "
+    "WHERE sku = %s AND COALESCE(stock_clean, 0) >= %s"
+)
+
+
+def mensaje_venta_duplicada(id_venta) -> str:
+    return f"La venta '{id_venta}' ya fue registrada previamente"
+
+
+def existe_id_venta(cursor, id_venta) -> bool:
+    cursor.execute(
+        "SELECT id FROM ventasRegistro WHERE id_ventas = %s LIMIT 1 FOR UPDATE",
+        (str(id_venta),),
+    )
+    return len(cursor.fetchall()) > 0
+
+
+def es_conflicto_de_venta(err: mysql.connector.Error) -> bool:
+    return err.errno in (errorcode.ER_DUP_ENTRY, errorcode.ER_LOCK_DEADLOCK)
+
+
 @router.post("/cleanest/venta")
 async def ingresar_venta(venta: VentaSchema):
     """
-    Ingresa la venta de la orden correspondiente al terminar su tracking y ser cerrada.
+    Venta Cleanest: descuenta stock_clean con bloqueo de fila y doble barrera.
+    INSERT primero (idempotencia por id_ventas), luego UPDATE con guard.
     """
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
+    stock_anterior = None
     try:
-        # Traigo el stock actual antes de modificarlo
-        cursor.execute("SELECT stock_clean FROM productos WHERE sku = %s", (venta.sku,))
+        # A. Idempotencia: un reintento no vuelve a descontar.
+        if existe_id_venta(cursor, venta.id_venta):
+            conn.rollback()
+            raise HTTPException(status_code=409, detail=mensaje_venta_duplicada(venta.id_venta))
+
+        # B. Bloqueo de fila y validación de stock.
+        cursor.execute("SELECT COALESCE(stock_clean, 0) AS stock_clean FROM productos WHERE sku = %s FOR UPDATE", (venta.sku,))
         res_existe = cursor.fetchone()
 
         if not res_existe:
+            conn.rollback()
             raise HTTPException(status_code=404, detail="sku no encontrado")
 
-        # Si stock_clean es NULL en BD, lo trato como 0
-        stock_actual = res_existe["stock_clean"] if res_existe["stock_clean"] is not None else 0
+        stock_anterior = res_existe["stock_clean"] if res_existe["stock_clean"] is not None else 0
 
-        if stock_actual < venta.stock_clean:
-            raise HTTPException(status_code=400, detail=f"Sku: {venta.sku} Stock insuficiente. Disponible: {stock_actual}")
+        if stock_anterior < venta.stock_clean:
+            conn.rollback()
+            raise HTTPException(status_code=400, detail=f"Sku: {venta.sku} Stock insuficiente. Disponible: {stock_anterior}")
 
-        cursor.execute("UPDATE productos SET stock_clean = stock_clean - %s WHERE sku = %s", (venta.stock_clean, venta.sku))
-
-        sql_insert = """
-            INSERT INTO ventasRegistro
-            (id_ventas, sku, producto, cantidad, precio, fecha, nombreComprador, otros, plataforma, usuario, condicion_pago, saldo_pendiente)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-        """
-
+        # C. Historial primero.
         valores = (
-            venta.id_venta,
+            str(venta.id_venta),
             venta.sku,
             venta.producto,
             venta.stock_clean,
@@ -296,41 +326,66 @@ async def ingresar_venta(venta: VentaSchema):
             venta.condicion_pago,
             0
         )
-        cursor.execute(sql_insert, valores)
+        cursor.execute(SQL_INSERT_VENTA_CLEAN, valores)
 
-        # Si insert no insertó nada, revierto el descuento de stock
+        # D. Descuento con segunda barrera ante carreras.
+        cursor.execute(SQL_RESTAR_CLEAN, (venta.stock_clean, venta.sku, venta.stock_clean))
+
         if cursor.rowcount == 0:
             conn.rollback()
-            raise HTTPException(status_code=500, detail="No se registró la venta")
-
-        # Enviamos notificación a Telegram
-        sku_safe = html.escape(str(venta.sku))
-        usuario_safe = html.escape(str(venta.usuario))
-        cantidad_safe = html.escape(str(venta.stock_clean))
-
-        message = (
-            f"📋 <b>Nueva Venta Cleanest Choice Registrada</b>\n\n"
-            f"• <b>Código:</b> <code>{sku_safe}</code>\n"
-            f"• <b>Usuario:</b> {usuario_safe}\n"
-            f"• <b>Cantidad:</b> {cantidad_safe}"
-        )
-        asyncio.create_task(send_telegram_alert(message))
+            raise HTTPException(status_code=409, detail="Stock insuficiente al confirmar la venta, intente nuevamente")
 
         conn.commit()
 
-        return {
-            "message": "Venta aplicada exitosamente",
-            "sku": venta.sku,
-            "nuevo_stock": stock_actual - venta.stock_clean,
-            "saldo_pendiente": 0
-        }
-
+    except HTTPException:
+        # Los 404/400/409 ya hicieron rollback arriba; si no, revertir aquí.
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
     except mysql.connector.Error as err:
-        conn.rollback()
+        try:
+            conn.rollback()
+        except Exception:
+            pass
         print(f"Error en BD: {err}")
+        if es_conflicto_de_venta(err):
+            raise HTTPException(status_code=409, detail=mensaje_venta_duplicada(venta.id_venta))
         raise HTTPException(status_code=500, detail="Error al descontar stock")
-    
+
     finally:
         if conn.is_connected():
             cursor.close()
             conn.close()
+
+    # E. Post-commit: un fallo en bitácora no debe provocar reintento que descuente de nuevo.
+    stock_nuevo = stock_anterior - venta.stock_clean
+    try:
+        mov_reg.registrar_movimiento(
+            venta.usuario,
+            f"Venta Cleanest '{venta.id_venta}' SKU '{venta.sku}' cantidad {venta.stock_clean} (stock_clean {stock_anterior}->{stock_nuevo})",
+            "Ventas",
+        )
+    except mysql.connector.Error as err:
+        print(f"Venta Cleanest {venta.id_venta} registrada, pero falló la bitácora: {err}")
+
+    # Enviamos notificación a Telegram
+    sku_safe = html.escape(str(venta.sku))
+    usuario_safe = html.escape(str(venta.usuario))
+    cantidad_safe = html.escape(str(venta.stock_clean))
+
+    message = (
+        f"📋 <b>Nueva Venta Cleanest Choice Registrada</b>\n\n"
+        f"• <b>Código:</b> <code>{sku_safe}</code>\n"
+        f"• <b>Usuario:</b> {usuario_safe}\n"
+        f"• <b>Cantidad:</b> {cantidad_safe}"
+    )
+    asyncio.create_task(send_telegram_alert(message))
+
+    return {
+        "message": "Venta aplicada exitosamente",
+        "sku": venta.sku,
+        "nuevo_stock": stock_nuevo,
+        "saldo_pendiente": 0
+    }

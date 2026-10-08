@@ -15,7 +15,7 @@ from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from routers import cotizacionesBack, productos, ventas, clientes, traspaso, gastos, compras, cleanest, cuentas_pendientes,\
       abonos, estadisticas, inventario, empleados, notificaciones, cuentas_pagar, consulta_registros, pendientes, proveedores, genera_cotizacion, sofi_conversaciones, embarques, sofi_notificaciones, whatsapp_plantillas, skydropx
-from routers import crm, comisiones, prospectos
+from routers import crm, comisiones, prospectos, jobs, meli_webhook
 import mysql.connector
 import skydropx_envios
 from fastapi.middleware.cors import CORSMiddleware
@@ -89,9 +89,67 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"❌ No se pudieron crear las tablas de comisiones: {e}")
 
+    # Columna usuario en devoluciones (auditoría de inventario).
+    try:
+        from routers.productos import asegurar_columnas_devolucion
+        asegurar_columnas_devolucion()
+    except Exception as e:
+        print(f"❌ No se pudo migrar devoluciones: {e}")
+
+    # Columnas + backfill de ventasRegistro para los jobs de marketplaces
+    # (inventario_descontado=1 en lo ya registrado: hasta hoy sí se descontaba).
+    try:
+        from jobs import schema_ventas
+        rep = schema_ventas.asegurar_columnas_ventas()
+        if rep["columnas_agregadas"] or rep["indice_creado"] or rep["backfill"]:
+            print(f"📦 Migración ventasRegistro: {rep}")
+    except Exception as e:
+        print(f"❌ No se pudo migrar ventasRegistro: {e}")
+
+    # Scheduler del job de Amazon (mismo proceso; Easypanel no necesita otro contenedor).
+    # AMAZON_JOB_ENABLED=0 lo apaga (útil en local). Requiere `apscheduler` en requirements.
+    app.state.amazon_scheduler = None
+    if os.getenv("AMAZON_JOB_ENABLED", "1") == "1":
+        try:
+            from apscheduler.schedulers.asyncio import AsyncIOScheduler
+            from apscheduler.triggers.cron import CronTrigger
+            from zoneinfo import ZoneInfo
+            from jobs import amazon_ventas
+
+            hora = os.getenv("AMAZON_JOB_HORA", "12:22")
+            hh, mm = (hora.split(":") + ["0"])[:2]
+            scheduler = AsyncIOScheduler(timezone=ZoneInfo("America/Mexico_City"))
+            scheduler.add_job(amazon_ventas.run_job, CronTrigger(hour=int(hh), minute=int(mm)),
+                              kwargs={"motivo": "scheduler"}, id="amazon_ventas", replace_existing=True,
+                              misfire_grace_time=600, coalesce=True, max_instances=1)
+            scheduler.start()
+            app.state.amazon_scheduler = scheduler
+            print(f"⏰ Job Amazon programado a las {int(hh):02d}:{int(mm):02d} America/Mexico_City.")
+            try:
+                from jobs import meli_ventas
+                if os.getenv("MELI_JOB_ENABLED", "1") == "1":
+                    mh = os.getenv("MELI_JOB_HORA", "12:05")
+                    mhh, mmm = (mh.split(":") + ["0"])[:2]
+                    scheduler.add_job(meli_ventas.run_job, CronTrigger(hour=int(mhh), minute=int(mmm)),
+                                      kwargs={"motivo": "scheduler"}, id="meli_ventas", replace_existing=True,
+                                      misfire_grace_time=600, coalesce=True, max_instances=1)
+                    print(f"⏰ Job MeLi programado a las {int(mhh):02d}:{int(mmm):02d} America/Mexico_City.")
+            except Exception as e:
+                print(f"❌ No se pudo programar el job MeLi: {e}")
+        except ImportError:
+            print("⚠️ apscheduler no instalado: job Amazon solo manual (pip install apscheduler).")
+        except Exception as e:
+            print(f"❌ No se pudo programar el job Amazon: {e}")
+
     yield  # Aquí corre la aplicación normal
 
-    # Apagar el pool al cerrar la API
+    # Apagar scheduler + pool al cerrar la API
+    try:
+        if getattr(app.state, "amazon_scheduler", None):
+            app.state.amazon_scheduler.shutdown(wait=False)
+            print("🔒 Scheduler Amazon apagado.")
+    except Exception:
+        pass
     if getattr(app.state, "db_pool", None):
         await app.state.db_pool.close()
         print("🔒 Pool de PostgreSQL cerrado.")
@@ -152,11 +210,15 @@ app.include_router(skydropx.router, dependencies=[Depends(obtener_usuario_actual
 app.include_router(crm.router, dependencies=[Depends(obtener_usuario_actual)])
 app.include_router(comisiones.router, dependencies=[Depends(obtener_usuario_actual)])
 app.include_router(prospectos.router, dependencies=[Depends(obtener_usuario_actual)])
+app.include_router(jobs.router, dependencies=[Depends(obtener_usuario_actual)])
 # Sin obtener_usuario_actual a proposito: el WebSocket valida el token por query
 # param y el POST de escalacion valida X-API-Key (n8n no tiene sesion de usuario).
 app.include_router(sofi_notificaciones.router)
 # Mismo caso: el webhook lo llama Skydropx, no el panel. Valida firma HMAC-SHA512.
 app.include_router(skydropx.router_webhook)
+# Webhook de MeLi/MercadoPago (pagadas y cancelaciones). Lo llaman ellos, sin
+# sesión: valida por GET del recurso + x-signature opcional. Siempre 200.
+app.include_router(meli_webhook.router)
 
 app.add_middleware( 
     CORSMiddleware,

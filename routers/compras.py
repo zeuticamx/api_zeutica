@@ -1,8 +1,9 @@
 from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List
 import os, html, asyncio
 import mysql.connector
+import mov_reg
 from servicios.telegram.notificacion import send_telegram_alert
 
 router = APIRouter(tags=["/compras"],responses={404: {"Mensaje":"No encontrado"}})
@@ -24,8 +25,8 @@ class compraPromedio(BaseModel):
 class CompraModel(BaseModel):
     sku: str
     nombre: str
-    stock_bodega: int       # qty del frontend
-    costo_total: float      # costo_unit del frontend
+    stock_bodega: int = Field(gt=0)       # qty del frontend
+    costo_total: float = Field(ge=0)      # costo_unit del frontend
     num_factura: str
     proveedor: str
     descuento_pct: float
@@ -36,8 +37,7 @@ class CompraModel(BaseModel):
 @router.post("/compras")
 async def recibir_compra(compras: List[CompraModel]):
     """
-    Ingresa compras modificando el valor de stock y registrando el movimiento
-    recibe una lista.
+    Ingresa compras sumando stock relativo con bloqueo de fila (sin lost update).
     """
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -45,9 +45,9 @@ async def recibir_compra(compras: List[CompraModel]):
 
     try:
         for compra in compras:
-            # Verifico si el producto existe antes de moverle el stock
+            # Verifico si el producto existe bloqueando la fila.
             cursor.execute(
-                "SELECT stock_bodega FROM productos WHERE sku = %s",
+                "SELECT stock_bodega FROM productos WHERE sku = %s FOR UPDATE",
                 (compra.sku,)
             )
             res_existe = cursor.fetchone()
@@ -57,13 +57,13 @@ async def recibir_compra(compras: List[CompraModel]):
                 res_items.append({"sku": compra.sku, "msg": "SKU no encontrado, se omitió"})
                 continue
 
-            stock_actual = res_existe[0]
+            stock_actual = res_existe[0] if res_existe[0] is not None else 0
             stock_nuevo = stock_actual + compra.stock_bodega
 
-            # Actualizo stock y costo en productos
+            # Incremento relativo: dos compras concurrentes ya no se pisan.
             cursor.execute(
-                "UPDATE productos SET stock_bodega = %s, costo_total = %s WHERE sku = %s",
-                (stock_nuevo, compra.costo_total, compra.sku)
+                "UPDATE productos SET stock_bodega = COALESCE(stock_bodega, 0) + %s, costo_total = %s WHERE sku = %s",
+                (compra.stock_bodega, compra.costo_total, compra.sku)
             )
 
             # Registro el movimiento en la tabla de compras
@@ -88,11 +88,17 @@ async def recibir_compra(compras: List[CompraModel]):
 
         conn.commit()
 
+        total_piezas = sum(c.stock_bodega for c in compras)
+        try:
+            mov_reg.registrar_movimiento(compras[0].usuario, f"Registró compra: {len(res_items)} items, {total_piezas} piezas", "Compras")
+        except Exception as err:
+            print(f"Compra registrada, pero falló la bitácora: {err}")
+
         # Enviamos notificación a Telegram
         message = (
             f"📦 <b>Compra Procesada</b>\n\n"
             f"• <b>Items:</b> {len(res_items)}\n"
-            f"• <b>Cantidad:</b> {compra.stock_bodega}\n"
+            f"• <b>Piezas:</b> {total_piezas}\n"
         )
         asyncio.create_task(send_telegram_alert(message))
 
