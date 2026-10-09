@@ -34,7 +34,7 @@ async def consultar_ventas(f1: date, f2: date):
 
     # Rango semiabierto [f1, f2 + 1 día) en lugar de DATE(fecha_registro) BETWEEN:
     # incluye todo el día final y permite usar un índice sobre fecha_registro.
-    query = "SELECT * FROM ventasRegistro WHERE fecha_registro >= %s AND fecha_registro < %s ORDER BY fecha_registro DESC"
+    query = "SELECT * FROM ventasRegistro WHERE estatus = 'activa' AND fecha_registro >= %s AND fecha_registro < %s ORDER BY fecha_registro DESC"
 
     try:
         cursor.execute(query, (f1, f2 + timedelta(days=1)))
@@ -92,7 +92,7 @@ async def verificar_venta():
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
 
-    query = "SELECT id_ventas, sku, producto, cantidad, nombreComprador, saldo_pendiente, fecha_vencimiento FROM ventasRegistro WHERE saldo_pendiente > 0 "
+    query = "SELECT id_ventas, sku, producto, cantidad, nombreComprador, saldo_pendiente, fecha_vencimiento FROM ventasRegistro WHERE estatus = 'activa' AND saldo_pendiente > 0 "
 
     try:
         cursor.execute(query)
@@ -250,6 +250,15 @@ async def registrar_venta(venta: VentaSchema):
     except mysql.connector.Error as err:
         print(f"Venta {venta.id_venta} registrada, pero falló la bitácora: {err}")
 
+    try:
+        import notificaciones_service
+        await notificaciones_service.crear_y_notificar_todos(
+            f"Venta {venta.id_venta} registrada",
+            f"{venta.sku} ×{venta.stock_bodega} (${total_operacion:,.2f}) por {venta.usuario}.",
+            "success")
+    except Exception as err:
+        print(f"Venta {venta.id_venta} registrada, pero falló notificar en tabla: {err}")
+
     comisiones.registrar_comisiones_seguro(
         venta.id_venta, venta.usuario, venta.nombreComprador, venta.plataforma, venta.fecha,
         [{"sku": venta.sku, "producto": venta.producto, "cantidad": venta.stock_bodega, "precio": venta.precio}],
@@ -402,6 +411,15 @@ async def registrar_venta_completa(venta: VentaCompletaSchema):
             mov_reg.registrar_movimiento(venta.usuario, f"Registró venta '{venta.id_venta}' SKU '{item.sku}' cantidad {item.cantidad} (stock_bodega {anterior}->{nuevo})", "Ventas")
         except mysql.connector.Error as err:
             print(f"Venta {venta.id_venta} registrada, pero falló la bitácora de '{item.sku}': {err}")
+
+    try:
+        import notificaciones_service
+        await notificaciones_service.crear_y_notificar_todos(
+            f"Venta {venta.id_venta} registrada",
+            f"{len(venta.items)} partida(s), ${total_operacion:,.2f} por {venta.usuario}.",
+            "success")
+    except Exception as err:
+        print(f"Venta {venta.id_venta} registrada, pero falló notificar en tabla: {err}")
 
     comisiones.registrar_comisiones_seguro(
         venta.id_venta, venta.usuario, venta.nombreComprador, venta.plataforma, venta.fecha,

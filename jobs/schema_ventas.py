@@ -12,11 +12,14 @@ COLUMNAS_JOB = {
     "inventario_descontado": "TINYINT(1) NOT NULL DEFAULT 0",
     "costo_unitario": "DECIMAL(12,2) NULL",
     "es_full": "TINYINT(1) NOT NULL DEFAULT 0",
+    "estatus": "VARCHAR(20) NOT NULL DEFAULT 'activa'",
 }
 
 # Clave para que el INSERT ... ON DUPLICATE KEY de los jobs sea idempotente.
 # (id_ventas, sku, plataforma): una venta tiene una fila por partida.
 INDICE_PARTIDA = ("uq_venta_partida", "(id_ventas, sku, plataforma)")
+# Índice para excluir canceladas en reportes y métricas.
+INDICE_ESTATUS = ("idx_ventasregistro_estatus", "(estatus)")
 
 # Plataformas que escriben los jobs/n8n con flag de inventario.
 PLATAFORMAS_JOB = ("amazon", "MERCADOLIBRE")
@@ -60,10 +63,27 @@ def asegurar_columnas_ventas(backfill_descontado: bool = True) -> dict:
             except mysql.connector.Error as err:
                 # 1062 = ya hay partidas duplicadas: se reporta sin tumbar el arranque.
                 print(f"No se pudo crear {nombre} (¿partidas duplicadas?): {err}")
+        nombre_est, cols_est = INDICE_ESTATUS
+        if nombre_est not in indices:
+            try:
+                cursor.execute(f"ALTER TABLE ventasRegistro ADD INDEX {nombre_est} {cols_est}")
+                reporte["indice_creado"] = True
+            except mysql.connector.Error as err:
+                print(f"No se pudo crear {nombre_est}: {err}")
         conn.commit()
         if backfill_descontado:
+            # Cancelaciones viejas PRIMERO: marketplace, nunca descontadas y fuera
+            # de la ventana de 72h (el job ya no las reintenta). Las ya regresadas
+            # con el flag anterior caen aquí; fuera de métricas pero en auditoría.
+            cursor.execute("UPDATE ventasRegistro SET estatus = 'cancelada' "
+                           "WHERE plataforma IN (%s, %s) AND inventario_descontado = 0 "
+                           "AND estatus = 'activa' AND fecha_registro < DATE_SUB(NOW(), INTERVAL 3 DAY)",
+                           PLATAFORMAS_JOB)
+            reporte["canceladas_backfill"] = cursor.rowcount
+            conn.commit()
             cursor.execute("UPDATE ventasRegistro SET inventario_descontado = 1 "
-                           "WHERE plataforma IN (%s, %s) AND inventario_descontado = 0",
+                           "WHERE plataforma IN (%s, %s) AND inventario_descontado = 0 "
+                           "AND estatus = 'activa'",
                            PLATAFORMAS_JOB)
             reporte["backfill"] = cursor.rowcount
             conn.commit()

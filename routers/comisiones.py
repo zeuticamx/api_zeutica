@@ -486,7 +486,7 @@ async def comisiones_recalcular(datos: RangoRecalculo, usuario: str = Depends(re
         cursor.execute(
             """SELECT id_ventas, sku, producto, cantidad, precio, fecha, nombreComprador, plataforma, usuario,
                       meli_key, amazon_key
-               FROM ventasRegistro WHERE DATE(fecha_registro) BETWEEN %s AND %s ORDER BY id_ventas, id""",
+               FROM ventasRegistro WHERE estatus = 'activa' AND DATE(fecha_registro) BETWEEN %s AND %s ORDER BY id_ventas, id""",
             (desde, hasta),
         )
         filas = cursor.fetchall()

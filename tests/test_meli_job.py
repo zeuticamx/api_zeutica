@@ -62,6 +62,66 @@ def test_margen_reparte_neto_y_alerta_solo_nueva():
     assert m2["alerta"] is False
 
 
+def test_procesar_cancelacion_marca_estatus_y_regresa_stock(monkeypatch):
+    ejecutados = []
+
+    class Cur:
+        rowcount = 1
+
+        def execute(self, q, p=None):
+            ejecutados.append((" ".join(q.split()), p))
+
+        def fetchall(self):
+            return [{"sku": "ABC", "cantidad": 2}]
+
+        def close(self):
+            pass
+
+    class DB:
+        def cursor(self, dictionary=False):
+            return Cur()
+
+        def commit(self):
+            pass
+
+        def rollback(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(job, "get_db_connection", lambda: DB())
+    import mov_reg
+    monkeypatch.setattr(mov_reg, "registrar_movimiento", lambda *a, **k: None)
+    r = job.procesar_cancelacion("777", "test")
+    assert r == {"order_id": "777", "regresadas": 1, "piezas": 2}
+    updates = [q for q, _ in ejecutados if q.startswith("UPDATE")]
+    assert len(updates) == 1 and "estatus = 'cancelada'" in updates[0]
+    assert "inventario_descontado = 0" in updates[0]
+
+
+def test_procesar_cancelacion_sin_filas_no_toca_nada(monkeypatch):
+    class Cur:
+        def execute(self, q, p=None):
+            pass
+
+        def fetchall(self):
+            return []
+
+        def close(self):
+            pass
+
+    class DB:
+        def cursor(self, dictionary=False):
+            return Cur()
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(job, "get_db_connection", lambda: DB())
+    assert job.procesar_cancelacion("000", "test") == {"order_id": "000", "regresadas": 0, "piezas": 0}
+
+
 def test_reporte_incluye_descuento_y_totales():
     ahora = datetime(2026, 10, 8, 13, 0, tzinfo=ZoneInfo("America/Mexico_City"))
     linea = {"id_venta": "1", "pack_id": None, "sku_mod": "ABC", "codigo": "ABC", "producto": "P",
@@ -71,3 +131,20 @@ def test_reporte_incluye_descuento_y_totales():
              "alerta_logistica": None, "estado_amazon": None}
     chunks = job.build_reporte([linea], [], ahora)
     assert len(chunks) == 1 and "ABC" in chunks[0] and "−2 pza" in chunks[0]
+
+
+def _linea_meli(id_venta, fecha):
+    return {"id_venta": id_venta, "pack_id": None, "sku_mod": "ABC", "codigo": "ABC", "producto": "P",
+            "cantidad": 1, "cantidad_final": 1, "multiplicador": 1, "bruto": 50.0, "precio": 45.0,
+            "fecha": fecha, "hora": "10:00", "otros": "", "canal": "Flex", "es_full": 0,
+            "es_flex": True, "sin_costo": False, "costo": 10, "es_nueva": True, "a_descontar": True,
+            "alerta_logistica": None, "estado_amazon": None}
+
+
+def test_reporte_ventas_solo_del_dia_atrasadas_en_inventario():
+    ahora = datetime(2026, 10, 8, 13, 0, tzinfo=ZoneInfo("America/Mexico_City"))
+    chunks = job.build_reporte([_linea_meli("DIA", "2026-10-08"), _linea_meli("VIEJA", "2026-10-05")], [], ahora)
+    texto = "\n".join(chunks)
+    assert "<code>DIA</code>" in texto and "<code>VIEJA</code>" not in texto
+    assert "Atrasadas" in texto and "Totales del día" in texto
+    assert "Corte:" in texto

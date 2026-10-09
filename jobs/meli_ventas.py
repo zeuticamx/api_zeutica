@@ -196,6 +196,14 @@ def build_reporte(lineas: list, margenes: list, ahora=None) -> list:
     ordenes = lambda a: len({l["id_venta"] for l in a})
     nuevas = sorted([l for l in lineas if l.get("es_nueva")],
                     key=lambda x: (x.get("fecha", ""), x.get("hora") or ""))
+    # Corte diario como Amazon: detalle y totales solo del día; atrasadas en
+    # conteo e inventario día + atrasadas (la ventana es de 72h para recuperar).
+    corte = ahora.replace(hour=12, minute=0, second=0, microsecond=0)
+    desde = corte - timedelta(days=1)
+    rango = f"{desde.strftime('%d/%m %H:%M')} → {corte.strftime('%d/%m %H:%M')}"
+    dia_desde = desde.strftime("%Y-%m-%d")
+    del_dia = [l for l in nuevas if (l.get("fecha") or "") >= dia_desde]
+    atrasadas = [l for l in nuevas if (l.get("fecha") or "") < dia_desde]
     icono = lambda c: {"Flex": "🛵", "Colecta": "🚐", "Full": "⚡", "Full (por SKU)": "⚡"}.get(c, "📦")
 
     def detalle(l):
@@ -205,31 +213,36 @@ def build_reporte(lineas: list, margenes: list, ahora=None) -> list:
         return (f"🔹 <code>{esc(l['id_venta'])}</code> · {esc(l.get('sku_mod'))} · {esc(desc)} · "
                 f"×{piezas(l)} · {money(l.get('precio'))}")
 
-    out = [f"📊 <b>Resumen de ventas MELI</b>\n🕛 {ahora.strftime('%d/%m %H:%M')} · ventana últimas 72 h"]
-    if not nuevas:
+    out = [f"📊 <b>Resumen de ventas MELI</b>\n🕛 Corte: {rango}"]
+    if not del_dia:
         repetidas = len(lineas) - len(nuevas)
-        out.append(f"\nSin ventas nuevas desde la última corrida{' (' + str(repetidas) + ' ya registradas)' if repetidas else ''}.")
+        extra = f" ({repetidas} ya registradas)" if repetidas else ""
+        extra += f" + {len(atrasadas)} atrasadas" if atrasadas else ""
+        out.append(f"\nSin ventas nuevas del día desde el último corte{extra}.")
     else:
         por_canal: dict = {}
-        for l in nuevas:
+        for l in del_dia:
             por_canal.setdefault(l.get("canal"), []).append(l)
         for canal, arr in por_canal.items():
             out.append(f"\n{icono(canal)} <b>{esc(canal)}</b> — {ordenes(arr)} orden(es) · {int(suma(arr, piezas))} pzas")
             out += [detalle(l) for l in arr]
+        if atrasadas:
+            out.append(f"\n📌 <b>Atrasadas</b> — {ordenes(atrasadas)} orden(es) · {int(suma(atrasadas, piezas))} pzas · "
+                       f"{money(suma(atrasadas, lambda l: l.get('precio')))} de días previos (registradas y descontadas, ver inventario).")
         por_sku: dict = {}
         for l in [x for x in nuevas if x.get("a_descontar")]:
             por_sku[l["sku_mod"]] = por_sku.get(l["sku_mod"], 0) + piezas(l)
         if por_sku:
-            out.append("\n🧮 <b>Inventario a descontar por SKU</b> (bodega propia, incluye Flex)")
+            out.append("\n🧮 <b>Inventario a descontar por SKU</b> (día + atrasadas, bodega propia, incluye Flex)")
             out += [f"   • {esc(s)}: −{n} pza(s)" for s, n in sorted(por_sku.items(), key=lambda x: -x[1])]
-        n_ord = ordenes(nuevas)
-        flex = ordenes([l for l in nuevas if l.get("es_flex")])
-        full = ordenes([l for l in nuevas if l.get("es_full")])
-        net = [n for n in netos.values() if any(l["id_venta"] == n["id_venta"] for l in nuevas)]
-        out.append(f"\n---\n📈 <b>Totales (ventas nuevas)</b>\n🛒 Órdenes: {n_ord} (Flex: {flex} · Full: {full} · Otras: {n_ord - flex - full})\n"
-                   f"🔢 Piezas vendidas: {int(suma(nuevas, piezas))}\n💵 Neto recibido: {money(suma(net, lambda n: n.get('net_received_amount')))}\n"
+        n_ord = ordenes(del_dia)
+        flex = ordenes([l for l in del_dia if l.get("es_flex")])
+        full = ordenes([l for l in del_dia if l.get("es_full")])
+        net = [n for n in netos.values() if any(l["id_venta"] == n["id_venta"] for l in del_dia)]
+        out.append(f"\n---\n📈 <b>Totales del día</b>\n🛒 Órdenes: {n_ord} (Flex: {flex} · Full: {full} · Otras: {n_ord - flex - full})\n"
+                   f"🔢 Piezas vendidas: {int(suma(del_dia, piezas))}\n💵 Neto recibido: {money(suma(net, lambda n: n.get('net_received_amount')))}\n"
                    f"📉 Utilidad est.: {money(suma(net, lambda n: n.get('utilidad')))}")
-    sin_costo_lineas = [x for x in nuevas if x.get("sin_costo")]
+    sin_costo_lineas = [x for x in del_dia if x.get("sin_costo")]
     if sin_costo_lineas:
         out.append("\n⚠️ <b>Sin costo</b>:")
         for l in sin_costo_lineas:
@@ -238,7 +251,7 @@ def build_reporte(lineas: list, margenes: list, ahora=None) -> list:
                 desc = desc[:37] + "..."
             out.append(f"⚠️ <code>{esc(l['id_venta'])}</code> · {esc(l.get('sku_mod'))} · {esc(desc)} · "
                        f"×{piezas(l)} · {money(l.get('precio'))} · sin costo")
-    incong = [l for l in nuevas if l.get("alerta_logistica")]
+    incong = [l for l in del_dia if l.get("alerta_logistica")]
     if incong:
         out.append("\n🚧 <b>Revisar logística</b>:")
         for l in incong:
@@ -247,7 +260,7 @@ def build_reporte(lineas: list, margenes: list, ahora=None) -> list:
                 desc = desc[:37] + "..."
             out.append(f"🚧 <code>{esc(l['id_venta'])}</code> · {esc(l.get('sku_mod'))} · {esc(desc)} · "
                        f"×{piezas(l)} · {money(l.get('precio'))} · {esc(l.get('canal'))}")
-    sin_dato = [l for l in nuevas if l.get("canal") == "Sin dato"]
+    sin_dato = [l for l in del_dia if l.get("canal") == "Sin dato"]
     if sin_dato:
         out.append(f"\nℹ️ {len(sin_dato)} línea(s) sin dato de logística (no se pudo consultar el envío).")
     chunks, cur = [], ""
@@ -488,7 +501,8 @@ def procesar_cancelacion(order_id: str, motivo: str = "webhook") -> dict:
             return {"order_id": oid, "regresadas": 0, "piezas": 0}
         cur.execute(
             """UPDATE productos p JOIN ventasRegistro v ON v.sku = p.sku
-               SET p.stock_bodega = COALESCE(p.stock_bodega, 0) + v.cantidad, v.inventario_descontado = 0
+               SET p.stock_bodega = COALESCE(p.stock_bodega, 0) + v.cantidad,
+                   v.inventario_descontado = 0, v.estatus = 'cancelada'
                WHERE v.id_ventas = %s AND v.plataforma = 'MERCADOLIBRE' AND v.inventario_descontado = 1""",
             (oid,))
         piezas = sum(int(f.get("cantidad") or 0) for f in filas)
@@ -516,8 +530,12 @@ async def run_job(dry_run: bool | None = None, motivo: str = "manual", telegram:
     resumen = {"motivo": motivo, "dry_run": dry, "inicio": datetime.now(CDMX).isoformat()}
 
     async def avisar(*a, **k):
-        if telegram:
+        if not telegram:
+            return
+        try:
             await _tg(*a, **k)
+        except Exception as err:
+            print(f"Job MeLi: falló un envío a Telegram (sigue con el resto): {err}")
     try:
         from jobs.schema_ventas import verificar_esquema_job
         verificar_esquema_job()

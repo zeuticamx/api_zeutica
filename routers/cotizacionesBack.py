@@ -243,6 +243,34 @@ async def vincular_factura(vinculos: List[VinculoFactura]):
             connection.commit()
 
             mov_reg.registrar_movimiento(vinculos[0].usuario, f"Vinculó factura {v.relacion_factura} a cotización {v.codigo_cotizacion}", "Cotizaciones")
+
+            # Aviso por vínculo (antes solo vivía en el workflow n8n, que nadie llama).
+            for v in vinculos:
+                if not v.relacion_factura:
+                    continue
+                codigo_safe = html.escape(str(v.codigo_cotizacion))
+                factura_safe = html.escape(str(v.relacion_factura))
+                message = (
+                    f"🧾 <b>Factura vinculada a cotización</b>\n\n"
+                    f"• <b>Cotización:</b> <code>{codigo_safe}</code>\n"
+                    f"• <b>Factura:</b> {factura_safe}\n"
+                    f"• <b>Método de pago:</b> {html.escape(str(v.metodo_pago or '—'))}\n"
+                    f"• <b>Fecha de pago:</b> {html.escape(str(v.fecha_pago or '—'))}\n"
+                    f"• <b>Usuario:</b> {html.escape(str(v.usuario))}"
+                )
+                asyncio.create_task(send_telegram_alert(message))
+            try:
+                import notificaciones_service
+                for v in vinculos:
+                    if not v.relacion_factura:
+                        continue
+                    await notificaciones_service.crear_y_notificar_todos(
+                        f"Factura {v.relacion_factura} vinculada",
+                        f"Cotización {v.codigo_cotizacion} vinculada a factura {v.relacion_factura} "
+                        f"({v.metodo_pago or 's/método'}, {v.fecha_pago or 's/fecha'}) por {v.usuario}.",
+                        "info")
+            except Exception as err:
+                print(f"Vinculó factura, pero falló persistir notificaciones: {err}")
             
         return {"status": "success", "mensaje": "Facturas vinculadas"}
         
@@ -310,6 +338,15 @@ async def guardar_firma(firma: FirmaEnvio):
             connection.commit()
 
             mov_reg.registrar_movimiento(firma.usuario, f"Guardó firma para cotización {firma.codigo_cotizacion}", "Cotizaciones")
+
+            try:
+                import notificaciones_service
+                await notificaciones_service.crear_y_notificar_todos(
+                    f"Firma guardada en cotización {firma.codigo_cotizacion}",
+                    f"Por {firma.usuario}.",
+                    "info")
+            except Exception as err:
+                print(f"Firma {firma.codigo_cotizacion} guardada, pero falló notificar en tabla: {err}")
 
             mensaje = (
                 f"📋 <b>Firma de cliente registrada</b>\n\n"

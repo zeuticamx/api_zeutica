@@ -15,7 +15,7 @@ from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from routers import cotizacionesBack, productos, ventas, clientes, traspaso, gastos, compras, cleanest, cuentas_pendientes,\
       abonos, estadisticas, inventario, empleados, notificaciones, cuentas_pagar, consulta_registros, pendientes, proveedores, genera_cotizacion, sofi_conversaciones, embarques, sofi_notificaciones, whatsapp_plantillas, skydropx
-from routers import crm, comisiones, prospectos, jobs, meli_webhook
+from routers import crm, comisiones, prospectos, jobs, meli_webhook, meli_promos
 import mysql.connector
 import skydropx_envios
 from fastapi.middleware.cors import CORSMiddleware
@@ -143,6 +143,64 @@ async def lifespan(app: FastAPI):
                     print(f"⏰ Job MeLi programado a las {int(mhh):02d}:{int(mmm):02d} America/Mexico_City.")
             except Exception as e:
                 print(f"❌ No se pudo programar el job MeLi: {e}")
+            try:
+                from jobs import meli_stock
+                meli_stock.asegurar_tabla_publicaciones()
+                if os.getenv("MELI_STOCK_ENABLED", "1") == "1":
+                    sh = os.getenv("MELI_STOCK_HORA", "20:00")
+                    shh, smm = (sh.split(":") + ["0"])[:2]
+                    scheduler.add_job(meli_stock.run_job, CronTrigger(hour=int(shh), minute=int(smm)),
+                                      kwargs={"motivo": "scheduler"}, id="meli_stock", replace_existing=True,
+                                      misfire_grace_time=600, coalesce=True, max_instances=1)
+                    print(f"⏰ Job stock MeLi programado a las {int(shh):02d}:{int(smm):02d} America/Mexico_City.")
+            except Exception as e:
+                print(f"❌ No se pudo programar el job stock MeLi: {e}")
+            try:
+                from jobs import cleanest_recordatorios
+                cleanest_recordatorios.asegurar_tabla_avisos()
+                if os.getenv("CLEANEST_JOB_ENABLED", "1") == "1":
+                    ch = os.getenv("CLEANEST_JOB_HORA", "11:00")
+                    chh, cmm = (ch.split(":") + ["0"])[:2]
+                    scheduler.add_job(cleanest_recordatorios.run_job, CronTrigger(hour=int(chh), minute=int(cmm)),
+                                      kwargs={"motivo": "scheduler"}, id="cleanest", replace_existing=True,
+                                      misfire_grace_time=600, coalesce=True, max_instances=1)
+                    print(f"⏰ Job Cleanest programado a las {int(chh):02d}:{int(cmm):02d} America/Mexico_City.")
+            except Exception as e:
+                print(f"❌ No se pudo programar el job Cleanest: {e}")
+            try:
+                from jobs import meli_full_stock
+                meli_full_stock.asegurar_tabla_estado()
+                if os.getenv("MELI_FULL_ENABLED", "1") == "1":
+                    fh = os.getenv("MELI_FULL_HORA", "10:30")
+                    fhh, fmm = (fh.split(":") + ["0"])[:2]
+                    scheduler.add_job(meli_full_stock.run_job, CronTrigger(hour=int(fhh), minute=int(fmm)),
+                                      kwargs={"motivo": "scheduler"}, id="meli_full", replace_existing=True,
+                                      misfire_grace_time=600, coalesce=True, max_instances=1)
+                    print(f"⏰ Job Full programado a las {int(fhh):02d}:{int(fmm):02d} America/Mexico_City.")
+            except Exception as e:
+                print(f"❌ No se pudo programar el job Full: {e}")
+            try:
+                from jobs import cotizaciones_vencimiento
+                if os.getenv("COTIZ_JOB_ENABLED", "1") == "1":
+                    th = os.getenv("COTIZ_JOB_HORA", "09:30")
+                    thh, tmm = (th.split(":") + ["0"])[:2]
+                    scheduler.add_job(cotizaciones_vencimiento.run_job, CronTrigger(hour=int(thh), minute=int(tmm)),
+                                      kwargs={"motivo": "scheduler"}, id="cotizaciones", replace_existing=True,
+                                      misfire_grace_time=600, coalesce=True, max_instances=1)
+                    print(f"⏰ Job cotizaciones programado a las {int(thh):02d}:{int(tmm):02d} America/Mexico_City.")
+            except Exception as e:
+                print(f"❌ No se pudo programar el job cotizaciones: {e}")
+            try:
+                from jobs import cotizaciones_por_vender
+                if os.getenv("COTIZV_JOB_ENABLED", "1") == "1":
+                    vh = os.getenv("COTIZV_JOB_HORA", "13:00")
+                    vhh, vmm = (vh.split(":") + ["0"])[:2]
+                    scheduler.add_job(cotizaciones_por_vender.run_job, CronTrigger(hour=int(vhh), minute=int(vmm)),
+                                      kwargs={"motivo": "scheduler"}, id="cotizaciones_vender", replace_existing=True,
+                                      misfire_grace_time=600, coalesce=True, max_instances=1)
+                    print(f"⏰ Job por-vender programado a las {int(vhh):02d}:{int(vmm):02d} America/Mexico_City.")
+            except Exception as e:
+                print(f"❌ No se pudo programar el job por-vender: {e}")
         except ImportError:
             print("⚠️ apscheduler no instalado: job Amazon solo manual (pip install apscheduler).")
         except Exception as e:
@@ -218,6 +276,7 @@ app.include_router(crm.router, dependencies=[Depends(obtener_usuario_actual)])
 app.include_router(comisiones.router, dependencies=[Depends(obtener_usuario_actual)])
 app.include_router(prospectos.router, dependencies=[Depends(obtener_usuario_actual)])
 app.include_router(jobs.router, dependencies=[Depends(obtener_usuario_actual)])
+app.include_router(meli_promos.router, dependencies=[Depends(obtener_usuario_actual)])
 # Sin obtener_usuario_actual a proposito: el WebSocket valida el token por query
 # param y el POST de escalacion valida X-API-Key (n8n no tiene sesion de usuario).
 app.include_router(sofi_notificaciones.router)

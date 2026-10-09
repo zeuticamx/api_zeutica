@@ -32,7 +32,7 @@ async def obtener_estadistica(fecha: fechas):
     cursor = conn.cursor(dictionary=True)
 
     try:
-        query = "SELECT id_ventas, sku, producto, cantidad, precio, costo_unitario, fecha, nombreComprador, plataforma, condicion_pago FROM ventasRegistro WHERE DATE(fecha) BETWEEN %s AND %s"
+        query = "SELECT id_ventas, sku, producto, cantidad, precio, costo_unitario, fecha, nombreComprador, plataforma, condicion_pago FROM ventasRegistro WHERE estatus = 'activa' AND DATE(fecha) BETWEEN %s AND %s"
         cursor.execute(query,(fecha.fecha, fecha.fecha2))
         ventas = cursor.fetchall()
 

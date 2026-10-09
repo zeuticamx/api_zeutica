@@ -86,7 +86,10 @@ def normalizar_evento(body: dict, query: dict) -> tuple:
     t = str(topic or "").lower()
     if "payment" in t:
         t = "payment"
+    elif "claim" in t:
+        t = "claims"
     elif "order" in t:
+        # orders y orders_v2 traen resource "/orders/{id}".
         t = "orders"
     else:
         t = None
@@ -125,8 +128,16 @@ def clasificar_orden(orden: dict) -> str:
     estado = str(orden.get("status") or "").lower()
     if estado == "paid":
         return "pagada"
-    if estado == "cancelled":
+    if estado == "cancelled" or orden.get("cancel_detail"):
         return "cancelada"
+    return "ignorar"
+
+
+def clasificar_claim(claim: dict) -> str:
+    """abierta si requiere atención humana; lo demás se ignora (un refund
+    posterior entra por payment refunded y ahí sí regresa stock)."""
+    if str(claim.get("status") or "").lower() == "opened":
+        return "abierta"
     return "ignorar"
 
 
@@ -197,7 +208,24 @@ async def _procesar(topic: str | None, rid: str | None, firma_ok: bool):
                     marcar_aviso(topic, rid, clase)
                 else:
                     print(f"Webhook MeLi: pago {rid} en estado {pago.get('status')}, se ignora")
-            else:  # orders
+            elif topic == "claims":
+                reclamo = await meli_ventas._get(client, f"{meli_ventas.MELI_API}/claims/{rid}", token)
+                clase = clasificar_claim(reclamo)
+                if clase != "abierta":
+                    print(f"Webhook MeLi: reclamo {rid} en estado {reclamo.get('status')}, se ignora")
+                    return
+                if ya_avisado(topic, rid, clase):
+                    print(f"Webhook MeLi: reclamo {rid} ya avisado, se omite")
+                    return
+                orden_id = (reclamo.get("order_id") or (reclamo.get("order") or {}).get("id")
+                            if isinstance(reclamo.get("order"), dict) else reclamo.get("order_id"))
+                motivo = (reclamo.get("reason") or reclamo.get("reason_id")
+                          or reclamo.get("claim_reason") or "sin motivo")
+                await notificaciones_service.crear_y_notificar_todos(
+                    f"Reclamo MeLi {rid} abierto",
+                    f"Reclamo {rid} en orden {orden_id or '?'}: {motivo}. Requiere atención humana.", "warn")
+                marcar_aviso(topic, rid, clase)
+            else:  # orders / orders_v2
                 orden = await meli_ventas._get(client, f"{meli_ventas.MELI_API}/orders/{rid}", token)
                 clase = clasificar_orden(orden)
                 if clase == "pagada":

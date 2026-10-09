@@ -74,7 +74,6 @@ class MeliRunIn(BaseModel):
     dry_run: Optional[bool] = Field(default=None)
     motivo: str = Field(default="manual", max_length=40)
 
-
 @router.post("/jobs/meli/run")
 async def meli_run(datos: MeliRunIn, usuario: str = Depends(usuario_autenticado)):
     """Trae ventas de MeLi en segundo plano (202). Permiso general."""
@@ -92,5 +91,127 @@ async def meli_status(usuario: str = Depends(usuario_autenticado)):
             "enabled": os.getenv("MELI_JOB_ENABLED", "1") == "1",
             "dry_run_default": os.getenv("MELI_JOB_DRY_RUN", "0") == "1",
             "hora": os.getenv("MELI_JOB_HORA", "12:05"),
+        },
+    }
+
+
+class MeliStockRunIn(BaseModel):
+    dry_run: Optional[bool] = Field(default=None)
+    motivo: str = Field(default="manual", max_length=40)
+
+@router.post("/jobs/meli-stock/run")
+async def meli_stock_run(datos: MeliStockRunIn, usuario: str = Depends(usuario_autenticado)):
+    """Publica stock a MeLi en segundo plano (202). Permiso general."""
+    from jobs import meli_stock
+    return _lanzar(meli_stock, datos.dry_run, f"{datos.motivo} por {usuario}", "meli-stock")
+
+
+@router.get("/jobs/meli-stock/status")
+async def meli_stock_status(usuario: str = Depends(usuario_autenticado)):
+    """Último run + configuración (permiso general)."""
+    from jobs import meli_stock
+    return {
+        "ultimo": meli_stock.LAST_RUN,
+        "config": {
+            "enabled": os.getenv("MELI_STOCK_ENABLED", "1") == "1",
+            "dry_run_default": os.getenv("MELI_STOCK_DRY_RUN", "0") == "1",
+            "hora": os.getenv("MELI_STOCK_HORA", "20:00"),
+        },
+    }
+
+
+class CleanestRunIn(BaseModel):
+    motivo: str = Field(default="manual", max_length=40)
+
+
+@router.post("/jobs/cleanest/run")
+async def cleanest_run(datos: CleanestRunIn, usuario: str = Depends(usuario_autenticado)):
+    """Recordatorios Cleanest en segundo plano (202). Permiso general."""
+    from jobs import cleanest_recordatorios
+    return _lanzar(cleanest_recordatorios, None, f"{datos.motivo} por {usuario}", "cleanest")
+
+
+@router.get("/jobs/cleanest/status")
+async def cleanest_status(usuario: str = Depends(usuario_autenticado)):
+    """Último run + configuración (permiso general)."""
+    from jobs import cleanest_recordatorios
+    return {
+        "ultimo": cleanest_recordatorios.LAST_RUN,
+        "config": {
+            "enabled": os.getenv("CLEANEST_JOB_ENABLED", "1") == "1",
+            "hora": os.getenv("CLEANEST_JOB_HORA", "11:00"),
+        },
+    }
+
+
+class MeliFullRunIn(BaseModel):
+    dry_run: Optional[bool] = Field(default=None)
+    motivo: str = Field(default="manual", max_length=40)
+
+
+@router.post("/jobs/meli-full/run")
+async def meli_full_run(datos: MeliFullRunIn, usuario: str = Depends(usuario_autenticado)):
+    """Alerta stock Full en segundo plano (202). Permiso general."""
+    from jobs import meli_full_stock
+    return _lanzar(meli_full_stock, datos.dry_run, f"{datos.motivo} por {usuario}", "meli-full")
+
+
+@router.get("/jobs/meli-full/status")
+async def meli_full_status(usuario: str = Depends(usuario_autenticado)):
+    """Último run + configuración (permiso general)."""
+    from jobs import meli_full_stock
+    return {
+        "ultimo": meli_full_stock.LAST_RUN,
+        "config": {
+            "enabled": os.getenv("MELI_FULL_ENABLED", "1") == "1",
+            "hora": os.getenv("MELI_FULL_HORA", "10:30"),
+        },
+    }
+
+
+class CotizRunIn(BaseModel):
+    motivo: str = Field(default="manual", max_length=40)
+
+
+@router.post("/jobs/cotizaciones/run")
+async def cotizaciones_run(datos: CotizRunIn, usuario: str = Depends(usuario_autenticado)):
+    """Vencimientos de cotizaciones en segundo plano (202). Permiso general."""
+    from jobs import cotizaciones_vencimiento
+    return _lanzar(cotizaciones_vencimiento, None, f"{datos.motivo} por {usuario}", "cotizaciones")
+
+
+@router.get("/jobs/cotizaciones/status")
+async def cotizaciones_status(usuario: str = Depends(usuario_autenticado)):
+    """Último run + configuración (permiso general)."""
+    from jobs import cotizaciones_vencimiento
+    return {
+        "ultimo": cotizaciones_vencimiento.LAST_RUN,
+        "config": {
+            "enabled": os.getenv("COTIZ_JOB_ENABLED", "1") == "1",
+            "hora": os.getenv("COTIZ_JOB_HORA", "09:30"),
+        },
+    }
+
+
+class CotizVenderRunIn(BaseModel):
+    motivo: str = Field(default="manual", max_length=40)
+
+
+@router.post("/jobs/cotizaciones-vender/run")
+async def cotizaciones_vender_run(datos: CotizVenderRunIn, usuario: str = Depends(usuario_autenticado)):
+    """Cotizaciones por vender en segundo plano (202). Permiso general."""
+    from jobs import cotizaciones_por_vender
+    return _lanzar(cotizaciones_por_vender, None, f"{datos.motivo} por {usuario}", "cotizaciones-vender")
+
+
+@router.get("/jobs/cotizaciones-vender/status")
+async def cotizaciones_vender_status(usuario: str = Depends(usuario_autenticado)):
+    """Último run + configuración (permiso general)."""
+    from jobs import cotizaciones_por_vender
+    return {
+        "ultimo": cotizaciones_por_vender.LAST_RUN,
+        "config": {
+            "enabled": os.getenv("COTIZV_JOB_ENABLED", "1") == "1",
+            "hora": os.getenv("COTIZV_JOB_HORA", "13:00"),
         },
     }

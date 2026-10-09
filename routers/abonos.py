@@ -96,7 +96,7 @@ async def listar_abonos():
             MIN(fecha_vencimiento) AS fecha_vencimiento,
             MIN(fecha) AS fecha
         FROM ventasRegistro
-        WHERE saldo_pendiente > 0
+        WHERE estatus = 'activa' AND saldo_pendiente > 0
         GROUP BY TRIM(id_ventas)
     ) v
     LEFT JOIN (
@@ -142,7 +142,7 @@ async def registrar_abono(abono: abono):
 
     try:
         # 1. Obtenemos el saldo actual de la venta (MAX para evitar problemas de múltiples SKUs)
-        query_check = "SELECT MAX(saldo_pendiente) FROM ventasRegistro WHERE id_ventas = %s"
+        query_check = "SELECT MAX(saldo_pendiente) FROM ventasRegistro WHERE estatus = 'activa' AND id_ventas = %s"
         cursor.execute(query_check, (str(abono.id_ventas),))
         res = cursor.fetchone()
 
@@ -161,7 +161,7 @@ async def registrar_abono(abono: abono):
             raise HTTPException(status_code=400, detail="Operación rechazada: El abono es mayor al saldo pendiente actual.")
 
         # 2. Si pasó todas las reglas, hacemos el UPDATE para restar el abono
-        query_update = "UPDATE ventasRegistro SET saldo_pendiente = saldo_pendiente - %s WHERE TRIM(id_ventas) = %s"
+        query_update = "UPDATE ventasRegistro SET saldo_pendiente = saldo_pendiente - %s WHERE estatus = 'activa' AND TRIM(id_ventas) = %s"
         cursor.execute(query_update, (abono.saldo_abonado, str(abono.id_ventas)))
 
         # 3. Registramos el abono en el historial

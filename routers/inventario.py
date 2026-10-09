@@ -72,7 +72,9 @@ async def registrar_conteo(payload: ConteoPayload):
 def _columnas(cursor, tabla: str) -> set:
     cursor.execute("SELECT COLUMN_NAME FROM information_schema.COLUMNS "
                    "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s", (tabla,))
-    return {str(fila[0]).lower() for fila in cursor.fetchall()}
+    # El cursor puede ser de diccionario (movimientos_inventario) o de tuplas.
+    return {str(next(iter(fila.values())) if isinstance(fila, dict) else fila[0]).lower()
+            for fila in cursor.fetchall()}
 
 
 INDICES_MOVIMIENTOS = {
@@ -122,6 +124,7 @@ async def movimientos_inventario(
     try:
         cols_stock = _columnas(cursor, "stock_actual")
         cols_dev = _columnas(cursor, "devoluciones")
+        cols_ventas = _columnas(cursor, "ventasRegistro")
         almacen_expr = "almacen" if "almacen" in cols_stock else "NULL"
         tipo_stock = (f"CASE WHEN {almacen_expr} = 'BAJA' THEN 'baja' "
                       f"WHEN {almacen_expr} = 'CLEAN' THEN 'traspaso' ELSE 'traspaso' END"
@@ -150,7 +153,7 @@ async def movimientos_inventario(
         ramas = [
             (f"""SELECT fecha_registro AS fecha, 'venta' AS tipo, sku, (0 - cantidad) AS cantidad,
                     CAST(id_ventas AS CHAR) AS folio, usuario, plataforma AS detalle
-                FROM ventasRegistro WHERE 1=1""", "fecha_registro", ("venta",)),
+                FROM ventasRegistro WHERE {"estatus = 'activa'" if "estatus" in cols_ventas else "1=1"}""", "fecha_registro", ("venta",)),
             (f"""SELECT fecha_registro AS fecha, {tipo_stock} AS tipo, sku, cantidad,
                     NULL AS folio, usuario, {almacen_expr} AS detalle
                 FROM stock_actual WHERE 1=1""", "fecha_registro", ("baja", "traspaso")),

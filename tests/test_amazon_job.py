@@ -87,6 +87,44 @@ def _linea_amazon(id_venta, fecha, estado="ok"):
             "cantidad_regresar": 0, "cancelacion_parcial": False}
 
 
+def test_regreso_amazon_marca_estatus_cancelada(monkeypatch):
+    from jobs import amazon_ventas as amz
+    ejecutados = []
+
+    class Cur:
+        rowcount = 1
+
+        def execute(self, q, p=None):
+            ejecutados.append(" ".join(q.split()))
+
+        def fetchone(self):
+            return None
+
+        def close(self):
+            pass
+
+    class DB:
+        def cursor(self, *a, **k):
+            return Cur()
+
+        def commit(self):
+            pass
+
+        def rollback(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(amz, "get_db_connection", lambda: DB())
+    agrupadas = [{"id_venta": "A1", "sku": "ABC", "valida": False, "es_nueva": False,
+                  "a_regresar": True, "cantidad_regresar": 2}]
+    stats = amz.aplicar_ventas(agrupadas, dry_run=False)
+    assert stats["regresadas"] == 1
+    ups = [q for q in ejecutados if "inventario_descontado = 0" in q]
+    assert len(ups) == 1 and "estatus = 'cancelada'" in ups[0]
+
+
 def test_resumen_ventas_solo_del_dia_atrasadas_solo_en_inventario():
     ahora = datetime(2026, 10, 8, 13, 0, tzinfo=ZoneInfo("America/Mexico_City"))
     chunks = job.build_resumen([_linea_amazon("DIA", "2026-10-08"), _linea_amazon("VIEJA", "2026-10-05")], ahora)

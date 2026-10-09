@@ -454,7 +454,8 @@ def aplicar_ventas(agrupadas: list, dry_run: bool) -> dict:
         for l in regresar:
             cur.execute(
                 """UPDATE productos p JOIN ventasRegistro v ON v.sku = p.sku
-                   SET p.stock_bodega = p.stock_bodega + v.cantidad, v.inventario_descontado = 0
+                   SET p.stock_bodega = p.stock_bodega + v.cantidad, v.inventario_descontado = 0,
+                       v.estatus = 'cancelada'
                    WHERE v.id_ventas = %s AND v.sku = %s AND v.plataforma = 'amazon'
                      AND v.inventario_descontado = 1""",
                 (l["id_venta"], l["sku"]))

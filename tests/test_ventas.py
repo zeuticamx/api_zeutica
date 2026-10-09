@@ -102,6 +102,8 @@ def db(monkeypatch):
     monkeypatch.setattr(ventas, "get_db_connection", lambda: base)
     monkeypatch.setattr(ventas.mov_reg, "registrar_movimiento", lambda *a, **k: None)
     monkeypatch.setattr(ventas, "send_telegram_alert", AsyncMock())
+    import notificaciones_service
+    monkeypatch.setattr(notificaciones_service, "crear_y_notificar_todos", AsyncMock())
     # El cálculo de comisiones tiene sus propios tests (test_comisiones.py)
     monkeypatch.setattr(ventas.comisiones, "registrar_comisiones_seguro", lambda *a, **k: None)
     return base
@@ -404,3 +406,28 @@ def test_producto_venta_stock_insuficiente_devuelve_400(client, db):
     r = client.post("/producto/venta", json=venta_simple())
     assert r.status_code == 400
     assert db.registradas == []
+
+
+def test_reportes_y_credito_excluyen_canceladas(client, db):
+    db.ventas = []
+    client.get("/ventas/2026-09-01/2026-09-30")
+    (query, _), = db.consultas("SELECT * FROM ventasRegistro")
+    assert "estatus = 'activa'" in query
+
+
+def test_producto_venta_persiste_aviso_en_tabla(client, db, monkeypatch):
+    import notificaciones_service
+    db.stock = {"A-001": 10}
+    r = client.post("/producto/venta", json=venta_simple())
+    assert r.status_code == 200, r.text
+    notificaciones_service.crear_y_notificar_todos.assert_awaited_once()
+    titulo = notificaciones_service.crear_y_notificar_todos.await_args.args[0]
+    assert "555" in titulo
+
+
+def test_venta_completa_persiste_un_solo_aviso(client, db):
+    import notificaciones_service
+    db.stock = {"A-001": 10, "B-002": 5}
+    r = client.post("/ventas/registrar", json=venta_completa())
+    assert r.status_code == 200, r.text
+    assert notificaciones_service.crear_y_notificar_todos.await_count == 1

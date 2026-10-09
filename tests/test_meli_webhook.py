@@ -50,6 +50,18 @@ def test_clasificar_orden():
     assert wh.clasificar_orden({"status": "paid"}) == "pagada"
     assert wh.clasificar_orden({"status": "cancelled"}) == "cancelada"
     assert wh.clasificar_orden({"status": "shipped"}) == "ignorar"
+    assert wh.clasificar_orden({"status": "shipped", "cancel_detail": {"code": "x"}}) == "cancelada"
+
+
+def test_clasificar_claim():
+    assert wh.clasificar_claim({"status": "opened"}) == "abierta"
+    assert wh.clasificar_claim({"status": "closed"}) == "ignorar"
+    assert wh.clasificar_claim({}) == "ignorar"
+
+
+def test_normalizar_orders_v2_y_claims():
+    assert wh.normalizar_evento({"topic": "orders_v2", "resource": "/orders/7"}, {}) == ("orders", "7")
+    assert wh.normalizar_evento({"topic": "claims", "resource": "/claims/9"}, {}) == ("claims", "9")
 
 
 def test_ordenes_de_pago():

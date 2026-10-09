@@ -44,15 +44,16 @@ def test_migracion_agrega_columnas_indice_y_backfill(monkeypatch):
     monkeypatch.setattr(schema_ventas, "get_db_connection", lambda: base)
     rep = schema_ventas.asegurar_columnas_ventas()
     qs = [q for q, _ in base.cursor_obj.ejecutados]
-    assert rep["columnas_agregadas"] == ["inventario_descontado", "costo_unitario", "es_full"]
+    assert rep["columnas_agregadas"] == ["inventario_descontado", "costo_unitario", "es_full", "estatus"]
     assert rep["indice_creado"] is True and rep["backfill"] == 3
+    assert rep["canceladas_backfill"] == 3
     assert any("ADD UNIQUE KEY uq_venta_partida" in q for q in qs)
     assert any("SET inventario_descontado = 1" in q for q in qs)
 
 
 def test_migracion_idempotente_si_todo_existe(monkeypatch):
     base = FakeDB()
-    cols = [("id_ventas",), ("sku",), ("inventario_descontado",), ("costo_unitario",), ("es_full",)]
+    cols = [("id_ventas",), ("sku",), ("inventario_descontado",), ("costo_unitario",), ("es_full",), ("estatus",)]
 
     orig_execute = FakeCursor.execute
 
@@ -62,7 +63,7 @@ def test_migracion_idempotente_si_todo_existe(monkeypatch):
         if q.startswith("SELECT COLUMN_NAME"):
             self._colas = list(cols)
         elif q.startswith("SELECT INDEX_NAME"):
-            self._colas = [("uq_venta_partida",)]
+            self._colas = [("uq_venta_partida",), ("idx_ventasregistro_estatus",)]
 
     monkeypatch.setattr(FakeCursor, "execute", execute_con_todo)
     monkeypatch.setattr(schema_ventas, "get_db_connection", lambda: base)

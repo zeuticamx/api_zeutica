@@ -12,6 +12,7 @@ class FakeCursor:
         self.filas = filas or []
         self.columnas = columnas or set()
         self.ejecutados = []
+        self.dictionary = False
 
     def execute(self, query, params=None):
         q = " ".join(query.split())
@@ -19,6 +20,8 @@ class FakeCursor:
 
     def fetchall(self):
         if self.ejecutados and self.ejecutados[-1][0].startswith("SELECT COLUMN_NAME"):
+            if self.dictionary:
+                return [{"COLUMN_NAME": c} for c in self.columnas]
             return [(c,) for c in self.columnas]
         return list(self.filas)
 
@@ -36,6 +39,7 @@ class FakeDB:
         self.commits = 0
 
     def cursor(self, dictionary=False):
+        self.cursor_obj.dictionary = dictionary
         return self.cursor_obj
 
     def commit(self):
@@ -53,6 +57,13 @@ def _app():
     app.include_router(inventario.router)
     app.dependency_overrides[usuario_autenticado] = lambda: "tester"
     return TestClient(app)
+
+
+def test_columnas_acepta_cursor_de_diccionario_y_de_tuplas():
+    for dictionary in (True, False):
+        cur = FakeCursor(columnas={"Almacen", "SKU"})
+        cur.dictionary = dictionary
+        assert inventario._columnas(cur, "stock_actual") == {"almacen", "sku"}
 
 
 def test_movimientos_une_fuentes_y_filtra(monkeypatch):
