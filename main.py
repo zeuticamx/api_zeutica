@@ -96,6 +96,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"❌ No se pudo migrar devoluciones: {e}")
 
+    # Índices por fecha para /inventario/movimientos (sin full-scan).
+    try:
+        from routers.inventario import asegurar_indices_inventario
+        asegurar_indices_inventario()
+    except Exception as e:
+        print(f"❌ No se pudieron crear índices de inventario: {e}")
+
     # Columnas + backfill de ventasRegistro para los jobs de marketplaces
     # (inventario_descontado=1 en lo ya registrado: hasta hoy sí se descontaba).
     try:

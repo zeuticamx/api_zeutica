@@ -124,13 +124,16 @@ def enriquecer_lineas(lineas: list, costos: dict, envios: dict, registro: dict) 
             canal = "Full (por SKU)" if l.get("es_full") else "Sin dato"
         alerta = None
         if tipo == "fulfillment" and not l.get("es_full"):
-            alerta = "MeLi lo marca como Full pero el SKU no termina en FULL: se descontó de bodega"
+            alerta = "MeLi lo marca como Full pero el SKU no termina en FULL: NO se descontó de bodega"
         elif tipo and tipo != "fulfillment" and l.get("es_full"):
             alerta = f"El SKU termina en FULL pero el envío es {canal}: NO se descontó de bodega"
+        # Regla: Full nunca se descuenta de bodega (se da de baja al mandar al
+        # almacén). Vale por sufijo del SKU o por logística fulfillment de MeLi.
+        a_descontar = (not l.get("es_full")) and tipo != "fulfillment" and (not ya_desc)
         out.append({**l, "costo": costo, "sin_costo": (not existe) or costo <= 0,
                     "tipo_logistica": tipo, "canal": canal, "es_flex": tipo == "self_service",
                     "alerta_logistica": alerta, "es_nueva": not ya_reg, "ya_descontada": ya_desc,
-                    "a_descontar": (not l.get("es_full")) and (not ya_desc)})
+                    "a_descontar": a_descontar})
     return out
 
 

@@ -92,3 +92,20 @@ def test_migracion_devolucion_agrega_usuario(monkeypatch):
     qs = [q for q, _ in base.cursor_obj.ejecutados]
     assert any("ADD COLUMN usuario" in q for q in qs)
     assert base.commits == 1
+
+
+def test_indices_inventario_se_crean_si_faltan(monkeypatch):
+    from routers import inventario as inv
+    base = FakeDB(columnas=set())
+
+    class IdxCursor(FakeCursor):
+        def fetchall(self):
+            if self.ejecutados and self.ejecutados[-1][0].startswith("SELECT INDEX_NAME"):
+                return []
+            return super().fetchall()
+
+    base.cursor_obj = IdxCursor([], set())
+    monkeypatch.setattr(inv, "get_db_connection", lambda: base)
+    inv.asegurar_indices_inventario()
+    qs = [q for q, _ in base.cursor_obj.ejecutados]
+    assert sum("ADD INDEX" in q for q in qs) == 4

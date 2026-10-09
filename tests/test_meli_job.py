@@ -30,15 +30,26 @@ def test_limpiar_agrupa_multiplicador_y_full():
     assert out["3"]["cantidad_final"] == 5
 
 
-def test_enriquecer_canal_y_a_descontar():
+def test_enriquecer_no_descuenta_fulfillment_aunque_sku_no_diga_full():
+    lineas = [{"id_venta": "1", "sku_mod": "ABC", "shipping_id": "S1", "es_full": 0,
+               "producto": "P", "cantidad": 1, "cantidad_final": 1, "codigo": "ABC"}]
+    out = job.enriquecer_lineas(lineas, {"ABC": 10}, {"S1": "fulfillment"}, {})
+    assert out[0]["a_descontar"] is False
+    assert "NO se descontó" in (out[0]["alerta_logistica"] or "")
+
+
+def test_enriquecer_si_descuenta_flex():
     lineas = [{"id_venta": "1", "sku_mod": "ABC", "shipping_id": "S1", "es_full": 0,
                "producto": "P", "cantidad": 1, "cantidad_final": 1, "codigo": "ABC"}]
     out = job.enriquecer_lineas(lineas, {"ABC": 10}, {"S1": "self_service"}, {})
     assert out[0]["canal"] == "Flex" and out[0]["a_descontar"] is True
-    out2 = job.enriquecer_lineas(
-        [{**lineas[0], "es_full": 1, "codigo": "XYZFULL", "sku_mod": "XYZ"}],
-        {"XYZ": 10}, {"S1": "self_service"}, {})
-    assert out2[0]["alerta_logistica"] is not None and out2[0]["a_descontar"] is False
+
+
+def test_enriquecer_no_descuenta_full_por_sku():
+    lineas = [{"id_venta": "1", "sku_mod": "XYZ", "shipping_id": "S1", "es_full": 1,
+               "producto": "P", "cantidad": 1, "cantidad_final": 1, "codigo": "XYZFULL"}]
+    out = job.enriquecer_lineas(lineas, {"XYZ": 10}, {"S1": "self_service"}, {})
+    assert out[0]["a_descontar"] is False
 
 
 def test_margen_reparte_neto_y_alerta_solo_nueva():

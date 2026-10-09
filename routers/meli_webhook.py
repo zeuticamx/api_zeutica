@@ -34,6 +34,46 @@ COOLDOWN_SEG = 180
 _ultimo_sync = 0.0
 
 
+def _get_conn():
+    from jobs import meli_ventas
+    return meli_ventas.get_db_connection()
+
+
+def _asegurar_tabla_vistos(cursor):
+    cursor.execute(
+        """CREATE TABLE IF NOT EXISTS meli_webhook_vistos (
+               topic VARCHAR(20) NOT NULL, resource_id VARCHAR(64) NOT NULL,
+               clase VARCHAR(20) NOT NULL, fecha DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+               PRIMARY KEY (topic, resource_id, clase))""")
+
+
+def ya_avisado(topic: str, rid: str, clase: str) -> bool:
+    """True si este (evento, estado) ya generó aviso. Para INSERT se usa marcar_aviso()."""
+    conn = _get_conn()
+    cursor = conn.cursor()
+    try:
+        _asegurar_tabla_vistos(cursor)
+        cursor.execute("SELECT 1 FROM meli_webhook_vistos WHERE topic = %s AND resource_id = %s AND clase = %s",
+                       (topic, rid, clase))
+        return cursor.fetchone() is not None
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def marcar_aviso(topic: str, rid: str, clase: str):
+    conn = _get_conn()
+    cursor = conn.cursor()
+    try:
+        _asegurar_tabla_vistos(cursor)
+        cursor.execute("INSERT IGNORE INTO meli_webhook_vistos (topic, resource_id, clase) VALUES (%s, %s, %s)",
+                       (topic, rid, clase))
+        conn.commit()
+    finally:
+        cursor.close()
+        conn.close()
+
+
 def normalizar_evento(body: dict, query: dict) -> tuple:
     """(topic, resource_id) desde body MP/nuevo, body MeLi clásico o query IPN."""
     topic = (body.get("topic") or body.get("type") or body.get("action")
@@ -130,6 +170,9 @@ async def _procesar(topic: str | None, rid: str | None, firma_ok: bool):
                 pago = await meli_ventas._get(client, f"{meli_ventas.MP_API}/v1/payments/{rid}", token)
                 clase = clasificar_pago(pago)
                 if clase == "pagada":
+                    if ya_avisado(topic, rid, clase):
+                        print(f"Webhook MeLi: pago {rid} ya avisado, se omite")
+                        return
                     res = await _sincronizar_con_cooldown(f"webhook pago {rid}")
                     nuevas = ((res.get("stats") or {}).get("nuevas", 0)
                               if isinstance(res, dict) and res.get("estado") == "ok" else 0)
@@ -137,7 +180,11 @@ async def _procesar(topic: str | None, rid: str | None, firma_ok: bool):
                         f"Venta MeLi pagada {rid}",
                         f"Pago {rid} aprobado por ${float((pago.get('transaction_amount') or 0)):,.2f}. "
                         f"Sincronizadas {nuevas} nuevas en esta corrida.", "success")
+                    marcar_aviso(topic, rid, clase)
                 elif clase == "cancelada":
+                    if ya_avisado(topic, rid, clase):
+                        print(f"Webhook MeLi: pago {rid} ya avisado, se omite")
+                        return
                     total = 0
                     for oid in ordenes_de_pago(pago):
                         r = await asyncio.to_thread(
@@ -147,23 +194,32 @@ async def _procesar(topic: str | None, rid: str | None, firma_ok: bool):
                         f"MeLi pago {rid} cancelado",
                         f"Pago {rid} {pago.get('status')}. Stock regresado +{total} pzas." if total
                         else f"Pago {rid} {pago.get('status')}, sin stock que regresar.", "warn")
+                    marcar_aviso(topic, rid, clase)
                 else:
                     print(f"Webhook MeLi: pago {rid} en estado {pago.get('status')}, se ignora")
             else:  # orders
                 orden = await meli_ventas._get(client, f"{meli_ventas.MELI_API}/orders/{rid}", token)
                 clase = clasificar_orden(orden)
                 if clase == "pagada":
+                    if ya_avisado(topic, rid, clase):
+                        print(f"Webhook MeLi: orden {rid} ya avisada, se omite")
+                        return
                     await _sincronizar_con_cooldown(f"webhook orden {rid}")
                     await notificaciones_service.crear_y_notificar_todos(
                         f"Venta MeLi {rid} pagada",
                         f"Orden {rid} pagada, sincronizada en esta corrida.", "success")
+                    marcar_aviso(topic, rid, clase)
                 elif clase == "cancelada":
+                    if ya_avisado(topic, rid, clase):
+                        print(f"Webhook MeLi: orden {rid} ya avisada, se omite")
+                        return
                     r = await asyncio.to_thread(
                         meli_ventas.procesar_cancelacion, rid, "webhook orden")
                     await notificaciones_service.crear_y_notificar_todos(
                         f"Orden MeLi {rid} cancelada",
                         f"Orden {rid} cancelada. Stock regresado +{r.get('piezas', 0)} pzas." if r.get("piezas")
                         else f"Orden {rid} cancelada, sin stock que regresar.", "warn")
+                    marcar_aviso(topic, rid, clase)
                 else:
                     print(f"Webhook MeLi: orden {rid} en estado {orden.get('status')}, se ignora")
     except Exception as err:

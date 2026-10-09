@@ -75,6 +75,34 @@ def _columnas(cursor, tabla: str) -> set:
     return {str(fila[0]).lower() for fila in cursor.fetchall()}
 
 
+INDICES_MOVIMIENTOS = {
+    "idx_ventasregistro_fecha_registro": ("ventasRegistro", "fecha_registro"),
+    "idx_compras_fecha_registro": ("compras", "fecha_registro"),
+    "idx_stock_actual_fecha_registro": ("stock_actual", "fecha_registro"),
+    "idx_devoluciones_fecha": ("devoluciones", "fecha"),
+}
+
+
+def asegurar_indices_inventario():
+    """Índices por fecha para que /inventario/movimientos no haga full-scan (lifespan)."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT INDEX_NAME FROM information_schema.STATISTICS "
+                       "WHERE TABLE_SCHEMA = DATABASE()")
+        indices = {str(fila[0]).lower() for fila in cursor.fetchall()}
+        for nombre, (tabla, columna) in INDICES_MOVIMIENTOS.items():
+            if nombre not in indices:
+                try:
+                    cursor.execute(f"ALTER TABLE {tabla} ADD INDEX {nombre} ({columna})")
+                except mysql.connector.Error as err:
+                    print(f"No se pudo crear {nombre}: {err}")
+        conn.commit()
+    finally:
+        cursor.close()
+        conn.close()
+
+
 @router.get("/inventario/movimientos")
 async def movimientos_inventario(
     sku: Optional[str] = Query(default=None),
@@ -100,41 +128,54 @@ async def movimientos_inventario(
                       if "almacen" in cols_stock else "'traspaso'")
         usuario_dev = "usuario" if "usuario" in cols_dev else "NULL"
 
-        query = f"""
-            SELECT * FROM (
-                SELECT fecha_registro AS fecha, 'venta' AS tipo, sku, (0 - cantidad) AS cantidad,
+        query = "SELECT * FROM ("
+        uniones = []
+
+        def filtros_rama(col_fecha: str, tipos_rama: tuple):
+            if tipo and tipo not in tipos_rama:
+                return None
+            conds = []
+            params = []
+            if sku:
+                conds.append("sku LIKE %s")
+                params.append(f"%{sku}%")
+            if desde:
+                conds.append(f"{col_fecha} >= %s")
+                params.append(desde)
+            if hasta:
+                conds.append(f"{col_fecha} < DATE_ADD(%s, INTERVAL 1 DAY)")
+                params.append(hasta)
+            return (" AND " + " AND ".join(conds) if conds else "", params)
+
+        ramas = [
+            (f"""SELECT fecha_registro AS fecha, 'venta' AS tipo, sku, (0 - cantidad) AS cantidad,
                     CAST(id_ventas AS CHAR) AS folio, usuario, plataforma AS detalle
-                FROM ventasRegistro
-                UNION ALL
-                SELECT fecha_registro AS fecha, {tipo_stock} AS tipo, sku, cantidad,
+                FROM ventasRegistro WHERE 1=1""", "fecha_registro", ("venta",)),
+            (f"""SELECT fecha_registro AS fecha, {tipo_stock} AS tipo, sku, cantidad,
                     NULL AS folio, usuario, {almacen_expr} AS detalle
-                FROM stock_actual
-                UNION ALL
-                SELECT fecha_registro AS fecha, 'compra' AS tipo, sku, stock_bodega AS cantidad,
+                FROM stock_actual WHERE 1=1""", "fecha_registro", ("baja", "traspaso")),
+            ("""SELECT fecha_registro AS fecha, 'compra' AS tipo, sku, stock_bodega AS cantidad,
                     num_factura AS folio, usuario, proveedor AS detalle
-                FROM compras
-                UNION ALL
-                SELECT fecha AS fecha, 'devolucion' AS tipo, sku,
+                FROM compras WHERE 1=1""", "fecha_registro", ("compra",)),
+            (f"""SELECT fecha AS fecha, 'devolucion' AS tipo, sku,
                     CASE WHEN reingreso THEN cantidad ELSE 0 END AS cantidad,
                     NULL AS folio, {usuario_dev} AS usuario, plataforma AS detalle
-                FROM devoluciones
-            ) AS m WHERE 1=1
-        """
-        valores: list = []
-        if tipo:
-            query += " AND tipo = %s"
-            valores.append(tipo)
-        if sku:
-            query += " AND sku LIKE %s"
-            valores.append(f"%{sku}%")
-        if desde:
-            query += " AND fecha >= %s"
-            valores.append(desde)
-        if hasta:
-            query += " AND fecha < DATE_ADD(%s, INTERVAL 1 DAY)"
-            valores.append(hasta)
-        query += " ORDER BY fecha DESC LIMIT %s"
-        valores.append(limite)
+                FROM devoluciones WHERE 1=1""", "fecha", ("devolucion",)),
+        ]
+        for sql_base, col_fecha, tipos_rama in ramas:
+            f = filtros_rama(col_fecha, tipos_rama)
+            if f is None:
+                continue
+            conds, params = f
+            # Límite por rama: evita ordenar las 4 tablas completas.
+            uniones.append((f"({sql_base}{conds} ORDER BY {col_fecha} DESC LIMIT %s)", params + [limite]))
+
+        if not uniones:
+            return []
+
+        query += " UNION ALL ".join(sql for sql, _ in uniones)
+        query += ") AS m ORDER BY fecha DESC LIMIT %s"
+        valores = [p for _, params in uniones for p in params] + [limite]
 
         cursor.execute(query, tuple(valores))
         return cursor.fetchall()

@@ -55,3 +55,43 @@ def test_clasificar_orden():
 def test_ordenes_de_pago():
     assert wh.ordenes_de_pago({"order": {"id": 7}}) == ["7"]
     assert wh.ordenes_de_pago({}) == []
+
+
+def test_dedup_aviso_solo_una_vez(monkeypatch):
+    vistos = set()
+
+    class Cur:
+        rowcount = 0
+
+        def execute(self, q, p=None):
+            q = " ".join(q.split())
+            if q.startswith("INSERT IGNORE"):
+                if p in vistos:
+                    self.rowcount = 0
+                else:
+                    vistos.add(p)
+                    self.rowcount = 1
+            elif q.startswith("SELECT 1"):
+                self._uno = [("1",)] if p in vistos else []
+
+        def fetchone(self):
+            return self._uno[0] if self._uno else None
+
+        def close(self):
+            pass
+
+    class DB:
+        def cursor(self):
+            return Cur()
+
+        def commit(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(wh, "_get_conn", lambda: DB())
+    assert wh.ya_avisado("payment", "1", "pagada") is False
+    wh.marcar_aviso("payment", "1", "pagada")
+    assert wh.ya_avisado("payment", "1", "pagada") is True
+    assert wh.ya_avisado("payment", "1", "cancelada") is False
