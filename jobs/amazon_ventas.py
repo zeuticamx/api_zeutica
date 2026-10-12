@@ -483,12 +483,19 @@ def aplicar_ventas(agrupadas: list, dry_run: bool) -> dict:
 
 # ---------- Orquestador ----------
 
-async def run_job(dry_run: bool | None = None, motivo: str = "manual") -> dict:
+async def run_job(dry_run: bool | None = None, motivo: str = "manual", telegram: bool = True) -> dict:
     """Ejecuta el ciclo completo. Nunca truena sin dejar rastro en LAST_RUN."""
     import mov_reg
     from servicios.telegram.notificacion import send_telegram_alert
     dry = _dry_run_default() if dry_run is None else dry_run
     resumen = {"motivo": motivo, "dry_run": dry, "inicio": datetime.now(CDMX).isoformat()}
+
+    async def avisar(texto: str):
+        if telegram:
+            try:
+                await send_telegram_alert(texto)
+            except Exception as err:
+                print(f"Job Amazon: falló un envío a Telegram (sigue con el resto): {err}")
     try:
         from jobs.schema_ventas import verificar_esquema_job
         verificar_esquema_job()
@@ -497,7 +504,7 @@ async def run_job(dry_run: bool | None = None, motivo: str = "manual") -> dict:
             rep = await solicitar_y_esperar_reporte(client, token)
         if rep.get("accion") != "descargar":
             if rep.get("mensaje_html"):
-                await send_telegram_alert(rep["mensaje_html"])
+                await avisar(rep["mensaje_html"])
             resumen.update({"estado": rep["accion"], "reporte": rep})
         else:
             async with httpx.AsyncClient(timeout=30.0) as client:
@@ -508,7 +515,7 @@ async def run_job(dry_run: bool | None = None, motivo: str = "manual") -> dict:
             agrupadas = agrupar_lineas(lineas, costos, existentes, registro, ordenes)
             stats = aplicar_ventas(agrupadas, dry)
             for chunk in build_resumen(agrupadas):
-                await send_telegram_alert(chunk)
+                await avisar(chunk)
             try:
                 mov_reg.registrar_movimiento(
                     "job-amazon",
@@ -523,11 +530,7 @@ async def run_job(dry_run: bool | None = None, motivo: str = "manual") -> dict:
     except Exception as err:
         resumen.update({"estado": "error", "error": str(err)})
         print(f"Job Amazon error: {err}")
-        try:
-            from servicios.telegram.notificacion import send_telegram_alert as _tg
-            await _tg(f"⚠️ <b>Job Amazon falló</b>\n\n<code>{html.escape(str(err))}</code>")
-        except Exception:
-            pass
+        await avisar(f"⚠️ <b>Job Amazon falló</b>\n\n<code>{html.escape(str(err))}</code>")
     resumen["fin"] = datetime.now(CDMX).isoformat()
     LAST_RUN.clear()
     LAST_RUN.update(resumen)

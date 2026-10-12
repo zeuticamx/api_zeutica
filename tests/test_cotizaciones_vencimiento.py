@@ -9,21 +9,17 @@ def _c(cod, empresa, fecha, factura=None):
             "fecha_vencimiento": fecha, "relacion_factura": factura}
 
 
-def test_parte_vencidas_proximas_y_facturadas_fuera():
+def test_solo_fecha_exacta_hoy_mas_3():
     hoy = date(2026, 10, 8)
-    v, p = job.partir(
-        [_c("A", "E1", "2026-10-05"), _c("B", "E2", "2026-10-10"),
-         _c("C", "E3", "2026-12-01"), _c("D", "E4", "2026-10-05", factura="F-1")], hoy)
-    assert [o["codigo_cotizacion"] for o in v] == ["A"]
-    assert [o["codigo_cotizacion"] for o in p] == ["B"]
+    filas = job.proximas_3dias(
+        [_c("A", "E1", "2026-10-11"), _c("B", "E2", "2026-10-09"),
+         _c("C", "E3", "2026-10-05"), _c("D", "E4", "2026-10-11", factura="F-1"),
+         _c("E", "E5", None)], hoy)
+    assert [o["codigo_cotizacion"] for o in filas] == ["A"]
 
 
 def test_mensaje_agrupado():
-    chunks = job.build_mensaje([_c("A", "E1", "2026-10-05")], [_c("B", "E2", "2026-10-09")])
-    texto = "\n".join(chunks)
-    assert "Vencidas sin factura (1)" in texto and "Vencen en 3 días (1)" in texto
-    assert "<code>A</code>" in texto and "05/10" in texto
-
-
-def test_mensaje_sin_pendientes():
-    assert "Sin cotizaciones" in "\n".join(job.build_mensaje([], []))
+    filas = [_c("A", "E1", "2026-10-11"), _c("B", "E2", "2026-10-11")]
+    texto = "\n".join(job.build_mensaje(filas))
+    assert "vencen en 3 d" in texto and "(2)" in texto
+    assert "<code>A</code>" in texto and "11/10" in texto

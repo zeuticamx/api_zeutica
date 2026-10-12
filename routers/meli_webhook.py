@@ -154,15 +154,18 @@ def ordenes_de_pago(pago: dict) -> list:
 
 
 async def _sincronizar_con_cooldown(motivo: str):
-    """Sync 72h idempotente, sin Telegram. Coalesce si hubo uno hace poco."""
+    """Sync 72h idempotente, sin Telegram. Lock compartido + coalesce si hubo uno hace poco."""
     global _ultimo_sync
-    from jobs import meli_ventas
+    from jobs import meli_ventas, _ejecucion
     ahora = time.monotonic()
     if ahora - _ultimo_sync < COOLDOWN_SEG:
         print(f"Webhook MeLi: sync reciente, se omite ({motivo})")
         return {"estado": "omitido_cooldown"}
     _ultimo_sync = ahora
-    return await meli_ventas.run_job(dry_run=False, motivo=motivo, telegram=False)
+    res = await _ejecucion.ejecutar(meli_ventas, dry_run=False, motivo=motivo, telegram=False)
+    if res.get("estado") == "ocupado":
+        print(f"Webhook MeLi: job en curso, se omite ({motivo})")
+    return res
 
 
 async def _procesar(topic: str | None, rid: str | None, firma_ok: bool):

@@ -96,6 +96,15 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"❌ No se pudo migrar devoluciones: {e}")
 
+    # Dedupe + llave única de clientes_potenciales (el INSERT IGNORE no servía sin ella).
+    try:
+        from jobs import schema_potenciales
+        rep = schema_potenciales.asegurar_tabla_potenciales()
+        if rep["tabla_creada"] or rep["duplicados_eliminados"] or rep["indice_creado"]:
+            print(f"📦 Migración clientes_potenciales: {rep}")
+    except Exception as e:
+        print(f"❌ No se pudo migrar clientes_potenciales: {e}")
+
     # Índices por fecha para /inventario/movimientos (sin full-scan).
     try:
         from routers.inventario import asegurar_indices_inventario
@@ -121,13 +130,16 @@ async def lifespan(app: FastAPI):
             from apscheduler.schedulers.asyncio import AsyncIOScheduler
             from apscheduler.triggers.cron import CronTrigger
             from zoneinfo import ZoneInfo
-            from jobs import amazon_ventas
+            from jobs import amazon_ventas, _ejecucion
 
             hora = os.getenv("AMAZON_JOB_HORA", "12:22")
             hh, mm = (hora.split(":") + ["0"])[:2]
             scheduler = AsyncIOScheduler(timezone=ZoneInfo("America/Mexico_City"))
-            scheduler.add_job(amazon_ventas.run_job, CronTrigger(hour=int(hh), minute=int(mm)),
-                              kwargs={"motivo": "scheduler"}, id="amazon_ventas", replace_existing=True,
+            # Zona explícita también en cada trigger: sin esto APScheduler 3.x
+            # evalúa en la zona local del contenedor (UTC en Easypanel = -6h).
+            TZ_CDMX = ZoneInfo("America/Mexico_City")
+            scheduler.add_job(_ejecucion.ejecutar, CronTrigger(hour=int(hh), minute=int(mm), timezone=TZ_CDMX),
+                              kwargs={"modulo": amazon_ventas, "motivo": "scheduler"}, id="amazon_ventas", replace_existing=True,
                               misfire_grace_time=600, coalesce=True, max_instances=1)
             scheduler.start()
             app.state.amazon_scheduler = scheduler
@@ -137,8 +149,8 @@ async def lifespan(app: FastAPI):
                 if os.getenv("MELI_JOB_ENABLED", "1") == "1":
                     mh = os.getenv("MELI_JOB_HORA", "12:05")
                     mhh, mmm = (mh.split(":") + ["0"])[:2]
-                    scheduler.add_job(meli_ventas.run_job, CronTrigger(hour=int(mhh), minute=int(mmm)),
-                                      kwargs={"motivo": "scheduler"}, id="meli_ventas", replace_existing=True,
+                    scheduler.add_job(_ejecucion.ejecutar, CronTrigger(hour=int(mhh), minute=int(mmm), timezone=TZ_CDMX),
+                                      kwargs={"modulo": meli_ventas, "motivo": "scheduler"}, id="meli_ventas", replace_existing=True,
                                       misfire_grace_time=600, coalesce=True, max_instances=1)
                     print(f"⏰ Job MeLi programado a las {int(mhh):02d}:{int(mmm):02d} America/Mexico_City.")
             except Exception as e:
@@ -149,8 +161,8 @@ async def lifespan(app: FastAPI):
                 if os.getenv("MELI_STOCK_ENABLED", "1") == "1":
                     sh = os.getenv("MELI_STOCK_HORA", "20:00")
                     shh, smm = (sh.split(":") + ["0"])[:2]
-                    scheduler.add_job(meli_stock.run_job, CronTrigger(hour=int(shh), minute=int(smm)),
-                                      kwargs={"motivo": "scheduler"}, id="meli_stock", replace_existing=True,
+                    scheduler.add_job(_ejecucion.ejecutar, CronTrigger(hour=int(shh), minute=int(smm), timezone=TZ_CDMX),
+                                      kwargs={"modulo": meli_stock, "motivo": "scheduler"}, id="meli_stock", replace_existing=True,
                                       misfire_grace_time=600, coalesce=True, max_instances=1)
                     print(f"⏰ Job stock MeLi programado a las {int(shh):02d}:{int(smm):02d} America/Mexico_City.")
             except Exception as e:
@@ -161,8 +173,8 @@ async def lifespan(app: FastAPI):
                 if os.getenv("CLEANEST_JOB_ENABLED", "1") == "1":
                     ch = os.getenv("CLEANEST_JOB_HORA", "11:00")
                     chh, cmm = (ch.split(":") + ["0"])[:2]
-                    scheduler.add_job(cleanest_recordatorios.run_job, CronTrigger(hour=int(chh), minute=int(cmm)),
-                                      kwargs={"motivo": "scheduler"}, id="cleanest", replace_existing=True,
+                    scheduler.add_job(_ejecucion.ejecutar, CronTrigger(hour=int(chh), minute=int(cmm), timezone=TZ_CDMX),
+                                      kwargs={"modulo": cleanest_recordatorios, "motivo": "scheduler"}, id="cleanest", replace_existing=True,
                                       misfire_grace_time=600, coalesce=True, max_instances=1)
                     print(f"⏰ Job Cleanest programado a las {int(chh):02d}:{int(cmm):02d} America/Mexico_City.")
             except Exception as e:
@@ -173,8 +185,8 @@ async def lifespan(app: FastAPI):
                 if os.getenv("MELI_FULL_ENABLED", "1") == "1":
                     fh = os.getenv("MELI_FULL_HORA", "10:30")
                     fhh, fmm = (fh.split(":") + ["0"])[:2]
-                    scheduler.add_job(meli_full_stock.run_job, CronTrigger(hour=int(fhh), minute=int(fmm)),
-                                      kwargs={"motivo": "scheduler"}, id="meli_full", replace_existing=True,
+                    scheduler.add_job(_ejecucion.ejecutar, CronTrigger(hour=int(fhh), minute=int(fmm), timezone=TZ_CDMX),
+                                      kwargs={"modulo": meli_full_stock, "motivo": "scheduler"}, id="meli_full", replace_existing=True,
                                       misfire_grace_time=600, coalesce=True, max_instances=1)
                     print(f"⏰ Job Full programado a las {int(fhh):02d}:{int(fmm):02d} America/Mexico_City.")
             except Exception as e:
@@ -184,8 +196,8 @@ async def lifespan(app: FastAPI):
                 if os.getenv("COTIZ_JOB_ENABLED", "1") == "1":
                     th = os.getenv("COTIZ_JOB_HORA", "09:30")
                     thh, tmm = (th.split(":") + ["0"])[:2]
-                    scheduler.add_job(cotizaciones_vencimiento.run_job, CronTrigger(hour=int(thh), minute=int(tmm)),
-                                      kwargs={"motivo": "scheduler"}, id="cotizaciones", replace_existing=True,
+                    scheduler.add_job(_ejecucion.ejecutar, CronTrigger(hour=int(thh), minute=int(tmm), timezone=TZ_CDMX),
+                                      kwargs={"modulo": cotizaciones_vencimiento, "motivo": "scheduler"}, id="cotizaciones", replace_existing=True,
                                       misfire_grace_time=600, coalesce=True, max_instances=1)
                     print(f"⏰ Job cotizaciones programado a las {int(thh):02d}:{int(tmm):02d} America/Mexico_City.")
             except Exception as e:
@@ -195,12 +207,20 @@ async def lifespan(app: FastAPI):
                 if os.getenv("COTIZV_JOB_ENABLED", "1") == "1":
                     vh = os.getenv("COTIZV_JOB_HORA", "13:00")
                     vhh, vmm = (vh.split(":") + ["0"])[:2]
-                    scheduler.add_job(cotizaciones_por_vender.run_job, CronTrigger(hour=int(vhh), minute=int(vmm)),
-                                      kwargs={"motivo": "scheduler"}, id="cotizaciones_vender", replace_existing=True,
+                    scheduler.add_job(_ejecucion.ejecutar, CronTrigger(hour=int(vhh), minute=int(vmm), timezone=TZ_CDMX),
+                                      kwargs={"modulo": cotizaciones_por_vender, "motivo": "scheduler"}, id="cotizaciones_vender", replace_existing=True,
                                       misfire_grace_time=600, coalesce=True, max_instances=1)
                     print(f"⏰ Job por-vender programado a las {int(vhh):02d}:{int(vmm):02d} America/Mexico_City.")
             except Exception as e:
                 print(f"❌ No se pudo programar el job por-vender: {e}")
+            # Verificación visible en logs: próxima corrida de cada job en hora CDMX.
+            try:
+                for jb in scheduler.get_jobs():
+                    nxt = jb.next_run_time
+                    print(f"⏰ {jb.id}: próxima corrida "
+                          f"{nxt.astimezone(TZ_CDMX).isoformat() if nxt else 'sin programar'}")
+            except Exception as e:
+                print(f"⚠️ No se pudo listar próximas corridas: {e}")
         except ImportError:
             print("⚠️ apscheduler no instalado: job Amazon solo manual (pip install apscheduler).")
         except Exception as e:

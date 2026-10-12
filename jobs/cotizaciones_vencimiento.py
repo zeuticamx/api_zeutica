@@ -36,21 +36,14 @@ def _fecha(d):
         return None
 
 
-def partir(ordenes: list, hoy: date, dias: int = 3) -> tuple:
-    """(vencidas, proximas): sin factura. Vencidas = fecha < hoy; próximas = hoy..hoy+días."""
-    vencidas, proximas = [], []
-    for o in ordenes:
-        if o.get("relacion_factura"):
-            continue
-        f = _fecha(o.get("fecha_vencimiento"))
-        if not f:
-            continue
-        if f < hoy:
-            vencidas.append(o)
-        elif f <= hoy + timedelta(days=dias):
-            proximas.append(o)
-    key = lambda o: str(_fecha(o.get("fecha_vencimiento")))
-    return sorted(vencidas, key=key), sorted(proximas, key=key)
+def proximas_3dias(ordenes: list, hoy: date) -> list:
+    """Solo las que vencen exactamente en 3 días y sin factura (como n8n).
+    Vencidas se ignoran."""
+    objetivo = hoy + timedelta(days=3)
+    return sorted(
+        [o for o in ordenes
+         if _fecha(o.get("fecha_vencimiento")) == objetivo and not o.get("relacion_factura")],
+        key=lambda o: str(o.get("numero_orden")))
 
 
 def linea(o) -> str:
@@ -62,16 +55,9 @@ def linea(o) -> str:
             f"vence {ddmm}")
 
 
-def build_mensaje(vencidas: list, proximas: list) -> list:
-    out = ["📋 <b>Cotizaciones por vencer / vencidas</b>"]
-    if vencidas:
-        out.append(f"\n🚨 <b>Vencidas sin factura ({len(vencidas)}):</b>")
-        out += [linea(o) for o in vencidas]
-    if proximas:
-        out.append(f"\n📦 <b>Vencen en 3 días ({len(proximas)}):</b>")
-        out += [linea(o) for o in proximas]
-    if not vencidas and not proximas:
-        out.append("\nSin cotizaciones vencidas ni próximas a vencer sin factura.")
+def build_mensaje(filas: list) -> list:
+    out = [f"📋 <b>Cotizaciones que vencen en 3 días ({len(filas)})</b>"]
+    out += [linea(o) for o in filas]
     chunks, cur = [], ""
     for ln in out:
         if cur and len(cur) + 1 + len(ln) > 3800:
@@ -95,9 +81,9 @@ def cargar_cotizaciones() -> list:
     try:
         cur.execute(
             """SELECT codigo_cotizacion, empresa, fecha_vencimiento, relacion_factura FROM cotizaciones
-               WHERE fecha_vencimiento < DATE_ADD(CURDATE(), INTERVAL 4 DAY)
+               WHERE DATE(fecha_vencimiento) = DATE_ADD(CURDATE(), INTERVAL 3 DAY)
                  AND (relacion_factura IS NULL OR relacion_factura = '')
-               ORDER BY fecha_vencimiento""")
+               ORDER BY codigo_cotizacion""")
         return cur.fetchall()
     finally:
         cur.close()
@@ -112,26 +98,25 @@ async def run_job(dry_run: bool | None = None, motivo: str = "manual", telegram:
     hoy = datetime.now(CDMX).date()
     resumen = {"motivo": motivo, "inicio": datetime.now(CDMX).isoformat()}
     try:
-        vencidas, proximas = partir(cargar_cotizaciones(), hoy)
-        stats = {"vencidas": len(vencidas), "proximas": len(proximas)}
-        if vencidas or proximas:
-            for chunk in build_mensaje(vencidas, proximas):
+        filas = proximas_3dias(cargar_cotizaciones(), hoy)
+        stats = {"proximas": len(filas)}
+        if filas:
+            for chunk in build_mensaje(filas):
                 if telegram:
                     await send_telegram_alert(chunk)
             try:
                 import notificaciones_service
                 await notificaciones_service.crear_y_notificar_todos(
-                    "Cotizaciones por vencer",
-                    f"{len(vencidas)} vencidas y {len(proximas)} por vencer en 3 días, sin factura.",
-                    "warn" if vencidas else "info")
+                    "Cotizaciones vencen en 3 días",
+                    f"{len(filas)} cotizaciones sin factura vencen en 3 días.",
+                    "info")
             except Exception as err:
                 print(f"Job cotizaciones: falló persistir notificaciones: {err}")
         else:
             stats["sin_pendientes"] = True
         try:
             mov_reg.registrar_movimiento(
-                "job-cotizaciones", f"Vencimientos {motivo}: {stats['vencidas']} vencidas, "
-                f"{stats['proximas']} próximas", "Cotizaciones")
+                "job-cotizaciones", f"Vencimientos {motivo}: {stats['proximas']} próximas a 3 días", "Cotizaciones")
         except Exception as err:
             print(f"Job cotizaciones: falló bitácora: {err}")
         resumen.update({"estado": "ok", "stats": stats})

@@ -19,7 +19,7 @@ def _app():
 def test_run_responde_202_y_segundo_intento_es_409():
     import time
 
-    async def fake_run(dry_run=None, motivo=""):
+    async def fake_run(dry_run=None, motivo="", telegram=True):
         await asyncio.sleep(3)
         amazon_ventas.LAST_RUN.clear()
         amazon_ventas.LAST_RUN.update({"estado": "ok", "motivo": motivo})

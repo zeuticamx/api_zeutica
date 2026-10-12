@@ -21,17 +21,15 @@ router = APIRouter(tags=["/jobs"], responses={404: {"Mensaje": "No encontrado"}}
 _CDMX = ZoneInfo("America/Mexico_City")
 
 
-def _lanzar(modulo, dry_run, motivo: str, nombre: str):
-    """Marca running y dispara el job en background. 409 si ya hay uno en curso."""
-    if modulo.LAST_RUN.get("estado") == "running":
+def _lanzar(modulo, dry_run, motivo: str, nombre: str, telegram: bool = True):
+    """Responde 202 y dispara en background. 409 si ya hay uno en curso (lock compartido)."""
+    from jobs import _ejecucion
+    if _ejecucion.en_curso(modulo):
         raise HTTPException(status_code=409, detail=f"Job {nombre} ya en curso, espera a que termine")
-    modulo.LAST_RUN.clear()
-    modulo.LAST_RUN.update({"estado": "running", "motivo": motivo,
-                            "inicio": datetime.now(_CDMX).isoformat()})
 
     async def _fondo():
         try:
-            await modulo.run_job(dry_run=dry_run, motivo=motivo)
+            await _ejecucion.ejecutar(modulo, dry_run=dry_run, motivo=motivo, telegram=telegram)
         except Exception as err:
             print(f"Job {nombre} falló en background: {err}")
             modulo.LAST_RUN.clear()
