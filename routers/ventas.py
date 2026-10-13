@@ -34,7 +34,7 @@ async def consultar_ventas(f1: date, f2: date):
 
     # Rango semiabierto [f1, f2 + 1 día) en lugar de DATE(fecha_registro) BETWEEN:
     # incluye todo el día final y permite usar un índice sobre fecha_registro.
-    query = "SELECT * FROM ventasRegistro WHERE estatus = 'activa' AND fecha_registro >= %s AND fecha_registro < %s ORDER BY fecha_registro DESC"
+    query = "SELECT * FROM ventasRegistro WHERE fecha_registro >= %s AND fecha_registro < %s ORDER BY fecha_registro DESC"
 
     try:
         cursor.execute(query, (f1, f2 + timedelta(days=1)))

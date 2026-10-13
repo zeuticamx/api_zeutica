@@ -150,10 +150,13 @@ async def movimientos_inventario(
                 params.append(hasta)
             return (" AND " + " AND ".join(conds) if conds else "", params)
 
+        tiene_estatus = "estatus" in cols_ventas
+        tipo_venta = (f"CASE WHEN estatus = 'cancelada' THEN 'venta_cancelada' ELSE 'venta' END"
+                      if tiene_estatus else "'venta'")
         ramas = [
-            (f"""SELECT fecha_registro AS fecha, 'venta' AS tipo, sku, (0 - cantidad) AS cantidad,
+            (f"""SELECT fecha_registro AS fecha, {tipo_venta} AS tipo, sku, (0 - cantidad) AS cantidad,
                     CAST(id_ventas AS CHAR) AS folio, usuario, plataforma AS detalle
-                FROM ventasRegistro WHERE {"estatus = 'activa'" if "estatus" in cols_ventas else "1=1"}""", "fecha_registro", ("venta",)),
+                FROM ventasRegistro WHERE 1=1""", "fecha_registro", ("venta", "venta_cancelada")),
             (f"""SELECT fecha_registro AS fecha, {tipo_stock} AS tipo, sku, cantidad,
                     NULL AS folio, usuario, {almacen_expr} AS detalle
                 FROM stock_actual WHERE 1=1""", "fecha_registro", ("baja", "traspaso")),

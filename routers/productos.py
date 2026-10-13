@@ -465,6 +465,118 @@ async def editar_ubicacion(id: str, datos: UbicacionEditSchema):
         cursor.close()
         conn.close()
 
+class TraspasoUbicacionSchema(BaseModel):
+    """Traspaso informativo entre tarjetas del MISMO sku: origen -N, destino +N.
+    Nunca toca productos/stock_bodega ni los traspasos FULL/Amazon."""
+    sku: str = Field(min_length=1, max_length=100)
+    origen_id: int = Field(gt=0)
+    destino_id: int = Field(gt=0)
+    cantidad: int = Field(gt=0)
+    usuario: str = Field(min_length=1)
+    nota: Optional[str] = Field(None, max_length=255)
+
+
+def asegurar_tabla_traspasos_ubicacion(cursor):
+    """Bitácora de traspasos entre tarjetas. Idempotente (CREATE IF NOT EXISTS)."""
+    cursor.execute(
+        """CREATE TABLE IF NOT EXISTS ubicaciones_traspasos (
+          id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+          sku VARCHAR(100) NOT NULL,
+          origen_id INT NOT NULL,
+          origen_warehouse_id VARCHAR(100) NOT NULL,
+          destino_id INT NOT NULL,
+          destino_warehouse_id VARCHAR(100) NOT NULL,
+          cantidad INT NOT NULL,
+          usuario VARCHAR(50) NOT NULL,
+          nota VARCHAR(255) NULL,
+          fecha DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          INDEX idx_ubi_trasp_sku_fecha (sku, fecha)
+        )"""
+    )
+
+
+@router.post("/ubicaciones/traspaso")
+async def traspasar_entre_ubicaciones(datos: TraspasoUbicacionSchema):
+    """
+    Mueve cantidad entre dos tarjetas del mismo sku (origen -N, destino +N)
+    y deja el registro en ubicaciones_traspasos. Todo en una transacción.
+    Solo informativo: no toca productos ni los traspasos FULL/Amazon.
+    """
+    if datos.origen_id == datos.destino_id:
+        raise HTTPException(status_code=422, detail="El origen y el destino deben ser tarjetas diferentes")
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        asegurar_tabla_traspasos_ubicacion(cursor)
+        cursor.execute("SELECT id, sku, warehouse_id, cantidad FROM stock_ubicacion WHERE id = %s FOR UPDATE", (datos.origen_id,))
+        origen = cursor.fetchone()
+        if not origen:
+            conn.rollback()
+            raise HTTPException(status_code=404, detail=f"No existe la tarjeta origen con id '{datos.origen_id}'")
+        cursor.execute("SELECT id, sku, warehouse_id, cantidad FROM stock_ubicacion WHERE id = %s FOR UPDATE", (datos.destino_id,))
+        destino = cursor.fetchone()
+        if not destino:
+            conn.rollback()
+            raise HTTPException(status_code=404, detail=f"No existe la tarjeta destino con id '{datos.destino_id}'")
+        if (origen["sku"] or "") != datos.sku or (destino["sku"] or "") != datos.sku:
+            conn.rollback()
+            raise HTTPException(status_code=422, detail=f"El traspaso es solo entre tarjetas del mismo SKU '{datos.sku}'")
+        stock_origen = origen["cantidad"] if origen["cantidad"] is not None else 0
+        if stock_origen < datos.cantidad:
+            conn.rollback()
+            raise HTTPException(status_code=422, detail=f"Stock insuficiente en origen: disponible {stock_origen}, solicitado {datos.cantidad}")
+        stock_destino = destino["cantidad"] if destino["cantidad"] is not None else 0
+        nuevo_origen = stock_origen - datos.cantidad
+        nuevo_destino = stock_destino + datos.cantidad
+        cursor.execute("UPDATE stock_ubicacion SET cantidad = %s WHERE id = %s", (nuevo_origen, datos.origen_id))
+        cursor.execute("UPDATE stock_ubicacion SET cantidad = %s WHERE id = %s", (nuevo_destino, datos.destino_id))
+        nota = (datos.nota or "").strip() or None
+        cursor.execute(
+            "INSERT INTO ubicaciones_traspasos (sku, origen_id, origen_warehouse_id, destino_id, destino_warehouse_id, cantidad, usuario, nota)"
+            " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
+            (datos.sku, datos.origen_id, origen["warehouse_id"], datos.destino_id, destino["warehouse_id"], datos.cantidad, datos.usuario, nota),
+        )
+        conn.commit()
+        mov_reg.registrar_movimiento(datos.usuario, f"Traspasó {datos.cantidad} de '{datos.sku}' de {origen['warehouse_id']} a {destino['warehouse_id']}", "Productos")
+        return {
+            "mensaje": "Traspaso registrado",
+            "sku": datos.sku,
+            "cantidad": datos.cantidad,
+            "origen": {"id": datos.origen_id, "warehouse_id": origen["warehouse_id"], "cantidad": nuevo_origen},
+            "destino": {"id": datos.destino_id, "warehouse_id": destino["warehouse_id"], "cantidad": nuevo_destino},
+        }
+
+    except mysql.connector.Error as err:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
+
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.get("/ubicaciones/traspasos/{sku}")
+async def historial_traspasos_ubicaciones(sku: str):
+    """
+    Historial informativo de traspasos entre tarjetas de un SKU.
+    Vacío devuelve [] (no 404) para no ensuciar la vista con errores.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        asegurar_tabla_traspasos_ubicacion(cursor)
+        cursor.execute("SELECT * FROM ubicaciones_traspasos WHERE sku = %s ORDER BY fecha DESC, id DESC", (sku,))
+        return cursor.fetchall()
+
+    except mysql.connector.Error as err:
+        raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
+
+    finally:
+        cursor.close()
+        conn.close()
+
 class DevolucionSchema(BaseModel):
     """Modelo para registrar una devolución de producto"""
     sku: str

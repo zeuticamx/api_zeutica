@@ -96,6 +96,16 @@ def test_movimientos_tolera_esquema_viejo(monkeypatch):
     assert "almacen" not in query
 
 
+def test_movimientos_marca_venta_cancelada(monkeypatch):
+    base = FakeDB([], {"almacen", "usuario", "estatus"})
+    monkeypatch.setattr(inventario, "get_db_connection", lambda: base)
+    with _app() as client:
+        r = client.get("/inventario/movimientos")
+    assert r.status_code == 200, r.text
+    (query, _), = [(q, p) for q, p in base.cursor_obj.ejecutados if "UNION ALL" in q]
+    assert "venta_cancelada" in query
+
+
 def test_migracion_devolucion_agrega_usuario(monkeypatch):
     base = FakeDB(columnas={"sku", "producto"})
     monkeypatch.setattr(productos, "get_db_connection", lambda: base)

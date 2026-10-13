@@ -408,11 +408,11 @@ def test_producto_venta_stock_insuficiente_devuelve_400(client, db):
     assert db.registradas == []
 
 
-def test_reportes_y_credito_excluyen_canceladas(client, db):
+def test_reportes_incluye_canceladas_con_marca(client, db):
     db.ventas = []
     client.get("/ventas/2026-09-01/2026-09-30")
     (query, _), = db.consultas("SELECT * FROM ventasRegistro")
-    assert "estatus = 'activa'" in query
+    assert "estatus" not in query  # el listado trae todas; el filtro vive en métricas
 
 
 def test_producto_venta_persiste_aviso_en_tabla(client, db, monkeypatch):
