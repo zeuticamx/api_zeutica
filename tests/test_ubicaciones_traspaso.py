@@ -35,6 +35,11 @@ class FakeCursor:
             self.rowcount = 1
         elif q.startswith("SELECT * FROM ubicaciones_traspasos WHERE sku"):
             self._resultado = [dict(f) for f in db.historial if f["sku"] == params[0]]
+        elif "FROM stock_ubicacion s LEFT JOIN productos p" in q:
+            filas = db.reporte_filas
+            if "WHERE s.sku = %s" in q:
+                filas = [f for f in filas if f["sku"] == params[0]]
+            self._resultado = [dict(f) for f in filas]
 
     def fetchone(self):
         return self._resultado[0] if self._resultado else None
@@ -63,6 +68,11 @@ class FakeDB:
         self.ejecutados = []
         self.commits = 0
         self.rollbacks = 0
+        self.reporte_filas = [
+            {"sku": "ESPFARBLA", "warehouse_id": "CEDIS-A1", "cama": 1, "cantidad": 5, "nombre": "Esponja Farbla"},
+            {"sku": "BOLECO17", "warehouse_id": "CEDIS-B2", "cama": 0, "cantidad": 3, "nombre": "Bolsa Eco"},
+            {"sku": "GELALC-250", "warehouse_id": "Oficina", "cama": 0, "cantidad": 7, "nombre": "Gel"},
+        ]
 
     def cursor(self, dictionary=False):
         return FakeCursor(self)
@@ -155,3 +165,50 @@ def test_historial_por_sku_y_vacio_da_lista_vacia(client, db):
     assert r.status_code == 200 and r.json() == db.historial
     r = client.get("/ubicaciones/traspasos/SIN-NADA")
     assert r.status_code == 200 and r.json() == []
+
+
+def test_multiplos_no_divergen_del_panel():
+    # Espejo de MULTIPLOS_POR_SKU en panel_gerencia/src/ubicaciones-logica.js.
+    assert productos.MULTIPLOS_UBICACIONES_POR_SKU == {
+        "CUBMANBLA": 20, "CUBBARBLA": 20, "BOLECO17": 20, "BOLECO38": 5, "ESPFARBLA": 1,
+    }
+    assert productos.MULTIPLO_UBICACIONES_DEFAULT == 10
+    assert productos.multiplo_ubicacion("espfarbla", "CEDIS-A1") == 1
+    assert productos.multiplo_ubicacion("BOLECO17", "Oficina") == 1
+    assert productos.multiplo_ubicacion("X", "CEDIS-E5") == 10
+
+
+def _libro(r):
+    import io
+    import openpyxl
+    assert r.status_code == 200
+    assert "spreadsheet" in r.headers["content-type"]
+    return openpyxl.load_workbook(io.BytesIO(r.content)).active
+
+
+def test_reporte_conteo_xlsx_con_formulas_y_multiplos(client, db):
+    ws = _libro(client.get("/ubicaciones/reporte-conteo"))
+    assert [c.value for c in ws[3]] == ["SKU", "Producto", "Ubicación", "Cama",
+                                        "Cant. sistema (bultos)", "Múltiplo", "Piezas sistema (ref)",
+                                        "Conteo 1", "Conteo 2", "Diferencia", "Observaciones"]
+    filas = {ws.cell(row=i, column=1).value: i for i in range(4, 7)}
+    assert ws.cell(row=filas["ESPFARBLA"], column=6).value == 1
+    assert ws.cell(row=filas["ESPFARBLA"], column=7).value == 5
+    assert ws.cell(row=filas["BOLECO17"], column=6).value == 20
+    assert ws.cell(row=filas["BOLECO17"], column=7).value == 60
+    assert ws.cell(row=filas["GELALC-250"], column=6).value == 1  # Oficina siempre x1
+    for i in range(4, 7):
+        dif = ws.cell(row=i, column=10).value
+        assert isinstance(dif, str) and dif.startswith("=IF(") and f"H{i}-E{i}" in dif
+        assert ws.cell(row=i, column=8).value in (None, "")
+    assert ws.cell(row=7, column=1).value == "TOTALES"
+    assert ws.cell(row=7, column=5).value == "=SUM(E4:E6)"
+    assert "todos" in client.get("/ubicaciones/reporte-conteo").headers["content-disposition"]
+
+
+def test_reporte_conteo_filtra_por_sku(client, db):
+    r = client.get("/ubicaciones/reporte-conteo", params={"sku": "ESPFARBLA"})
+    ws = _libro(r)
+    assert ws.cell(row=4, column=1).value == "ESPFARBLA"
+    assert ws.cell(row=5, column=1).value == "TOTALES"
+    assert "ESPFARBLA" in r.headers["content-disposition"]

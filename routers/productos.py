@@ -1,7 +1,12 @@
 # fichero api de productos
+import io
 import mysql.connector, html, asyncio
+from datetime import datetime
 from pydantic import BaseModel, Field
 from fastapi import APIRouter, HTTPException
+from fastapi.responses import StreamingResponse
+import openpyxl
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 import os, mov_reg
 from dotenv import load_dotenv
 from typing import Optional
@@ -576,6 +581,123 @@ async def historial_traspasos_ubicaciones(sku: str):
     finally:
         cursor.close()
         conn.close()
+
+
+# Múltiplos bulto->pieza para el reporte de conteo cíclico.
+# ESPEJO de MULTIPLOS_POR_SKU en panel_gerencia/src/ubicaciones-logica.js:
+# si se agrega un SKU allá, agregarlo aquí (y viceversa). El test
+# test_ubicaciones_traspaso.py fija los valores para que no diverjan.
+MULTIPLO_UBICACIONES_DEFAULT = 10
+MULTIPLOS_UBICACIONES_POR_SKU = {
+    "CUBMANBLA": 20,
+    "CUBBARBLA": 20,
+    "BOLECO17": 20,
+    "BOLECO38": 5,
+    "ESPFARBLA": 1,
+}
+
+
+def multiplo_ubicacion(sku, warehouse_id) -> int:
+    """Mismo criterio que obtenerMultiplo() del panel: Oficina siempre x1."""
+    if str(warehouse_id or "").strip().lower() == "oficina":
+        return 1
+    return MULTIPLOS_UBICACIONES_POR_SKU.get(str(sku or "").strip().upper(), MULTIPLO_UBICACIONES_DEFAULT)
+
+
+@router.get("/ubicaciones/reporte-conteo")
+async def reporte_conteo_ciclico(sku: Optional[str] = None):
+    """
+    Plantilla Excel para inventarios cíclicos: una fila por tarjeta con el
+    stock en sistema y columnas vacías para el conteo físico en bultos.
+    Sin ?sku= trae todo; con ?sku= solo ese SKU. La diferencia es fórmula.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        if sku:
+            cursor.execute(
+                "SELECT s.sku, s.warehouse_id, s.cama, s.cantidad, p.nombre"
+                " FROM stock_ubicacion s LEFT JOIN productos p ON p.sku = s.sku"
+                " WHERE s.sku = %s ORDER BY s.warehouse_id",
+                (sku,),
+            )
+        else:
+            cursor.execute(
+                "SELECT s.sku, s.warehouse_id, s.cama, s.cantidad, p.nombre"
+                " FROM stock_ubicacion s LEFT JOIN productos p ON p.sku = s.sku"
+                " ORDER BY s.sku, s.warehouse_id"
+            )
+        filas = cursor.fetchall()
+
+    except mysql.connector.Error as err:
+        raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
+
+    finally:
+        cursor.close()
+        conn.close()
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Conteo ciclico"
+    titulo = f"Conteo cíclico — {sku}" if sku else "Conteo cíclico — todas las ubicaciones"
+    ws["A1"] = titulo
+    ws["A1"].font = Font(bold=True, size=14)
+    ws["A2"] = f"Generado: {datetime.now().strftime('%Y-%m-%d %H:%M')} · Cantidades del sistema en bultos; el conteo físico se captura en bultos"
+    ws["A2"].font = Font(italic=True, size=10)
+
+    encabezados = ["SKU", "Producto", "Ubicación", "Cama", "Cant. sistema (bultos)",
+                   "Múltiplo", "Piezas sistema (ref)", "Conteo 1", "Conteo 2",
+                   "Diferencia", "Observaciones"]
+    fila_h = 3
+    gris = PatternFill("solid", fgColor="D9D9D9")
+    editable = PatternFill("solid", fgColor="FFF2CC")
+    borde_fino = Border(*(Side(style="thin", color="B0B0B0") for _ in ("l", "r", "t", "b")))
+    for col, texto in enumerate(encabezados, start=1):
+        celda = ws.cell(row=fila_h, column=col, value=texto)
+        celda.font = Font(bold=True)
+        celda.fill = gris
+        celda.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        celda.border = borde_fino
+
+    # Columnas editables (conteo + observaciones) en amarillo claro.
+    for i, fila in enumerate(filas, start=fila_h + 1):
+        cantidad = fila["cantidad"] if fila["cantidad"] is not None else 0
+        mult = multiplo_ubicacion(fila["sku"], fila["warehouse_id"])
+        valores = [fila["sku"], fila.get("nombre") or "", fila["warehouse_id"],
+                   fila["cama"] if fila["cama"] is not None else "",
+                   cantidad, mult, cantidad * mult, "", "", f'=IF(H{i}="","",H{i}-E{i})', ""]
+        for col, valor in enumerate(valores, start=1):
+            celda = ws.cell(row=i, column=col, value=valor)
+            celda.border = borde_fino
+            if col in (8, 9, 11):
+                celda.fill = editable
+
+    ultima = fila_h + len(filas)
+    ws.cell(row=ultima + 1, column=1, value="TOTALES").font = Font(bold=True)
+    for col in ("E", "G", "H", "I", "J"):
+        celda = ws.cell(row=ultima + 1, column=ord(col) - 64,
+                        value=f"=SUM({col}{fila_h + 1}:{col}{ultima})")
+        celda.font = Font(bold=True)
+        celda.border = borde_fino
+
+    anchos = [14, 34, 14, 8, 14, 9, 14, 11, 11, 11, 28]
+    for col, ancho in enumerate(anchos, start=1):
+        ws.column_dimensions[openpyxl.utils.get_column_letter(col)].width = ancho
+    ws.freeze_panes = f"A{fila_h + 1}"
+    ws.auto_filter.ref = f"A{fila_h}:K{ultima}"
+    ws.sheet_properties.pageSetUpPr = openpyxl.worksheet.properties.PageSetupProperties(fitToPage=True)
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    etiqueta = sku if sku else "todos"
+    nombre = f"conteo-ciclico-{etiqueta}-{datetime.now().strftime('%Y%m%d')}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={nombre}"},
+    )
 
 class DevolucionSchema(BaseModel):
     """Modelo para registrar una devolución de producto"""
