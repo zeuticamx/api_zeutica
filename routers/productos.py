@@ -532,22 +532,40 @@ async def traspasar_entre_ubicaciones(datos: TraspasoUbicacionSchema):
             conn.rollback()
             raise HTTPException(status_code=422, detail=f"Stock insuficiente en origen: disponible {stock_origen}, solicitado {datos.cantidad}")
         stock_destino = destino["cantidad"] if destino["cantidad"] is not None else 0
+        # Regla Oficina (conserva piezas): llegar a Oficina desempaqueta (×mult),
+        # salir de Oficina empaqueta (÷mult, solo múltiplos exactos).
+        mult = multiplo_bulto(datos.sku)
+        origen_es_oficina = es_oficina(origen["warehouse_id"])
+        destino_es_oficina = es_oficina(destino["warehouse_id"])
+        if destino_es_oficina and not origen_es_oficina:
+            modo, suma_destino = "desempaquetar", datos.cantidad * mult
+            nota_auto = f"Desempaquetado {datos.cantidad}×{mult}={suma_destino}"
+        elif origen_es_oficina and not destino_es_oficina:
+            if datos.cantidad % mult != 0:
+                conn.rollback()
+                raise HTTPException(status_code=422, detail=f"Para empaquetar, la cantidad debe ser múltiplo de {mult}")
+            modo, suma_destino = "empaquetar", datos.cantidad // mult
+            nota_auto = f"Empaquetado {datos.cantidad}÷{mult}={suma_destino}"
+        else:
+            modo, suma_destino = "directo", datos.cantidad
+            nota_auto = None
         nuevo_origen = stock_origen - datos.cantidad
-        nuevo_destino = stock_destino + datos.cantidad
+        nuevo_destino = stock_destino + suma_destino
         cursor.execute("UPDATE stock_ubicacion SET cantidad = %s WHERE id = %s", (nuevo_origen, datos.origen_id))
         cursor.execute("UPDATE stock_ubicacion SET cantidad = %s WHERE id = %s", (nuevo_destino, datos.destino_id))
-        nota = (datos.nota or "").strip() or None
+        nota = "; ".join(p for p in ((datos.nota or "").strip(), nota_auto) if p) or None
         cursor.execute(
             "INSERT INTO ubicaciones_traspasos (sku, origen_id, origen_warehouse_id, destino_id, destino_warehouse_id, cantidad, usuario, nota)"
             " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
             (datos.sku, datos.origen_id, origen["warehouse_id"], datos.destino_id, destino["warehouse_id"], datos.cantidad, datos.usuario, nota),
         )
         conn.commit()
-        mov_reg.registrar_movimiento(datos.usuario, f"Traspasó {datos.cantidad} de '{datos.sku}' de {origen['warehouse_id']} a {destino['warehouse_id']}", "Productos")
+        mov_reg.registrar_movimiento(datos.usuario, f"Traspasó {datos.cantidad} de '{datos.sku}' de {origen['warehouse_id']} a {destino['warehouse_id']}" + (f" ({nota_auto})" if nota_auto else ""), "Productos")
         return {
             "mensaje": "Traspaso registrado",
             "sku": datos.sku,
             "cantidad": datos.cantidad,
+            "conversion": {"modo": modo, "factor": mult, "cantidad_destino": suma_destino},
             "origen": {"id": datos.origen_id, "warehouse_id": origen["warehouse_id"], "cantidad": nuevo_origen},
             "destino": {"id": datos.destino_id, "warehouse_id": destino["warehouse_id"], "cantidad": nuevo_destino},
         }
@@ -593,6 +611,7 @@ MULTIPLOS_UBICACIONES_POR_SKU = {
     "CUBBARBLA": 20,
     "BOLECO17": 20,
     "BOLECO38": 5,
+    "BOLECO30": 5,
     "ESPFARBLA": 1,
 }
 
@@ -602,6 +621,15 @@ def multiplo_ubicacion(sku, warehouse_id) -> int:
     if str(warehouse_id or "").strip().lower() == "oficina":
         return 1
     return MULTIPLOS_UBICACIONES_POR_SKU.get(str(sku or "").strip().upper(), MULTIPLO_UBICACIONES_DEFAULT)
+
+
+def multiplo_bulto(sku) -> int:
+    """Múltiplo del SKU sin la regla de Oficina (para empaquetar/desempaquetar)."""
+    return MULTIPLOS_UBICACIONES_POR_SKU.get(str(sku or "").strip().upper(), MULTIPLO_UBICACIONES_DEFAULT)
+
+
+def es_oficina(warehouse_id) -> bool:
+    return str(warehouse_id or "").strip().lower() == "oficina"
 
 
 @router.get("/ubicaciones/reporte-conteo")

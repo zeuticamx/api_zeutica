@@ -170,7 +170,7 @@ def test_historial_por_sku_y_vacio_da_lista_vacia(client, db):
 def test_multiplos_no_divergen_del_panel():
     # Espejo de MULTIPLOS_POR_SKU en panel_gerencia/src/ubicaciones-logica.js.
     assert productos.MULTIPLOS_UBICACIONES_POR_SKU == {
-        "CUBMANBLA": 20, "CUBBARBLA": 20, "BOLECO17": 20, "BOLECO38": 5, "ESPFARBLA": 1,
+        "CUBMANBLA": 20, "CUBBARBLA": 20, "BOLECO17": 20, "BOLECO38": 5, "BOLECO30": 5, "ESPFARBLA": 1,
     }
     assert productos.MULTIPLO_UBICACIONES_DEFAULT == 10
     assert productos.multiplo_ubicacion("espfarbla", "CEDIS-A1") == 1
@@ -212,3 +212,36 @@ def test_reporte_conteo_filtra_por_sku(client, db):
     assert ws.cell(row=4, column=1).value == "ESPFARBLA"
     assert ws.cell(row=5, column=1).value == "TOTALES"
     assert "ESPFARBLA" in r.headers["content-disposition"]
+
+
+def test_destino_oficina_desempaqueta(client, db):
+    db.tarjetas[4] = {"id": 4, "sku": "BOLECO17", "warehouse_id": "Oficina", "cantidad": 0}
+    r = client.post("/ubicaciones/traspaso", json=base_payload(origen_id=1, destino_id=4, cantidad=3))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["conversion"] == {"modo": "desempaquetar", "factor": 20, "cantidad_destino": 60}
+    assert body["origen"]["cantidad"] == 7 and body["destino"]["cantidad"] == 60
+    assert "Desempaquetado 3×20=60" in db.inserts[0][7]
+
+
+def test_espfarbla_a_oficina_es_uno_a_uno(client, db):
+    db.tarjetas[5] = {"id": 5, "sku": "ESPFARBLA", "warehouse_id": "CEDIS-A1", "cantidad": 5}
+    db.tarjetas[6] = {"id": 6, "sku": "ESPFARBLA", "warehouse_id": "OFICINA", "cantidad": 0}
+    r = client.post("/ubicaciones/traspaso", json={
+        "sku": "ESPFARBLA", "origen_id": 5, "destino_id": 6, "cantidad": 2, "usuario": "ana"})
+    assert r.status_code == 200
+    assert r.json()["conversion"] == {"modo": "desempaquetar", "factor": 1, "cantidad_destino": 2}
+    assert db.tarjetas[6]["cantidad"] == 2
+
+
+def test_origen_oficina_empaqueta_solo_multiplos_exactos(client, db):
+    db.tarjetas[4] = {"id": 4, "sku": "BOLECO17", "warehouse_id": "Oficina", "cantidad": 100}
+    r = client.post("/ubicaciones/traspaso", json=base_payload(origen_id=4, destino_id=2, cantidad=40))
+    assert r.status_code == 200
+    assert r.json()["conversion"] == {"modo": "empaquetar", "factor": 20, "cantidad_destino": 2}
+    assert db.tarjetas[4]["cantidad"] == 60 and db.tarjetas[2]["cantidad"] == 6
+    assert "Empaquetado 40÷20=2" in db.inserts[0][7]
+    n_upd, n_ins = len(db.updates), len(db.inserts)
+    r = client.post("/ubicaciones/traspaso", json=base_payload(origen_id=4, destino_id=2, cantidad=41))
+    assert r.status_code == 422 and "múltiplo de 20" in r.json()["detail"]
+    assert (len(db.updates), len(db.inserts)) == (n_upd, n_ins)
