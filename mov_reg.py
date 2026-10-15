@@ -35,6 +35,22 @@ def registrar_movimiento(nombre_usuario: str, movimiento: str, seccion: str):
         cursor.close()
         conn.close()
 
+def asegurar_tabla_ubicaciones_editadas(cursor):
+    """Bitácora de ediciones de ubicación (la lee «Ver registro»). Idempotente:
+    en producción la tabla ya existe y no se toca; en bases nuevas/de prueba se crea."""
+    cursor.execute(
+        """CREATE TABLE IF NOT EXISTS ubicaciones_editadas (
+          id INT NOT NULL AUTO_INCREMENT PRIMARY KEY,
+          sku VARCHAR(100) NOT NULL,
+          warehouse_id VARCHAR(100) NOT NULL,
+          cama INT NULL,
+          cantidad INT NULL,
+          fecha DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          INDEX idx_ubi_edit_sku (sku)
+        )"""
+    )
+
+
 def registrar_edicionUbi(sku: str, warehouse_id: str, cama: str, cantidad: int):
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -43,6 +59,7 @@ def registrar_edicionUbi(sku: str, warehouse_id: str, cama: str, cantidad: int):
         VALUES (%s, %s, %s, %s)
     """
     try:
+        asegurar_tabla_ubicaciones_editadas(cursor)
         cursor.execute(query, (sku, warehouse_id, cama, cantidad))
         conn.commit()
         return {"message": "Ubicación editada exitosamente"}

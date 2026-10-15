@@ -601,6 +601,65 @@ async def historial_traspasos_ubicaciones(sku: str):
         conn.close()
 
 
+class MoverUbicacionSchema(BaseModel):
+    """Mueve una tarjeta a otra celda: solo cambia warehouse_id (el ID de la celda).
+    Cantidad y cama se quedan igual; no es un traspaso de stock."""
+    sku: str = Field(min_length=1, max_length=100)
+    warehouse_id: str = Field(min_length=1, max_length=100)
+    usuario: str = Field(min_length=1)
+
+
+@router.put("/ubicaciones/mover/{id}")
+async def mover_ubicacion(id: int, datos: MoverUbicacionSchema):
+    """
+    Cambia la celda (warehouse_id) de una tarjeta. La celda destino puede
+    tener tarjetas de otros SKUs o del mismo; el panel pide confirmación antes.
+    """
+    destino = datos.warehouse_id.strip()
+    if not destino:
+        raise HTTPException(status_code=422, detail="Indica la celda destino")
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        cursor.execute("SELECT id, sku, warehouse_id, cama, cantidad FROM stock_ubicacion WHERE id = %s FOR UPDATE", (id,))
+        tarjeta = cursor.fetchone()
+        if not tarjeta:
+            conn.rollback()
+            raise HTTPException(status_code=404, detail=f"No existe la tarjeta con id '{id}'")
+        if (tarjeta["sku"] or "") != datos.sku:
+            conn.rollback()
+            raise HTTPException(status_code=422, detail=f"La tarjeta #{id} no es del SKU '{datos.sku}'")
+        origen = tarjeta["warehouse_id"] or ""
+        if origen.strip().lower() == destino.lower():
+            conn.rollback()
+            raise HTTPException(status_code=422, detail=f"La tarjeta ya está en {destino}")
+        cursor.execute("UPDATE stock_ubicacion SET warehouse_id = %s WHERE id = %s", (destino, id))
+        conn.commit()
+        # El cambio ya está confirmado: si la bitácora falla, no se le responde error al usuario.
+        try:
+            mov_reg.registrar_movimiento(datos.usuario, f"Movió la tarjeta #{id} de '{datos.sku}' de {origen} a {destino}", "Productos")
+            mov_reg.registrar_edicionUbi(datos.sku, destino, tarjeta["cama"], tarjeta["cantidad"])
+        except Exception as err:
+            print(f"Tarjeta #{id} movida, pero falló la bitácora: {err}")
+        return {
+            "mensaje": "Tarjeta movida",
+            "id": id,
+            "sku": datos.sku,
+            "origen": origen,
+            "destino": destino,
+            "cantidad": tarjeta["cantidad"],
+        }
+
+    except mysql.connector.Error as err:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
+
+    finally:
+        cursor.close()
+        conn.close()
+
+
 # Múltiplos bulto->pieza para el reporte de conteo cíclico.
 # ESPEJO de MULTIPLOS_POR_SKU en panel_gerencia/src/ubicaciones-logica.js:
 # si se agrega un SKU allá, agregarlo aquí (y viceversa). El test
@@ -853,6 +912,7 @@ async def obtener_ubicaciones_registro(sku: str):
     cursor = conn.cursor(dictionary=True)
 
     try:
+        mov_reg.asegurar_tabla_ubicaciones_editadas(cursor)
         cursor.execute("SELECT * FROM ubicaciones_editadas WHERE sku = %s", (sku,))
         ubicaciones = cursor.fetchall()
 
