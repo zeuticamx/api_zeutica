@@ -182,7 +182,7 @@ def empleado_id_de_token(token: str) -> Optional[int]:
     try:
         conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)
-        cursor.execute("SELECT id FROM usuarios WHERE token = %s", (token,))
+        cursor.execute("SELECT id FROM usuarios WHERE token = %s AND token_expira > NOW()", (token,))
         fila = cursor.fetchone()
         return fila["id"] if fila else None
     except mysql.connector.Error as err:

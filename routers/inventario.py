@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, Query
 from typing import List, Optional
 import os, mov_reg
 from dotenv import load_dotenv
+from errores_db import detalle_error_db
 
 router = APIRouter(tags=["/inventario"], responses={404: {"Mensaje": "No encontrado"}})
 load_dotenv()
@@ -186,7 +187,7 @@ async def movimientos_inventario(
         cursor.execute(query, tuple(valores))
         return cursor.fetchall()
     except mysql.connector.Error as err:
-        raise HTTPException(status_code=500, detail=f"Error al consultar movimientos: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error al consultar movimientos"))
     finally:
         cursor.close()
         conn.close()

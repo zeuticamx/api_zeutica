@@ -4,6 +4,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from permisos import usuario_autenticado
 from routers import anaqueles, productos
 
 
@@ -152,6 +153,13 @@ class FakeCursor:
                 f["tarjetas"] += 1
                 f["skus"].add(t["sku"])
             self._resultado = [dict(f, skus=len(f["skus"])) for f in conteo.values()]
+        elif q.startswith("SELECT s.id, s.sku, p.nombre, s.warehouse_id, s.cama, s.cantidad FROM stock_ubicacion"):
+            nombres = {"BOLECO17": "Bolsa eco 17", "ESPFARBLA": None}
+            self._resultado = [
+                {"id": t["id"], "sku": t["sku"], "nombre": nombres.get(t["sku"]), "warehouse_id": t["warehouse_id"],
+                 "cama": t["cama"], "cantidad": t["cantidad"]}
+                for t in sorted(db.tarjetas.values(), key=lambda t: (t["warehouse_id"], t["sku"], t["id"]))
+            ]
         elif q.startswith("DELETE FROM anaqueles WHERE id"):
             db.anaqueles.pop(params[0], None)
         elif q.startswith("DELETE FROM anaqueles_celdas"):
@@ -177,6 +185,8 @@ class FakeCursor:
         elif q.startswith("SELECT id, sku, warehouse_id, cama, cantidad FROM stock_ubicacion WHERE id"):
             t = db.tarjetas.get(params[0])
             self._resultado = [dict(t)] if t else []
+        elif q.startswith("DELETE FROM stock_ubicacion WHERE id"):
+            self.rowcount = 1 if db.tarjetas.pop(params[0], None) else 0
         elif q.startswith("UPDATE stock_ubicacion SET warehouse_id = %s WHERE id"):
             db.tarjetas[params[1]]["warehouse_id"] = params[0]
             self.rowcount = 1
@@ -244,10 +254,21 @@ def db(monkeypatch):
 
 @pytest.fixture
 def client():
+    # Sesión de gerencia simulada: el usuario sale del token, no del body.
+    return _cliente("gerencia")
+
+
+def _cliente(usuario):
     app = FastAPI()
     app.include_router(anaqueles.router)
     app.include_router(productos.router)
+    app.dependency_overrides[usuario_autenticado] = lambda: usuario
     return TestClient(app)
+
+
+@pytest.fixture
+def client_vendedor():
+    return _cliente("vendedor")
 
 
 def disposicion_actual(db, **cambios):
@@ -267,6 +288,23 @@ def test_get_devuelve_plano_y_ocupacion_compartida(client, db):
     assert [a["codigo"] for a in body["anaqueles"]] == ["A", "B"]
     assert body["anaqueles"][0]["celdas"][0] == {"nivel": 0, "columna": 0, "codigo": "10"}
     assert body["ocupacion"]["10"] == {"tarjetas": 2, "skus": 2}
+
+
+def test_tarjetas_devuelve_todos_los_skus_con_nombre_y_warehouse_id_tal_cual(client, db):
+    r = client.get("/anaqueles/tarjetas")
+    assert r.status_code == 200
+    tarjetas = r.json()["tarjetas"]
+    assert [t["id"] for t in tarjetas] == [1, 2, 3, 4]
+    assert tarjetas[0] == {"id": 1, "sku": "BOLECO17", "nombre": "Bolsa eco 17", "warehouse_id": "10", "cama": 2, "cantidad": 5}
+    # Sin normalizar (el cruce con la celda lo hace el panel) y sin nombre si el producto no existe.
+    assert tarjetas[1]["warehouse_id"] == "10 " and tarjetas[1]["nombre"] is None
+    assert any("LEFT JOIN productos" in q for q, _ in db.ejecutados)
+
+
+def test_tarjetas_sin_stock_ubicacion_devuelve_lista_vacia(client, db):
+    db.tarjetas.clear()
+    r = client.get("/anaqueles/tarjetas")
+    assert r.status_code == 200 and r.json() == {"tarjetas": []}
 
 
 def test_guardar_con_version_vieja_da_409_sin_escribir(client, db):
@@ -425,3 +463,45 @@ def test_mover_a_la_misma_celda_otro_sku_o_inexistente(client, db):
     assert otro.status_code == 422
     assert client.put("/ubicaciones/mover/99", json={"sku": "BOLECO17", "warehouse_id": "20", "usuario": "ana"}).status_code == 404
     assert db.tarjetas[1]["warehouse_id"] == "10" and db.tarjetas[2]["warehouse_id"] == "10 "
+
+
+# ---------- Permisos y atribución por token ----------
+
+def test_guardar_disposicion_solo_gerencia(client_vendedor, db):
+    r = client_vendedor.put("/anaqueles/disposicion", json=disposicion_actual(db))
+    assert r.status_code == 403
+    assert db.version == 3 and db.movimientos == []
+
+
+def test_guardar_disposicion_registra_al_usuario_del_token_no_al_del_body(client, db):
+    p = disposicion_actual(db)  # el body dice usuario "ana"
+    p["anaqueles"][0]["celdas"][0]["codigo"] = "A-10"
+    assert client.put("/anaqueles/disposicion", json=p).status_code == 200
+    assert db.movimientos and all(m[0] == "gerencia" for m in db.movimientos)
+
+
+def test_mover_registra_al_usuario_del_token_y_no_exige_usuario_en_el_body(client, db):
+    r = client.put("/ubicaciones/mover/3", json={"sku": "BOLECO17", "warehouse_id": "20", "usuario": "otro"})
+    assert r.status_code == 200
+    assert db.movimientos[0][0] == "gerencia"
+    r = client.put("/ubicaciones/mover/4", json={"sku": "BOLECO17", "warehouse_id": "11"})  # sin usuario
+    assert r.status_code == 200
+
+
+def test_eliminar_ubicacion_solo_gerencia_y_usa_el_usuario_del_token(client, client_vendedor, db):
+    assert client_vendedor.delete("/producto/eliminarUbi/4").status_code == 403
+    assert client_vendedor.delete("/producto/eliminarUbi/4/ana").status_code == 403  # ruta vieja, mismo candado
+    assert 4 in db.tarjetas
+    r = client.delete("/producto/eliminarUbi/4")
+    assert r.status_code == 200 and 4 not in db.tarjetas
+    assert db.movimientos[-1][0] == "gerencia"
+    # La ruta vieja sigue sirviendo, pero el usuario de la URL no cuenta.
+    assert client.delete("/producto/eliminarUbi/3/alguien-mas").status_code == 200
+    assert db.movimientos[-1][0] == "gerencia"
+    assert client.delete("/producto/eliminarUbi/99").status_code == 404
+
+
+def test_editar_productos_solo_gerencia(client, client_vendedor, db):
+    cuerpo = {"productos": [], "usuario": "x"}
+    assert client_vendedor.post("/productos/editados", json=cuerpo).status_code == 403
+

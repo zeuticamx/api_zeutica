@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException
 from dotenv import load_dotenv
 from typing import Optional
+from errores_db import detalle_error_db
 
 router =APIRouter(tags=["/proveedores"],responses={404: {"Mensaje":"No encontrado"}})
 load_dotenv()
@@ -37,7 +38,7 @@ async def obtener_proveedores():
     
     except mysql.connector.Error as err:
         print(f"Error en DB: {err}")
-        raise HTTPException(status_code=500, detail=f"Error en DB: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error en DB"))
     
     finally:
         cursor.close()
@@ -70,7 +71,7 @@ async def agregar_proveedor(nuevo_proveedor: proveedor):
     
     except mysql.connector.Error as err:
         print(f"Error en DB: {err}")
-        raise HTTPException(status_code=500, detail=f"Error en DB: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error en DB"))
     
     finally:
         cursor.close()

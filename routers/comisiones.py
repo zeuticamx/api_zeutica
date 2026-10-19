@@ -21,6 +21,7 @@ import comisiones_calc as calc
 import mov_reg
 from permisos import es_gerencia, requerir_gerencia, usuario_autenticado
 from routers import crm
+from errores_db import detalle_error_db
 
 router = APIRouter(tags=["/comisiones"], responses={404: {"Mensaje": "No encontrado"}})
 load_dotenv()
@@ -75,7 +76,7 @@ def _error_db(conn, err, contexto: str):
     except Exception:
         pass
     print(f"Error DB comisiones ({contexto}): {err}")
-    raise HTTPException(status_code=500, detail=f"Error en DB: {err}")
+    raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error en DB"))
 
 
 # ---------- Captura de la venta (núcleo, recibe cursor) ----------

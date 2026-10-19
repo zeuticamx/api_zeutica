@@ -5,6 +5,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from permisos import usuario_autenticado
 from routers import productos
 
 
@@ -101,6 +102,8 @@ def db(monkeypatch):
 def client():
     app = FastAPI()
     app.include_router(productos.router)
+    # El usuario sale del token, no del body: se simula una sesión de "ana".
+    app.dependency_overrides[usuario_autenticado] = lambda: "ana"
     return TestClient(app)
 
 
@@ -135,11 +138,19 @@ def test_mismo_origen_y_destino_da_422_sin_escribir(client, db):
     base_payload(cantidad=-2),
     base_payload(origen_id=0),
     base_payload(sku=""),
-    base_payload(usuario=""),
 ])
 def test_payload_invalido_da_422_sin_escribir(client, db, payload):
     assert client.post("/ubicaciones/traspaso", json=payload).status_code == 422
     assert db.updates == [] and db.inserts == [] and db.commits == 0
+
+
+def test_el_traspaso_registra_al_usuario_del_token_aunque_el_body_traiga_otro(client, db):
+    r = client.post("/ubicaciones/traspaso", json=base_payload(usuario="otro"))
+    assert r.status_code == 200
+    assert db.movimientos[0][0] == "ana"
+    assert db.inserts[-1][6] == "ana"
+    sin_usuario = {k: v for k, v in base_payload().items() if k != "usuario"}
+    assert client.post("/ubicaciones/traspaso", json=sin_usuario).status_code == 200
 
 
 def test_stock_insuficiente_da_422_sin_escribir(client, db):

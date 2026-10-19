@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException, Request
 from typing import Optional
 import os
 from dotenv import load_dotenv
+from errores_db import detalle_error_db
 
 router =APIRouter(tags=["/empleados"],responses={404: {"Mensaje":"No encontrado"}})
 load_dotenv()
@@ -52,7 +53,7 @@ async def empleados_con_usuarios():
         return resultados
 
     except mysql.connector.Error as err:        
-        raise HTTPException(status_code=500, detail=f"Error en la base de datos: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error en la base de datos"))
         
     finally:
         cursor.close()
@@ -125,7 +126,7 @@ async def actualizar_empleado(request: Request):
 
     except mysql.connector.Error as err:
         # Si mandan un usuario que no existe, la clave foránea saltará aquí (Error 1452)
-        raise HTTPException(status_code=400, detail=f"Error al actualizar la base de datos: {err}")
+        raise HTTPException(status_code=400, detail=detalle_error_db(err, "Error al actualizar la base de datos"))
 
     finally:
         cursor.close()
@@ -161,7 +162,7 @@ async def crear_empleado(datos: EmpleadoBase):
 
     except mysql.connector.Error as err:
         # Error 1452 = FK fail (usuario no existe), 1062 = CURP/NSS duplicado
-        raise HTTPException(status_code=400, detail=f"Error al insertar empleado: {err}")
+        raise HTTPException(status_code=400, detail=detalle_error_db(err, "Error al insertar empleado"))
 
     finally:
         cursor.close()
@@ -181,7 +182,7 @@ async def obtener_registro_login():
             raise HTTPException(status_code=404, detail="No se encontraron registros de login")
 
     except mysql.connector.Error as err:
-        raise HTTPException(status_code=500, detail=f"Error al obtener registros de login: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error al obtener registros de login"))
 
     finally:
         cursor.close()

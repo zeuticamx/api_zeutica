@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 import mov_reg
 import notificaciones_service
 from servicios.telegram.notificacion import send_telegram_alert
+from errores_db import detalle_error_db
 
 # Obtiene la ruta del directorio padre (la raíz)
 #sys.path.append(os.path.abspath(os.path.join(os.path.dirname(mov_reg.__file__), '..')))
@@ -125,7 +126,7 @@ async def listar_abonos():
     except mysql.connector.Error as err:
         # Si truena la DB, me entero aquí qué pasó
         print(f"Error en DB: {err}")
-        raise HTTPException(status_code=500, detail=f"Error en DB: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error en DB"))
 
     finally:
         cursor.close()
@@ -198,7 +199,7 @@ async def registrar_abono(abono: abono):
 
     except mysql.connector.Error as err:
         conn.rollback() 
-        raise HTTPException(status_code=500, detail=f"Error en DB: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error en DB"))
 
     finally:
         cursor.close()

@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException, status, Request, Depends
 import asyncpg
+from errores_db import detalle_error_db
 
 router = APIRouter(tags=["sofi-conversaciones"], responses={404: {"Mensaje": "No encontrado"}})
 
@@ -22,5 +23,5 @@ async def obtener_conversaciones(db: asyncpg.Connection = Depends(get_db_postgre
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Error en la base de datos PostgreSQL: {str(e)}"
+            detail=detalle_error_db(e, "Error en la base de datos PostgreSQL")
         )

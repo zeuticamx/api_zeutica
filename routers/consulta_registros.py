@@ -3,6 +3,7 @@ from fastapi import APIRouter, HTTPException, Query
 from typing import Optional
 import os
 from dotenv import load_dotenv
+from errores_db import detalle_error_db
 
 router =APIRouter(tags=["/consulta_registros"],responses={404: {"Mensaje":"No encontrado"}})
 load_dotenv()
@@ -59,7 +60,7 @@ async def consulta_registros(
         return res
 
     except mysql.connector.Error as err:
-        raise HTTPException(status_code=500, detail=f"Error al consultar registros: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error al consultar registros"))
     
     finally:
         cursor.close()

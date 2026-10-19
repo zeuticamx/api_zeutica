@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field, field_validator
 from dotenv import load_dotenv
 from servicios.telegram.notificacion import send_telegram_alert
 from routers import comisiones
+from errores_db import detalle_error_db
 
 router =APIRouter(tags=["/ventas"],responses={404: {"Mensaje":"No encontrado"}})
 load_dotenv() # Carga de credenciales .env
@@ -41,7 +42,7 @@ async def consultar_ventas(f1: date, f2: date):
         return cursor.fetchall() # FastAPI lo convierte automáticamente a JSON
 
     except mysql.connector.Error as err:
-        raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
     
     finally:
         cursor.close()
@@ -76,7 +77,7 @@ async def verificar_venta(norden: str):
         return existe
     
     except mysql.connector.Error as err:
-        raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
     
     finally:
         # El bloque finally solo actuará si no entró en el if not existe
@@ -104,7 +105,7 @@ async def verificar_venta():
         return existe
     
     except mysql.connector.Error as err:
-        raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
     
     finally:
         cursor.close()
@@ -232,7 +233,7 @@ async def registrar_venta(venta: VentaSchema):
         print(f"Error SQL: {err}")
         if es_conflicto_de_venta(err):
             raise HTTPException(status_code=409, detail=mensaje_venta_duplicada(venta.id_venta))
-        raise HTTPException(status_code=500, detail=f"Error en base de datos: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error en base de datos"))
 
     finally:
         if connection.is_connected():
@@ -394,7 +395,7 @@ async def registrar_venta_completa(venta: VentaCompletaSchema):
         print(f"Error SQL: {err}")
         if es_conflicto_de_venta(err):
             raise HTTPException(status_code=409, detail=mensaje_venta_duplicada(venta.id_venta))
-        raise HTTPException(status_code=500, detail=f"Error en base de datos: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error en base de datos"))
 
     finally:
         if connection.is_connected():

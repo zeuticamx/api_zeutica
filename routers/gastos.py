@@ -5,6 +5,7 @@ import os, mov_reg
 from dotenv import load_dotenv
 from servicios.telegram.notificacion import send_telegram_alert
 from permisos import requerir_gerencia
+from errores_db import detalle_error_db
 
 router =APIRouter(tags=["/gastos"],responses={404: {"Mensaje":"No encontrado"}})
 load_dotenv()
@@ -108,7 +109,7 @@ async def registrar_gasto(gasto: Gasto):
         return {"mensaje": "Gasto registrado exitosamente"}
     
     except mysql.connector.Error as err:
-        raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
     
     finally:
         cursor.close()
@@ -129,7 +130,7 @@ async def listar_gastos():
 
     except mysql.connector.Error as err:
         print(f"Error en consulta: {err}")
-        raise HTTPException(status_code=500, detail=f"Error en consulta: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error en consulta"))
 
     finally:
         cursor.close()
@@ -167,7 +168,7 @@ async def cons_gastos(usuario: str):
     
     except mysql.connector.Error as err:
         print(f"Error en consulta: {err}")
-        raise HTTPException(status_code=500, detail=f"Error en consulta: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error en consulta"))
     
     finally:
         cursor.close()
@@ -203,7 +204,7 @@ async def editar_gasto(id: int, datos: GastoEditar, usuario: str = Depends(reque
 
     except mysql.connector.Error as err:
         conn.rollback()
-        raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
 
     finally:
         cursor.close()
@@ -238,7 +239,7 @@ async def eliminar_gasto(id: int, usuario: str = Depends(requerir_gerencia)):
 
     except mysql.connector.Error as err:
         conn.rollback()
-        raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
 
     finally:
         cursor.close()

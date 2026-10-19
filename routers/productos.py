@@ -3,7 +3,7 @@ import io
 import mysql.connector, html, asyncio
 from datetime import datetime
 from pydantic import BaseModel, Field
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
@@ -11,6 +11,8 @@ import os, mov_reg
 from dotenv import load_dotenv
 from typing import Optional
 from servicios.telegram.notificacion import send_telegram_alert
+from permisos import usuario_autenticado, requerir_gerencia
+from errores_db import detalle_error_db
 
 router =APIRouter(tags=["/productos"],responses={404: {"Mensaje":"No encontrado"}})
 
@@ -32,7 +34,7 @@ class UbicacionEditSchema(BaseModel):
     sku: Optional[str]  # SKU del producto, opcional porque a veces solo queremos editar por id
     warehouse_id: str
     cantidad: int
-    usuario: str  # Usuario que edita la ubicación, para registro de movimientos
+    usuario: Optional[str] = None  # se ignora: el usuario sale del token
     cama: int
 
 class ProdEditSchema(BaseModel):
@@ -78,7 +80,7 @@ async def consultar_inventario_completo():
         return productos # FastAPI lo convierte automáticamente a JSON
 
     except mysql.connector.Error as err:
-        raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
     
     finally:
         cursor.close()
@@ -116,7 +118,7 @@ async def obtener_producto_por_sku(sku: str):
             }
     
     except mysql.connector.Error as err:
-        raise HTTPException(status_code=500, detail=f"Error en la base de datos: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error en la base de datos"))
     
     finally:
         # 4. Siempre cerrar recursos
@@ -127,7 +129,7 @@ async def obtener_producto_por_sku(sku: str):
 
 
 @router.post("/productos/editados")
-async def actualizar_productos(datos: ProdEditSchema):
+async def actualizar_productos(datos: ProdEditSchema, usuario: str = Depends(requerir_gerencia)):
     """
     Recibo una lista de productos editados desde el frontend.
     Solo columnas de la whitelist; stocks con validación >= 0 y detalle en bitácora.
@@ -240,12 +242,12 @@ async def actualizar_productos(datos: ProdEditSchema):
         # Confirmo todos los cambios de una vez
         conn.commit()
         detalle_skus = ", ".join(r["sku"] for r in res_actualizados[:10])
-        mov_reg.registrar_movimiento(datos.usuario, f"Actualizó productos: {len(res_actualizados)} actualizados ({detalle_skus}), {len(res_errores)} errores", "Productos")
+        mov_reg.registrar_movimiento(usuario, f"Actualizó productos: {len(res_actualizados)} actualizados ({detalle_skus}), {len(res_errores)} errores", "Productos")
       
         # Enviamos notificación a Telegram
         message = (
             f"🛠️ <b>Actualización de Productos</b>\n\n"
-            f"• <b>Usuario:</b> {html.escape(datos.usuario)}\n"
+            f"• <b>Usuario:</b> {html.escape(usuario)}\n"
             f"• <b>Actualizados:</b>\n{len(res_actualizados)}\n"
             f"• <b>Errores:</b> {len(res_errores)}"
         )
@@ -262,7 +264,7 @@ async def actualizar_productos(datos: ProdEditSchema):
     except mysql.connector.Error as err:
         conn.rollback()
         print(f"Error fatal en BD: {err}")
-        raise HTTPException(status_code=500, detail=f"Error en base de datos: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error en base de datos"))
     
     finally:
         if conn.is_connected():
@@ -338,7 +340,7 @@ async def crear_producto(prod: ProdNuevoSchema):
     except mysql.connector.Error as err:
         conn.rollback()
         print(f"Error en inserción: {err}")
-        raise HTTPException(status_code=500, detail=f"Error en base de datos: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error en base de datos"))
 
     finally:
         if conn.is_connected():
@@ -366,7 +368,7 @@ async def ubicaciones_por_sku(sku: str):
         return ubicaciones
 
     except mysql.connector.Error as err:
-        raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
 
     finally:
         cursor.close()
@@ -374,7 +376,7 @@ async def ubicaciones_por_sku(sku: str):
 
 
 @router.post("/productos/ubicacionNueva/{sku}")
-async def nueva_ubicacion(sku: str, datos: UbicacionEditSchema):
+async def nueva_ubicacion(sku: str, datos: UbicacionEditSchema, usuario: str = Depends(usuario_autenticado)):
     """
     Inserto fila nueva en stock_ubicacion para el sku recibido.
     Si ya existe ese sku, igual inserto — pueden haber varias ubicaciones.
@@ -387,7 +389,7 @@ async def nueva_ubicacion(sku: str, datos: UbicacionEditSchema):
         cursor.execute(sql_ins, (sku, datos.warehouse_id, datos.cama, datos.cantidad))
         conn.commit()
 
-        mov_reg.registrar_movimiento(datos.usuario, f"Creó nueva ubicación para SKU '{sku}'", "Productos")
+        mov_reg.registrar_movimiento(usuario, f"Creó nueva ubicación para SKU '{sku}'", "Productos")
 
         return {
             "mensaje": "Ubicación creada",
@@ -399,18 +401,18 @@ async def nueva_ubicacion(sku: str, datos: UbicacionEditSchema):
 
     except mysql.connector.Error as err:
         conn.rollback()
-        raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
 
     finally:
         cursor.close()
         conn.close()
 
 
-@router.delete("/producto/eliminarUbi/{id}/{usuario}")
-async def eliminar_ubicacion(id: int, usuario: str):
+@router.delete("/producto/eliminarUbi/{id}")
+async def eliminar_ubicacion(id: int, usuario: str = Depends(requerir_gerencia)):
     """
-    Borro el registro de stock_ubicacion que tenga ese id.
-    Si no existe, aviso con 404.
+    Borro el registro de stock_ubicacion que tenga ese id. Solo gerencia; el usuario
+    de la bitácora sale del token. Si no existe, aviso con 404.
     """
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -427,15 +429,22 @@ async def eliminar_ubicacion(id: int, usuario: str):
 
     except mysql.connector.Error as err:
         conn.rollback()
-        raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
 
     finally:
         cursor.close()
         conn.close()
 
 
+@router.delete("/producto/eliminarUbi/{id}/{_usuario_ignorado}", include_in_schema=False)
+async def eliminar_ubicacion_ruta_vieja(id: int, _usuario_ignorado: str, usuario: str = Depends(requerir_gerencia)):
+    """Alias de la ruta anterior (el usuario iba en la URL y se confiaba en él). Quitarlo cuando
+    ningún panel use la versión vieja de api.jsx."""
+    return await eliminar_ubicacion(id, usuario)
+
+
 @router.put("/ubicacion/editar/{id}")
-async def editar_ubicacion(id: str, datos: UbicacionEditSchema):
+async def editar_ubicacion(id: str, datos: UbicacionEditSchema, usuario: str = Depends(usuario_autenticado)):
     """
     Actualizo warehouse_id y cantidad en stock_ubicacion para el sku dado.
     Si no existe el registro, aviso con 404.
@@ -451,7 +460,7 @@ async def editar_ubicacion(id: str, datos: UbicacionEditSchema):
             raise HTTPException(status_code=404, detail=f"No existe registro en stock_ubicacion para SKU '{id}'")
 
         conn.commit()
-        mov_reg.registrar_movimiento(datos.usuario, f"Editó ubicación con id '{id}', cama: {datos.cama}, cantidad: {datos.cantidad} en ubicacion {datos.warehouse_id}", "Productos")
+        mov_reg.registrar_movimiento(usuario, f"Editó ubicación con id '{id}', cama: {datos.cama}, cantidad: {datos.cantidad} en ubicacion {datos.warehouse_id}", "Productos")
         mov_reg.registrar_edicionUbi(datos.sku, datos.warehouse_id, datos.cama, datos.cantidad)
         return {
             "mensaje": "Ubicación actualizada",
@@ -464,7 +473,7 @@ async def editar_ubicacion(id: str, datos: UbicacionEditSchema):
     except mysql.connector.Error as err:
         conn.rollback()
         print(f"Error al actualizar ubicación: {err}")
-        raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
 
     finally:
         cursor.close()
@@ -477,7 +486,7 @@ class TraspasoUbicacionSchema(BaseModel):
     origen_id: int = Field(gt=0)
     destino_id: int = Field(gt=0)
     cantidad: int = Field(gt=0)
-    usuario: str = Field(min_length=1)
+    usuario: Optional[str] = None  # se ignora: el usuario sale del token
     nota: Optional[str] = Field(None, max_length=255)
 
 
@@ -501,7 +510,7 @@ def asegurar_tabla_traspasos_ubicacion(cursor):
 
 
 @router.post("/ubicaciones/traspaso")
-async def traspasar_entre_ubicaciones(datos: TraspasoUbicacionSchema):
+async def traspasar_entre_ubicaciones(datos: TraspasoUbicacionSchema, usuario: str = Depends(usuario_autenticado)):
     """
     Mueve cantidad entre dos tarjetas del mismo sku (origen -N, destino +N)
     y deja el registro en ubicaciones_traspasos. Todo en una transacción.
@@ -557,10 +566,10 @@ async def traspasar_entre_ubicaciones(datos: TraspasoUbicacionSchema):
         cursor.execute(
             "INSERT INTO ubicaciones_traspasos (sku, origen_id, origen_warehouse_id, destino_id, destino_warehouse_id, cantidad, usuario, nota)"
             " VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-            (datos.sku, datos.origen_id, origen["warehouse_id"], datos.destino_id, destino["warehouse_id"], datos.cantidad, datos.usuario, nota),
+            (datos.sku, datos.origen_id, origen["warehouse_id"], datos.destino_id, destino["warehouse_id"], datos.cantidad, usuario, nota),
         )
         conn.commit()
-        mov_reg.registrar_movimiento(datos.usuario, f"Traspasó {datos.cantidad} de '{datos.sku}' de {origen['warehouse_id']} a {destino['warehouse_id']}" + (f" ({nota_auto})" if nota_auto else ""), "Productos")
+        mov_reg.registrar_movimiento(usuario, f"Traspasó {datos.cantidad} de '{datos.sku}' de {origen['warehouse_id']} a {destino['warehouse_id']}" + (f" ({nota_auto})" if nota_auto else ""), "Productos")
         return {
             "mensaje": "Traspaso registrado",
             "sku": datos.sku,
@@ -572,7 +581,7 @@ async def traspasar_entre_ubicaciones(datos: TraspasoUbicacionSchema):
 
     except mysql.connector.Error as err:
         conn.rollback()
-        raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
 
     finally:
         cursor.close()
@@ -594,7 +603,7 @@ async def historial_traspasos_ubicaciones(sku: str):
         return cursor.fetchall()
 
     except mysql.connector.Error as err:
-        raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
 
     finally:
         cursor.close()
@@ -606,11 +615,11 @@ class MoverUbicacionSchema(BaseModel):
     Cantidad y cama se quedan igual; no es un traspaso de stock."""
     sku: str = Field(min_length=1, max_length=100)
     warehouse_id: str = Field(min_length=1, max_length=100)
-    usuario: str = Field(min_length=1)
+    usuario: Optional[str] = None  # se ignora: el usuario sale del token
 
 
 @router.put("/ubicaciones/mover/{id}")
-async def mover_ubicacion(id: int, datos: MoverUbicacionSchema):
+async def mover_ubicacion(id: int, datos: MoverUbicacionSchema, usuario: str = Depends(usuario_autenticado)):
     """
     Cambia la celda (warehouse_id) de una tarjeta. La celda destino puede
     tener tarjetas de otros SKUs o del mismo; el panel pide confirmación antes.
@@ -638,7 +647,7 @@ async def mover_ubicacion(id: int, datos: MoverUbicacionSchema):
         conn.commit()
         # El cambio ya está confirmado: si la bitácora falla, no se le responde error al usuario.
         try:
-            mov_reg.registrar_movimiento(datos.usuario, f"Movió la tarjeta #{id} de '{datos.sku}' de {origen} a {destino}", "Productos")
+            mov_reg.registrar_movimiento(usuario, f"Movió la tarjeta #{id} de '{datos.sku}' de {origen} a {destino}", "Productos")
             mov_reg.registrar_edicionUbi(datos.sku, destino, tarjeta["cama"], tarjeta["cantidad"])
         except Exception as err:
             print(f"Tarjeta #{id} movida, pero falló la bitácora: {err}")
@@ -653,7 +662,7 @@ async def mover_ubicacion(id: int, datos: MoverUbicacionSchema):
 
     except mysql.connector.Error as err:
         conn.rollback()
-        raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
 
     finally:
         cursor.close()
@@ -718,7 +727,7 @@ async def reporte_conteo_ciclico(sku: Optional[str] = None):
         filas = cursor.fetchall()
 
     except mysql.connector.Error as err:
-        raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
 
     finally:
         cursor.close()
@@ -873,7 +882,7 @@ async def registrar_devolucion(sku: str, datos: DevolucionSchema):
 
     except mysql.connector.Error as err:
         conn.rollback()
-        raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
 
     finally:
         cursor.close()
@@ -897,7 +906,7 @@ async def obtener_devoluciones():
         return devoluciones
 
     except mysql.connector.Error as err:
-        raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
 
     finally:
         cursor.close()
@@ -923,7 +932,7 @@ async def obtener_ubicaciones_registro(sku: str):
 
     except mysql.connector.Error as err:
         print(f"Error al obtener ubicaciones registradas: {err}")
-        raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
 
     finally:
         cursor.close()

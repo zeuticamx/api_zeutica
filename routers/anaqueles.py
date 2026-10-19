@@ -7,9 +7,11 @@
 import os
 import mysql.connector, mov_reg
 from dotenv import load_dotenv
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from typing import Optional
+from permisos import requerir_gerencia
+from errores_db import detalle_error_db
 
 router = APIRouter(tags=["/anaqueles"], responses={404: {"Mensaje": "No encontrado"}})
 
@@ -54,7 +56,7 @@ class DisposicionSchema(BaseModel):
     """Disposición completa: lo que no venga se borra (sus tarjetas quedan sin posición).
     `version` es la leída en GET /anaqueles; si otro usuario guardó antes, 409."""
     version: int = Field(ge=0)
-    usuario: str = Field(min_length=1)
+    usuario: Optional[str] = None  # se ignora: el usuario sale del token (compat. con el panel viejo)
     anaqueles: list[AnaquelSchema]
 
 
@@ -237,7 +239,31 @@ async def consultar_disposicion():
         }
 
     except mysql.connector.Error as err:
-        raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
+
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.get("/anaqueles/tarjetas")
+async def consultar_tarjetas():
+    """Todas las tarjetas de stock_ubicacion (todos los SKUs) con el nombre del producto.
+    Sirve para auditar qué SKUs hay en cada celda: el panel cruza `warehouse_id` con el ID
+    de celda (anaqueles-logica.js), así que aquí van tal como están guardadas."""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+
+    try:
+        cursor.execute(
+            "SELECT s.id, s.sku, p.nombre, s.warehouse_id, s.cama, s.cantidad"
+            " FROM stock_ubicacion s LEFT JOIN productos p ON p.sku = s.sku"
+            " ORDER BY s.warehouse_id, s.sku, s.id"
+        )
+        return {"tarjetas": cursor.fetchall()}
+
+    except mysql.connector.Error as err:
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
 
     finally:
         cursor.close()
@@ -245,11 +271,12 @@ async def consultar_disposicion():
 
 
 @router.put("/anaqueles/disposicion")
-async def guardar_disposicion(datos: DisposicionSchema):
+async def guardar_disposicion(datos: DisposicionSchema, usuario: str = Depends(requerir_gerencia)):
     """
     Reemplaza la disposición completa en una transacción. Si cambia el ID de
     una celda, las tarjetas de esa celda (de todos los SKUs) cambian su
     warehouse_id al nuevo. Exige la versión leída: 409 si alguien guardó antes.
+    Solo gerencia; el usuario de la bitácora sale del token.
     """
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
@@ -313,7 +340,7 @@ async def guardar_disposicion(datos: DisposicionSchema):
 
         cursor.execute(
             "UPDATE bodega_disposicion SET version = %s, usuario = %s WHERE id = 1",
-            (version_actual + 1, datos.usuario),
+            (version_actual + 1, usuario),
         )
         conn.commit()
 
@@ -323,7 +350,7 @@ async def guardar_disposicion(datos: DisposicionSchema):
             detalle += "; renombró " + ", ".join(f"{r['de']}→{r['a']}" for r in con_tarjetas)
         if plan["desasignadas"]:
             detalle += "; sin posición: " + ", ".join(d["codigo"] for d in plan["desasignadas"])
-        mov_reg.registrar_movimiento(datos.usuario, detalle, "Productos")
+        mov_reg.registrar_movimiento(usuario, detalle, "Productos")
         return {
             "mensaje": "Disposición guardada",
             "version": version_actual + 1,
@@ -333,7 +360,7 @@ async def guardar_disposicion(datos: DisposicionSchema):
 
     except mysql.connector.Error as err:
         conn.rollback()
-        raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
 
     finally:
         cursor.close()

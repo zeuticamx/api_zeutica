@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 from typing import Optional
 from cotizacion_service import generar_nuevo_codigo, guardar_cotizacion_db
 from servicios.telegram.notificacion import send_telegram_alert #notificaciones a telegram
+from errores_db import detalle_error_db
 
 router =APIRouter(tags=["/cotizaciones"],responses={404: {"Mensaje":"No encontrado"}})
 load_dotenv() # Cargar credenciales .env
@@ -71,7 +72,7 @@ async def obtener_nuevo_codigo():
         return {"nuevo_codigo": nuevo_codigo}
     except mysql.connector.Error as err:
         print(f"Error BD en nuevo-codigo: {err}")
-        raise HTTPException(status_code=500, detail=f"Error BD: {str(err)}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error BD"))
     finally:
         connection.close()
 
@@ -96,7 +97,7 @@ async def obtener_complemento_pago(codigo_cotizacion: str):
     # 2. Atrapamos cualquier otro error inesperado (fallos en la BD, etc.) como 500
     except Exception as e:
         print(f"Error al obtener complemento de pago: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=detalle_error_db(e, "Error interno del servidor"))
     
     finally:
         connection.close()
@@ -133,12 +134,12 @@ async def guardar_cotizacion(cot: CotizacionSchema):
     except mysql.connector.Error as err:
         connection.rollback()
         print(f"Error BD al guardar cotización: {err}")
-        raise HTTPException(status_code=500, detail=f"Error BD: {str(err)}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error BD"))
     
     except Exception as e:
         connection.rollback()
         print(f"Error inesperado: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=detalle_error_db(e, "Error interno del servidor"))
     
     finally:
         connection.close()
@@ -221,7 +222,7 @@ async def consulta_cotizacion():
 
     except Exception as e:
         print(f"Error detectado: {e}")
-        raise HTTPException(status_code=500, detail=f"Error en BD: {str(e)}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(e, "Error en BD"))
     finally:
         connection.close()
 
@@ -277,7 +278,7 @@ async def vincular_factura(vinculos: List[VinculoFactura]):
     except Exception as e:
         connection.rollback()
         print(f"Error al vincular factura: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=detalle_error_db(e, "Error interno del servidor"))
     finally:
         connection.close()
 
@@ -308,7 +309,7 @@ async def registrar_complemento_pago(vinculo: vinculoPago):
     except Exception as e:
         connection.rollback()
         print(f"Error al registrar complemento de pago: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=detalle_error_db(e, "Error interno del servidor"))
     finally:
         connection.close()
 
@@ -362,7 +363,7 @@ async def guardar_firma(firma: FirmaEnvio):
     except mysql.connector.Error as err:
         connection.rollback()
         print(f"Error BD al guardar firma: {err}")
-        raise HTTPException(status_code=500, detail=f"Error BD: {str(err)}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error BD"))
     
     finally:
         connection.close()
@@ -390,7 +391,7 @@ async def obtener_items_cotizacion(cotizacion_id: int):
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Error al obtener items: {str(e)}"
+            detail=detalle_error_db(e, "Error al obtener items")
         )
     finally:
         connection.close()
@@ -425,7 +426,7 @@ async def actualizar_seguimiento(datos: SeguimientoUpdate):
     except mysql.connector.Error as err:
         connection.rollback()
         print(f"Error BD al actualizar seguimiento: {err}")
-        raise HTTPException(status_code=500, detail=f"Error BD: {str(err)}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error BD"))
     finally:
         connection.close()
 
@@ -454,7 +455,7 @@ async def marcar_vendido(vendido: vendido):
     except Exception as e:
         connection.rollback()
         print(f"Error inesperado: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=detalle_error_db(e, "Error interno del servidor"))
     
     finally:
         connection.close()
@@ -521,7 +522,7 @@ async def cotizaciones_para_venta():
 
     except Exception as e:
         print(f"Error en cotizaciones/ventas: {e}")
-        raise HTTPException(status_code=500, detail=f"Error en BD: {str(e)}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(e, "Error en BD"))
     finally:
         connection.close()
 
@@ -543,7 +544,7 @@ async def obtener_pdf_base64(codigo_cotizacion: str):
     
     except Exception as e:
         print(f"Error al obtener PDF: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=detalle_error_db(e, "Error interno del servidor"))
     
     finally:
         connection.close()

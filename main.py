@@ -11,8 +11,11 @@ if hasattr(sys.stdout, "reconfigure"):
         sys.stderr.reconfigure(encoding="utf-8")
     except Exception:
         pass
-from fastapi import FastAPI, HTTPException, Depends, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi import FastAPI, HTTPException, Depends, status, Request
+from fastapi.responses import JSONResponse
+from slowapi import Limiter
+from slowapi.errors import RateLimitExceeded
+from permisos import usuario_autenticado, asegurar_columna_token_expira, token_horas, es_gerencia
 from routers import cotizacionesBack, productos, ventas, clientes, traspaso, gastos, compras, cleanest, cuentas_pendientes,\
       abonos, estadisticas, inventario, empleados, notificaciones, cuentas_pagar, consulta_registros, pendientes, proveedores, genera_cotizacion, sofi_conversaciones, embarques, sofi_notificaciones, whatsapp_plantillas, skydropx
 from routers import crm, comisiones, prospectos, jobs, meli_webhook, meli_promos, anaqueles
@@ -52,6 +55,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"❌ Error al conectar con PostgreSQL: {e}")
         app.state.db_pool = None
+
+    # Vigencia de los tokens de sesión (usuarios.token_expira). Sin la columna nadie podría
+    # validar su token, así que si falla se avisa fuerte en los logs.
+    try:
+        asegurar_columna_token_expira()
+    except Exception as e:
+        print(f"❌ No se pudo asegurar usuarios.token_expira (las sesiones no validarán): {e}")
 
     # Crea tablas del modulo de embarques si no existen (MySQL, sin FK)
     embarques.crear_tablas_embarques()
@@ -239,34 +249,40 @@ async def lifespan(app: FastAPI):
         await app.state.db_pool.close()
         print("🔒 Pool de PostgreSQL cerrado.")
 
-# ---  CONFIGURACIÓN DE SEGURIDAD Y ESTADO ---
-security = HTTPBearer()
-
 # ---  DEPENDENCIA PARA VALIDAR EL TOKEN EN LAS RUTAS ---
-def obtener_usuario_actual(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    token = credentials.credentials
-    conn = get_db_connection()
-    cursor = conn.cursor(dictionary=True)
-    try:
-        query = "SELECT nombre_usuario FROM usuarios WHERE token = %s"
-        cursor.execute(query, (token,))
-        resultado = cursor.fetchone()
-        if not resultado:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Token inválido o expirado",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-        return resultado['nombre_usuario']
-    except mysql.connector.Error as err:
-        print(f"Error DB token: {err}")
-        raise HTTPException(status_code=500, detail="Error interno en DB")
-    finally:
-        cursor.close()
-        conn.close()
+# Es la misma de permisos.py (token vigente: usuarios.token_expira > NOW()), para que los
+# routers y main.py nunca validen distinto.
+obtener_usuario_actual = usuario_autenticado
 
-# Corregido: FastAPI usa root_path, no prefix. 
+# ---  LÍMITE DE INTENTOS (slowapi) ---
+def _ip_cliente(request: Request) -> str:
+    """IP del cliente detrás del proxy de EasyPanel. El proxy AGREGA la IP real al final de
+    X-Forwarded-For, así que se toma el último valor (el primero lo puede inventar el cliente).
+    Si la API se expone sin proxy, ese header no se toma de nadie y se usa la IP del socket."""
+    reenviada = request.headers.get("x-forwarded-for", "")
+    if reenviada:
+        return reenviada.split(",")[-1].strip() or "desconocida"
+    return request.client.host if request.client else "desconocida"
+
+limiter = Limiter(key_func=_ip_cliente)
+LOGIN_LIMITE = os.getenv("LOGIN_RATE_LIMIT", "10/minute;60/hour")
+PASSW_LIMITE = os.getenv("PASSW_RATE_LIMIT", "5/minute")
+
+# bcrypt de relleno: se verifica cuando el usuario no existe, para que el tiempo no lo delate.
+_HASH_FALSO = bcrypt.hashpw(b"zeutica-hash-falso", bcrypt.gensalt()).decode("utf-8")
+
+# Corregido: FastAPI usa root_path, no prefix.
 app = FastAPI(root_path="/zeutica", tags=["login"], responses={404: {"Mensaje":"No encontrado"}}, lifespan=lifespan)
+app.state.limiter = limiter
+
+
+@app.exception_handler(RateLimitExceeded)
+async def _limite_excedido(request: Request, exc: RateLimitExceeded):
+    return JSONResponse(
+        status_code=429,
+        content={"detail": "Demasiados intentos. Espera un minuto antes de volver a intentar."},
+        headers={"Retry-After": "60"},
+    )
 
 # Paginas
 app.include_router(productos.router, dependencies=[Depends(obtener_usuario_actual)])
@@ -307,11 +323,18 @@ app.include_router(skydropx.router_webhook)
 # sesión: valida por GET del recurso + x-signature opcional. Siempre 200.
 app.include_router(meli_webhook.router)
 
-app.add_middleware( 
+# CORS: solo el panel. CORS_ORIGINS (coma-separado) sobreescribe la lista; localhost/127.0.0.1
+# (cualquier puerto) quedan permitidos para desarrollo local. La autenticación va en el header
+# Authorization (no en cookies), así que no se habilitan credenciales.
+_CORS_POR_DEFECTO = "https://postgresqldb-panel-administrativo.i4mjht.easypanel.host"
+ORIGENES_CORS = [o.strip().rstrip("/") for o in (os.getenv("CORS_ORIGINS") or _CORS_POR_DEFECTO).split(",") if o.strip()]
+
+app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],    
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=ORIGENES_CORS,
+    allow_origin_regex=r"^http://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type", "X-API-Key"],
     # El panel lee el folio y el nombre del PDF que devuelve /genera-cotizacion;
     # sin esto el navegador oculta esos headers en peticiones cross-origin.
     expose_headers=["X-Codigo-Cotizacion", "X-Cotizacion-Id", "Content-Disposition"],
@@ -333,6 +356,7 @@ class LoginSchema(BaseModel): #molde para usuario
 
 class CambioPasswSchema(BaseModel): #molde para cambio de contraseña
     usuario: str
+    password_actual: str  # la vigente de quien hace la petición (dueño del token)
     password_nueva: str
 
 # // AUTENTICACION DE USUARIOS PARA INGRESO AL SOFTWARE // 
@@ -345,7 +369,10 @@ def hash_password(password: str) -> str:
 def verify_password(plano_password: str, hashed_password: str) -> bool:
     pwd_bytes = plano_password.encode('utf-8')
     hashed_bytes = hashed_password.encode('utf-8')
-    return bcrypt.checkpw(pwd_bytes, hashed_bytes)   
+    try:
+        return bcrypt.checkpw(pwd_bytes, hashed_bytes)
+    except ValueError:  # hash guardado con formato inválido: se trata como contraseña incorrecta
+        return False
 
 @app.get("/")
 async def test_server():
@@ -360,9 +387,11 @@ async def health():
     return {"status": "ok", "servicio": "api_zeutica1"}
 
 @app.post("/login")
-async def login(datos: LoginSchema):
+@limiter.limit(LOGIN_LIMITE)
+async def login(request: Request, datos: LoginSchema):
     """
     Consulta credenciales para ingreso a sistema.
+    El token que devuelve vence a las TOKEN_HORAS horas (usuarios.token_expira).
     """
     usuario = datos.usuario
     password_ingresado = datos.password
@@ -380,36 +409,37 @@ async def login(datos: LoginSchema):
         cursor.execute(query, (usuario,))
         resultado = cursor.fetchone()
 
-        # Primero verifico que exista, luego reviso estatus
-        if not resultado:
+        # Siempre se corre un bcrypt (aunque el usuario no exista) para que el tiempo de respuesta
+        # no delate qué usuarios existen, y todo rechazo da el mismo mensaje. El estatus del
+        # empleado solo se revela a quien ya dio la contraseña correcta.
+        hash_guardado = resultado["password_hash"] if resultado and resultado["password_hash"] else None
+        password_ok = verify_password(password_ingresado, hash_guardado or _HASH_FALSO) and hash_guardado is not None
+        if not password_ok:
             raise HTTPException(status_code=401, detail="Usuario o contraseña incorrectos")
 
         if resultado['estatus'] == 0:
-            raise HTTPException(status_code=403, detail="Usuario inactivo. Contacta al administrador.")  
-        
+            raise HTTPException(status_code=403, detail="Usuario inactivo. Contacta al administrador.")
+
         if resultado['estatus'] == 1:
+            # Solo ingresos exitosos: antes se registraba también el intento con contraseña errónea.
             cursor.execute(
                 "INSERT INTO registro_login (nombre_usuario, nombre) VALUES (%s, %s)",
                 (datos.usuario, 'Datos de empleado no disponible')
             )
-            conn.commit()
 
-        if verify_password(password_ingresado, resultado['password_hash']):
-            nuevo_token = secrets.token_urlsafe(32)
-            update_query = "UPDATE usuarios SET token = %s WHERE nombre_usuario = %s"
-            cursor.execute(update_query, (nuevo_token, usuario))
-            conn.commit()
-                        
-            return {
-                "auth": True,
-                "mensaje": "Acceso exitoso",
-                "access_token": nuevo_token,
-                "token_type": "bearer",
-                "id_usuario": resultado['id']
-            }       
-           
+        nuevo_token = secrets.token_urlsafe(32)
+        update_query = "UPDATE usuarios SET token = %s, token_expira = DATE_ADD(NOW(), INTERVAL %s HOUR) WHERE nombre_usuario = %s"
+        cursor.execute(update_query, (nuevo_token, token_horas(), usuario))
+        conn.commit()
 
-        raise HTTPException(status_code=401, detail="Usuario o contraseña incorrectos")
+        return {
+            "auth": True,
+            "mensaje": "Acceso exitoso",
+            "access_token": nuevo_token,
+            "token_type": "bearer",
+            "expira_en_horas": token_horas(),
+            "id_usuario": resultado['id']
+        }
 
     except mysql.connector.Error as err:
         print(f"Error DB login: {err}")
@@ -423,17 +453,29 @@ async def login(datos: LoginSchema):
 
 
 @app.put("/cambio-passw")
-async def cambio_passw(datos: CambioPasswSchema):
+@limiter.limit(PASSW_LIMITE)
+async def cambio_passw(request: Request, datos: CambioPasswSchema, actual: str = Depends(obtener_usuario_actual)):
     """
-    Cambia la contraseña del usuario. Encripto antes de guardar.
+    Cambia la contraseña. Exige sesión y la contraseña vigente; solo se puede cambiar la propia
+    (gerencia puede cambiar la de otro usuario, pero también debe dar su propia contraseña actual).
+    Encripto antes de guardar.
     """
     usuario = datos.usuario
     password_nueva = datos.password_nueva
+    if usuario.strip().lower() != actual.strip().lower() and not es_gerencia(actual):
+        raise HTTPException(status_code=403, detail="Solo puedes cambiar tu propia contraseña")
     conn = None
     cursor = None
     try:
         conn = get_db_connection()
         cursor = conn.cursor(dictionary=True)
+
+        # La contraseña actual que se verifica es la de quien hace la petición (el dueño del token).
+        cursor.execute("SELECT password_hash FROM usuarios WHERE nombre_usuario = %s", (actual,))
+        quien = cursor.fetchone()
+        if not quien or not quien["password_hash"] or not verify_password(datos.password_actual, quien["password_hash"]):
+            # 400 y no 401: el panel cierra la sesión ante un 401, y esto es un dato mal capturado.
+            raise HTTPException(status_code=400, detail="La contraseña actual es incorrecta")
 
         # Primero checo que el usuario exista, si no ni le muevo
         cursor.execute("SELECT nombre_usuario FROM usuarios WHERE nombre_usuario = %s", (usuario,))

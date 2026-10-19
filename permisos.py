@@ -13,6 +13,17 @@ _POR_DEFECTO = "gerencia,fparra"
 
 security = HTTPBearer()
 
+# Vigencia de la sesión: el token de usuarios.token deja de servir pasadas estas horas
+# (usuarios.token_expira, se renueva en cada login). Sobreescribible con TOKEN_HORAS.
+TOKEN_HORAS_POR_DEFECTO = 12
+
+
+def token_horas() -> int:
+    try:
+        return max(1, int(os.getenv("TOKEN_HORAS") or TOKEN_HORAS_POR_DEFECTO))
+    except ValueError:
+        return TOKEN_HORAS_POR_DEFECTO
+
 
 def usuarios_gerencia() -> set:
     crudo = os.getenv("USUARIOS_GERENCIA") or _POR_DEFECTO
@@ -32,12 +43,33 @@ def get_db_connection():
     )
 
 
+def asegurar_columna_token_expira():
+    """Agrega usuarios.token_expira si falta (se llama en el lifespan). Los tokens emitidos
+    antes de la migración quedan con NULL = vencidos: cada usuario inicia sesión una vez."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "SELECT COUNT(*) FROM information_schema.COLUMNS"
+            " WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'usuarios' AND COLUMN_NAME = 'token_expira'"
+        )
+        if (cursor.fetchone() or [0])[0] == 0:
+            cursor.execute("ALTER TABLE usuarios ADD COLUMN token_expira DATETIME NULL")
+            conn.commit()
+    finally:
+        cursor.close()
+        conn.close()
+
+
 def usuario_autenticado(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
-    """Usuario dueño del token (misma consulta que obtener_usuario_actual de main.py)."""
+    """Usuario dueño del token vigente (main.obtener_usuario_actual es este mismo)."""
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
     try:
-        cursor.execute("SELECT nombre_usuario FROM usuarios WHERE token = %s", (credentials.credentials,))
+        cursor.execute(
+            "SELECT nombre_usuario FROM usuarios WHERE token = %s AND token_expira > NOW()",
+            (credentials.credentials,),
+        )
         fila = cursor.fetchone()
         if not fila:
             raise HTTPException(

@@ -6,10 +6,11 @@ from typing import List, Optional
 
 import mysql.connector
 from dotenv import load_dotenv
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, field_validator
 
 import mov_reg
+from permisos import requerir_gerencia
 from banxico_service import BanxicoServiceError, obtener_tipo_cambio_dia, obtener_tipo_cambio_fecha_especifica
 
 router = APIRouter(tags=["/embarques"], responses={404: {"Mensaje": "No encontrado"}})
@@ -457,9 +458,11 @@ async def editar_embarque(embarque_id: int, payload: EmbarqueCabeceraIn):
 
 
 @router.delete("/embarques/{embarque_id}")
-async def eliminar_embarque(embarque_id: int, usuario: str = "sistema"):
+async def eliminar_embarque(embarque_id: int, usuario: str = Depends(requerir_gerencia)):
     """
     Elimina un embarque y arrastra invoices, proveedores, items, etapas y estatus.
+    Solo gerencia; el usuario de la bitácora sale del token (el ?usuario= que aún manda el
+    panel viejo se ignora).
     No hay FK en DB (usuario sin privilegio REFERENCES), asi que el cascade se hace aqui.
     """
     conn = get_db_connection()
@@ -559,10 +562,10 @@ async def editar_item(embarque_id: int, item_id: int, item: EmbarqueItemIn):
         conn.close()
 
 
-@router.delete("/embarques/{embarque_id}/items/{item_id}")
+@router.delete("/embarques/{embarque_id}/items/{item_id}", dependencies=[Depends(requerir_gerencia)])
 async def eliminar_item(embarque_id: int, item_id: int):
     """
-    Elimina un SKU de un embarque.
+    Elimina un SKU de un embarque. Solo gerencia.
     """
     conn = get_db_connection()
     cursor = conn.cursor()

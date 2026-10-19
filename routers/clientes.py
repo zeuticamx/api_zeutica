@@ -6,6 +6,7 @@ import os, mov_reg
 from dotenv import load_dotenv
 from servicios.telegram.notificacion import send_telegram_alert
 from permisos import requerir_gerencia
+from errores_db import detalle_error_db
 
 router =APIRouter(tags=["/clientes"],responses={404: {"Mensaje":"No encontrado"}})
 load_dotenv()
@@ -90,7 +91,7 @@ async def obtener_clientes():
     
     except mysql.connector.Error as err:
         print(f"Error DB clientes: {err}")
-        raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
     
     finally:
         cursor.close()
@@ -106,7 +107,7 @@ async def obtener_clientes_eliminados(usuario: str = Depends(requerir_gerencia))
         return cursor.fetchall()
     except mysql.connector.Error as err:
         print(f"Error DB clientes eliminados: {err}")
-        raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
     finally:
         cursor.close()
         conn.close()
@@ -135,7 +136,7 @@ async def obtener_clientes_potenciales(descartados: bool = False):
     
     except mysql.connector.Error as err:
         print(f"Error DB clientes potenciales: {err}")
-        raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
     
     finally:
         cursor.close()
@@ -181,7 +182,7 @@ async def actualizar_notas_por_lista(lista_clientes: List[NotaCliente]):
     except mysql.connector.Error as err:
         conn.rollback()
         print(f"Error al actualizar notas en lote: {err}")
-        raise HTTPException(status_code=500, detail=f"Error en DB: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error en DB"))
 
     finally:
         cursor.close()
@@ -220,7 +221,7 @@ async def actualizar_cliente_potencial(id: int, cliente: ClientePotencial):
     
     except mysql.connector.Error as err:
         conn.rollback()  # Cancelamos la operación si falla
-        raise HTTPException(status_code=500, detail=f"Error en DB: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error en DB"))
     
     finally:
         cursor.close()
@@ -280,7 +281,7 @@ async def cliente_nuevo(cliente: clienteRfc, usuario: str):
     
     except mysql.connector.Error as err:
         conn.rollback() # Si falla, cancelamos la operación
-        raise HTTPException(status_code=500, detail=f"Error en DB: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error en DB"))
     
     finally:
         cursor.close()
@@ -333,7 +334,7 @@ async def edit_cliente(cliente: clienteEditar, usuario: str):
     
     except mysql.connector.Error as err:
         conn.rollback() # Si falla, cancelamos la operación
-        raise HTTPException(status_code=500, detail=f"Error en DB: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error en DB"))
     
     finally:
         cursor.close()
@@ -372,7 +373,7 @@ async def eliminar_cliente(id: int, usuario: str = Depends(requerir_gerencia)):
 
     except mysql.connector.Error as err:
         conn.rollback()
-        raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
 
     finally:
         cursor.close()
@@ -411,7 +412,7 @@ async def restaurar_cliente(id: int, usuario: str = Depends(requerir_gerencia)):
 
     except mysql.connector.Error as err:
         conn.rollback()
-        raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
 
     finally:
         cursor.close()

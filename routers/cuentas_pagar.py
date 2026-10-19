@@ -5,6 +5,7 @@ from datetime import date, timedelta
 import os
 from dotenv import load_dotenv
 from servicios.telegram.notificacion import send_telegram_alert
+from errores_db import detalle_error_db
 
 router = APIRouter(tags=["/cuentas-pagar"], responses={404: {"Mensaje": "No encontrado"}})
 load_dotenv()
@@ -135,7 +136,7 @@ async def crear_cxp(datos: CuentaPagar):
         if conn:
             conn.rollback()
         print(f"Error DB cxp crear: {err}")
-        raise HTTPException(status_code=500, detail=f"Error interno en DB: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error interno en DB"))
 
     finally:
         if cursor:
@@ -185,7 +186,7 @@ async def listar_cxp():
 
     except mysql.connector.Error as err:
         print(f"Error DB cxp listar: {err}")
-        raise HTTPException(status_code=500, detail=f"Error interno en DB: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error interno en DB"))
 
     finally:
         if cursor:
@@ -281,7 +282,7 @@ async def registrar_pago(datos: PagoProveedor):
         if conn:
             conn.rollback()
         print(f"Error DB pago proveedor: {err}")
-        raise HTTPException(status_code=500, detail=f"Error interno en DB: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error interno en DB"))
 
     finally:
         if cursor:

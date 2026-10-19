@@ -5,6 +5,7 @@ import os, html, asyncio
 import mysql.connector
 import mov_reg
 from servicios.telegram.notificacion import send_telegram_alert
+from errores_db import detalle_error_db
 
 router = APIRouter(tags=["/compras"],responses={404: {"Mensaje":"No encontrado"}})
 
@@ -145,7 +146,7 @@ async def obtener_ultimos_costos(sku: str):
         
     except Exception as e:
         print(e)
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=detalle_error_db(e, "Error interno del servidor"))
     finally:
         cursor.close()
         conn.close()
@@ -214,7 +215,7 @@ async def obtener_compras():
     except Exception as e:
         # Esto imprimirá el error REAL en tu consola de AWS para que sepas qué pasó
         print(f"Error detectado: {e}") 
-        raise HTTPException(status_code=500, detail=f"Error en BD: {str(e)}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(e, "Error en BD"))
     
     finally:
         conn.close()

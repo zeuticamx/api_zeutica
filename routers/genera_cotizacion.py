@@ -10,6 +10,7 @@ import mov_reg
 from cotizacion_service import generar_nuevo_codigo, guardar_cotizacion_db
 from pdf_cotizacion import generar_pdf_cotizacion
 from servicios.telegram.notificacion import send_telegram_alert
+from errores_db import detalle_error_db
 
 # Obtiene la ruta del directorio padre (la raíz)
 #sys.path.append(os.path.abspath(os.path.join(os.path.dirname(mov_reg.__file__), '..')))
@@ -116,10 +117,10 @@ async def genera_cotizacion(coti: CotizacionSchema):
     except mysql.connector.Error as err:
         conn.rollback()
         print(f"Error BD en genera-cotizacion: {err}")
-        raise HTTPException(status_code=500, detail=f"Error BD: {str(err)}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error BD"))
     except Exception as e:
         conn.rollback()
         print(f"Error inesperado en genera-cotizacion: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=detalle_error_db(e, "Error interno del servidor"))
     finally:
         conn.close()

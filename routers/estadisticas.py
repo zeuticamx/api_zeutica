@@ -5,6 +5,7 @@ import os
 from dotenv import load_dotenv
 import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
+from errores_db import detalle_error_db
 
 router =APIRouter(tags=["/estadisticas"],responses={404: {"Mensaje":"No encontrado"}})
 load_dotenv()
@@ -97,7 +98,7 @@ async def obtener_estadistica(fecha: fechas):
         return {"msg": "Predicciones actualizadas", "predicciones": resultado}
 
     except mysql.connector.Error as err:
-        raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
     
     finally:
         cursor.close()

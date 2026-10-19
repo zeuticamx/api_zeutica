@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException
 from typing import List
 from dotenv import load_dotenv
 from servicios.telegram.notificacion import send_telegram_alert
+from errores_db import detalle_error_db
 
 router =APIRouter(tags=["/traspasos"],responses={404: {"Mensaje":"No encontrado"}})
 load_dotenv()
@@ -144,7 +145,7 @@ async def traspaso_multiple(lote: LoteTraspaso):
         except Exception:
             pass
         print(f"Error en traspaso: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=detalle_error_db(e, "Error interno del servidor"))
     finally:
         cursor.close()
         connection.close()
@@ -169,7 +170,7 @@ async def consulta_traspasos():
         return tras
     
     except mysql.connector.Error as err:
-        raise HTTPException(status_code=500, detail=f"Error de base de datos: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
     
     finally:
         cursor.close()
@@ -263,7 +264,7 @@ async def traspaso_multiple_clean(lote: LoteTraspaso):
         except Exception:
             pass
         print(f"Error en traspaso a clean: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(status_code=500, detail=detalle_error_db(e, "Error interno del servidor"))
     finally:
         cursor.close()
         connection.close()

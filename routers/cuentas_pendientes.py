@@ -2,6 +2,7 @@ import mysql.connector
 from fastapi import APIRouter, HTTPException
 import os
 from dotenv import load_dotenv
+from errores_db import detalle_error_db
 
 router =APIRouter(tags=["/cuentas"],responses={404: {"Mensaje":"No encontrado"}})
 load_dotenv()
@@ -41,7 +42,7 @@ async def obtener_cxc():
         return registros
 
     except mysql.connector.Error as err:
-        raise HTTPException(status_code=500, detail=f"Error en consulta: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error en consulta"))
     
     finally:
         cursor.close()

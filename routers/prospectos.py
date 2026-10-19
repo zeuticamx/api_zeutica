@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field, field_validator
 import mov_reg
 from permisos import es_gerencia, usuario_autenticado
 from servicios.telegram.notificacion import send_telegram_alert
+from errores_db import detalle_error_db
 
 router = APIRouter(tags=["/prospectos"], responses={404: {"Mensaje": "No encontrado"}})
 load_dotenv()
@@ -74,7 +75,7 @@ def _error_db(conn, err, contexto: str):
     except Exception:
         pass
     print(f"Error DB prospectos ({contexto}): {err}")
-    raise HTTPException(status_code=500, detail=f"Error en DB: {err}")
+    raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error en DB"))
 
 
 def _fila(cursor, prospecto_id: int):
