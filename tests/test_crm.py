@@ -675,3 +675,43 @@ def test_cerrar_evento_alerta(client, db):
     r = client.patch("/crm/eventos/5", json={"estado": "hecho"}, headers=ANA)
     assert r.status_code == 200
     assert "hecho" in db.alertas[0].lower() or "Cerr" in db.alertas[0] or "cerr" in db.alertas[0]
+
+
+# ---------- Exportación Excel de la bitácora ----------
+
+
+def test_exportar_es_solo_gerencia(client, db):
+    assert client.get("/crm/interacciones/exportar", headers=ANA).status_code == 403
+    assert db.consultas("SELECT i.fecha") == []
+
+
+def test_exportar_siempre_limita_al_mes_en_curso_e_ignora_fechas_del_cliente(client, db):
+    r = client.get("/crm/interacciones/exportar", params={"desde": "2025-01-01", "hasta": "2025-12-31"}, headers=GER)
+    assert r.status_code == 200
+    assert r.headers["content-type"].startswith("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    assert "crm-bitacora-2026-10.xlsx" in r.headers["content-disposition"]
+    q, p = db.consultas("SELECT i.fecha")[0]
+    assert p[0] == date(2026, 10, 1) and p[1] == date(2026, 10, 2)
+
+
+def test_exportar_aplica_filtros_de_vendedor_y_tipo(client, db):
+    r = client.get("/crm/interacciones/exportar", params=[("vendedor", "ana"), ("tipo", "llamada")], headers=GER)
+    assert r.status_code == 200
+    q, p = db.consultas("SELECT i.fecha")[0]
+    assert "i.vendedor IN (%s)" in q and "i.tipo IN (%s)" in q
+    assert p[2:4] == ("ana", "llamada")
+
+
+def test_exportar_rechaza_con_422_si_pasa_del_tope(client, db, monkeypatch):
+    monkeypatch.setattr(crm, "EXPORT_MAX_FILAS", 2)
+    fila = {"fecha": AHORA, "vendedor": "ana", "cliente": "X", "tipo": "llamada"}
+    db.respuestas.append(("SELECT i.fecha", [fila, fila, fila]))
+    r = client.get("/crm/interacciones/exportar", headers=GER)
+    assert r.status_code == 422 and "filtra" in r.json()["detail"]
+
+
+def test_exportar_error_de_bd_da_500_sin_filtrar_el_texto(client, db):
+    db.error_en = "SELECT i.fecha"
+    db.error = mysql.connector.Error("secreto interno")
+    r = client.get("/crm/interacciones/exportar", headers=GER)
+    assert r.status_code == 500 and "secreto" not in r.text

@@ -306,6 +306,12 @@ def _mismo_usuario(a, b) -> bool:
     return str(a or "").strip().lower() == str(b or "").strip().lower()
 
 
+def _estado(fila: dict) -> str:
+    """Estado en minúsculas: las altas desde Monitor Gerencia (pendientes-agregar) lo guardan como
+    'Pendiente'/'En proceso' y MySQL los compara sin distinguir mayúsculas, así que Python tampoco debe."""
+    return str(fila.get("estado") or "").strip().lower()
+
+
 def _alcance(usuario_token: str, usuario_param: Optional[str]) -> Optional[str]:
     """Usuario cuyas tareas se consultan; None = todas (solo gerencia). Quien no es gerencia
     solo puede consultar las suyas, aunque mande otro ?usuario=."""
@@ -518,7 +524,7 @@ async def cola_nueva(datos: PendienteNuevo, actual: str = Depends(usuario_autent
 
 def _atender(cursor, conn, id_pendiente: int, actual: str) -> dict:
     fila = _bloquear(cursor, id_pendiente)
-    if not fila or not _mismo_usuario(fila["usuario"], actual) or fila["estado"] != "pendiente" or not fila["visible"]:
+    if not fila or not _mismo_usuario(fila["usuario"], actual) or _estado(fila) != "pendiente" or not fila["visible"]:
         conn.rollback()
         raise HTTPException(status_code=404, detail="No encontrado en cola")
     cursor.execute("UPDATE pendientes SET estado = 'en proceso' WHERE id = %s", (id_pendiente,))
@@ -570,7 +576,7 @@ async def cola_terminar(id_pendiente: int, actual: str = Depends(usuario_autenti
         if not fila or not _mismo_usuario(fila["usuario"], actual):
             conn.rollback()
             raise HTTPException(status_code=404, detail="No encontrado")
-        if fila["estado"] == "terminado":
+        if _estado(fila) == "terminado":
             conn.rollback()
             return {"terminado": True, "id": id_pendiente}
         cursor.execute("UPDATE pendientes SET estado = 'terminado' WHERE id = %s", (id_pendiente,))

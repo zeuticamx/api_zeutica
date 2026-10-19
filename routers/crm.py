@@ -16,9 +16,10 @@ from typing import List, Literal, Optional
 
 import mysql.connector
 from dotenv import load_dotenv
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field, field_validator
 
+import crm_exportacion
 import crm_metricas
 import mov_reg
 from permisos import es_gerencia, requerir_gerencia, usuario_autenticado
@@ -31,6 +32,7 @@ load_dotenv()
 _SCHEMA_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sql", "crm_schema.sql")
 
 RANGO_MAX_DIAS = 366
+EXPORT_MAX_FILAS = int(os.getenv("CRM_EXPORT_MAX_FILAS", "5000"))
 DIAS_PROXIMOS = 7  # "Mis seguimientos" muestra también lo de la próxima semana
 
 Tipo = Literal["llamada", "correo", "whatsapp", "reunion"]
@@ -673,6 +675,63 @@ async def crm_bitacora(
     finally:
         cursor.close()
         conn.close()
+
+
+@router.get("/crm/interacciones/exportar")
+async def crm_exportar_bitacora(
+    vendedor: Optional[List[str]] = Query(None),
+    tipo: Optional[List[Tipo]] = Query(None),
+    usuario: str = Depends(requerir_gerencia),
+):
+    """
+    Excel de la bitácora, solo gerencia. El periodo NO lo elige el cliente: siempre
+    es el mes en curso (día 1 a hoy, hora de México). Respeta los filtros de vendedor
+    y tipo. Si pasa de CRM_EXPORT_MAX_FILAS responde 422 para que se acote el filtro.
+    """
+    desde, hasta = crm_exportacion.rango_mes_en_curso(hoy_mx())
+    where = ["i.eliminado = 0", "i.fecha >= %s", "i.fecha < %s"]
+    params = [desde, hasta + timedelta(days=1)]
+    if vendedor:
+        frag, vals = _en("i.vendedor", vendedor)
+        where.append(frag)
+        params += vals
+    if tipo:
+        frag, vals = _en("i.tipo", tipo)
+        where.append(frag)
+        params += vals
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(
+            f"""SELECT i.fecha, i.vendedor, c.nombre AS cliente, i.tipo, i.resultado, i.notas,
+                       i.proxima_accion, i.proxima_fecha, i.seguimiento_cerrado, cc.etapa
+                FROM crm_interacciones i
+                LEFT JOIN clientes c ON c.id = i.cliente_id
+                LEFT JOIN crm_cartera cc ON cc.cliente_id = i.cliente_id
+                WHERE {' AND '.join(where)}
+                ORDER BY i.fecha DESC, i.id DESC LIMIT %s""",
+            tuple(params + [EXPORT_MAX_FILAS + 1]),
+        )
+        filas = cursor.fetchall()
+    except mysql.connector.Error as err:
+        _error_db(conn, err, "exportar bitácora")
+    finally:
+        cursor.close()
+        conn.close()
+
+    if len(filas) > EXPORT_MAX_FILAS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Hay más de {EXPORT_MAX_FILAS} interacciones en el mes; filtra por vendedor o tipo para descargar.",
+        )
+    contenido = crm_exportacion.construir_libro(filas, desde, hasta, ahora_mx(), _RESULTADOS_TXT)
+    nombre = f"crm-bitacora-{desde.strftime('%Y-%m')}.xlsx"
+    return Response(
+        content=contenido,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f"attachment; filename={nombre}"},
+    )
 
 
 @router.patch("/crm/interacciones/{interaccion_id}")

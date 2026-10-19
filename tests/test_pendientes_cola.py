@@ -38,15 +38,15 @@ class FakeCursor:
         self._res = []
         usuario = params[0] if params and "LOWER(usuario) = LOWER(%s)" in q else None
         if q.startswith("SELECT COUNT(*) AS n FROM pendientes WHERE estado = 'pendiente'"):
-            n = sum(1 for f in self._de(usuario) if f["estado"] == "pendiente" and self._visible(f))
+            n = sum(1 for f in self._de(usuario) if f["estado"].lower() == "pendiente" and self._visible(f))
             self._res = [{"n": n}]
         elif q.startswith("SELECT id, fecha, usuario") and "AS visible FROM pendientes WHERE id = %s FOR UPDATE" in q:
             f = next((f for f in db.filas if f["id"] == params[0]), None)
             self._res = [dict(f, visible=self._visible(f))] if f else []
         elif q.startswith("SELECT id, fecha, usuario") and "WHERE estado = 'pendiente'" in q:
-            self._res = [dict(f) for f in self._de(usuario) if f["estado"] == "pendiente" and self._visible(f)]
+            self._res = [dict(f) for f in self._de(usuario) if f["estado"].lower() == "pendiente" and self._visible(f)]
         elif q.startswith("SELECT id, fecha, usuario") and "WHERE estado = 'en proceso'" in q:
-            self._res = [dict(f) for f in self._de(usuario) if f["estado"] == "en proceso"]
+            self._res = [dict(f) for f in self._de(usuario) if f["estado"].lower() == "en proceso"]
         elif q.startswith("SELECT id, fecha, usuario") and "FROM pendientes WHERE id = %s" in q:
             f = next((f for f in db.filas if f["id"] == params[0]), None)
             self._res = [dict(f)] if f else []
@@ -246,6 +246,19 @@ def test_atender_rechaza_ajena_ya_tomada_inexistente_y_oculta(mp):
     # La gerencia tampoco atiende tareas ajenas: atender es de quien las tiene asignadas.
     _, g = montar(mp, filas, "gerencia")
     assert g.post("/pendientes/4/atender").status_code == 404
+
+
+def test_estado_con_mayuscula_de_las_altas_de_gerencia_tambien_se_puede_tomar_y_terminar(mp):
+    # pendientes-agregar guarda 'Pendiente' / 'En proceso'; MySQL los trata igual que en minúsculas.
+    filas = [fila(1, estado="Pendiente"), fila(2, estado="En proceso", recurrencia="diaria", promesa=date(2026, 10, 19))]
+    _, c = montar(mp, filas, "ana")
+    assert [p["id"] for p in c.get("/pendientes").json()] == [1]
+    assert c.post("/pendientes/1/atender").status_code == 200 and filas[0]["estado"] == "en proceso"
+    assert c.post("/pendientes/1/atender").status_code == 404           # ya no está en cola
+    r = c.post("/pendientes/2/terminar")
+    assert r.status_code == 200 and len(filas) == 3
+    filas[1]["estado"] = "Terminado"
+    assert c.post("/pendientes/2/terminar").json() == {"terminado": True, "id": 2} and len(filas) == 3   # idempotente con mayúscula
 
 
 def test_atender_dos_veces_la_misma_no_la_toma_de_nuevo(mp):

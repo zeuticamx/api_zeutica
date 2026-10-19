@@ -59,6 +59,10 @@ def crear_tablas_prospectos():
     try:
         for stmt in statements:
             cursor.execute(stmt)
+        # Tablas anteriores al borrado lógico de seguimientos.
+        cursor.execute("SHOW COLUMNS FROM prospectos_seguimientos LIKE 'eliminado'")
+        if not cursor.fetchall():
+            cursor.execute("ALTER TABLE prospectos_seguimientos ADD COLUMN eliminado TINYINT(1) NOT NULL DEFAULT 0")
         conn.commit()
         print("Tablas de prospectos verificadas/creadas.")
     except mysql.connector.Error as err:
@@ -137,6 +141,7 @@ class ProspectoEditar(BaseModel):
     credito: Optional[bool] = None
     monto_credito: Optional[int] = None
     dias_credito: Optional[int] = None
+    vendedor: Optional[str] = None  # reasignar: solo gerencia
 
 
 class EtapaCambio(BaseModel):
@@ -154,7 +159,7 @@ class SeguimientoNuevo(BaseModel):
 
 CAMPOS_EDITABLES = (
     "nombre", "email", "empresa", "contacto", "telefono", "direccion", "rfc",
-    "cp", "regimen", "usocfdi", "frecuencia", "credito", "monto_credito", "dias_credito",
+    "cp", "regimen", "usocfdi", "frecuencia", "credito", "monto_credito", "dias_credito", "vendedor",
 )
 
 
@@ -194,8 +199,8 @@ async def listar_prospectos(
     try:
         cursor.execute(
             f"""SELECT p.*,
-                (SELECT MAX(s.fecha) FROM prospectos_seguimientos s WHERE s.prospecto_id = p.id) AS ultimo_seguimiento,
-                (SELECT COUNT(*) FROM prospectos_seguimientos s WHERE s.prospecto_id = p.id) AS total_seguimientos
+                (SELECT MAX(s.fecha) FROM prospectos_seguimientos s WHERE s.prospecto_id = p.id AND s.eliminado = 0) AS ultimo_seguimiento,
+                (SELECT COUNT(*) FROM prospectos_seguimientos s WHERE s.prospecto_id = p.id AND s.eliminado = 0) AS total_seguimientos
                 FROM prospectos p WHERE {' AND '.join(where)} ORDER BY p.id DESC LIMIT %s""",
             tuple(params + [limit]),
         )
@@ -215,7 +220,7 @@ async def ficha_prospecto(prospecto_id: int, usuario: str = Depends(usuario_aute
         fila = _autorizado(cursor, prospecto_id, usuario)
         cursor.execute(
             """SELECT id, vendedor, tipo, fecha, resultado, notas, proxima_accion, proxima_fecha
-               FROM prospectos_seguimientos WHERE prospecto_id = %s
+               FROM prospectos_seguimientos WHERE prospecto_id = %s AND eliminado = 0
                ORDER BY fecha DESC, id DESC LIMIT 50""",
             (prospecto_id,),
         )
@@ -261,26 +266,50 @@ async def crear_prospecto(datos: ProspectoNuevo, usuario: str = Depends(usuario_
 
 @router.patch("/prospectos/{prospecto_id}")
 async def editar_prospecto(prospecto_id: int, datos: ProspectoEditar, usuario: str = Depends(usuario_autenticado)):
+    """Edita los datos del prospecto (dueño o gerencia). Un convertido ya es cliente: 409.
+    `vendedor` (reasignar) es solo de gerencia."""
     campos = {k: getattr(datos, k) for k in datos.model_fields_set}
+    # El panel manda uso_cfdi; la columna se llama usocfdi. Se traduce ANTES de filtrar por columnas editables.
+    if "uso_cfdi" in campos:
+        valor = campos.pop("uso_cfdi")
+        campos["usocfdi"] = valor or campos.get("usocfdi")
     campos = {k: v for k, v in campos.items() if k in CAMPOS_EDITABLES}
     if not campos:
         raise HTTPException(status_code=422, detail="No se envió ningún campo para actualizar")
-    if "nombre" in campos and not (campos["nombre"] or "").strip():
-        raise HTTPException(status_code=422, detail="El nombre del prospecto es obligatorio")
-    if "uso_cfdi" in campos:
-        campos["usocfdi"] = campos.pop("uso_cfdi") or campos.get("usocfdi")
+    if "nombre" in campos:
+        campos["nombre"] = (campos["nombre"] or "").strip()
+        if not campos["nombre"]:
+            raise HTTPException(status_code=422, detail="El nombre del prospecto es obligatorio")
     if "credito" in campos:
         campos["credito"] = int(bool(campos["credito"]))
 
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
     try:
-        _autorizado(cursor, prospecto_id, usuario)
-        cursor.execute(
-            f"UPDATE prospectos SET {', '.join(f'{c} = %s' for c in campos)} WHERE id = %s AND eliminado = 0",
-            tuple(list(campos.values()) + [prospecto_id]),
-        )
-        conn.commit()
+        fila = _autorizado(cursor, prospecto_id, usuario)
+        if fila["etapa"] == "convertido":
+            raise HTTPException(status_code=409, detail="Este prospecto ya es cliente; edítalo desde Clientes")
+        reasignado = None
+        if "vendedor" in campos:
+            nuevo = (campos.pop("vendedor") or "").strip()
+            actual = str(fila.get("vendedor") or "").strip()
+            if nuevo and nuevo.lower() != actual.lower():
+                if not es_gerencia(usuario):
+                    raise HTTPException(status_code=403, detail="Solo gerencia puede reasignar prospectos")
+                cursor.execute("SELECT nombre_usuario FROM usuarios WHERE nombre_usuario = %s", (nuevo,))
+                existe = cursor.fetchone()
+                if not existe:
+                    raise HTTPException(status_code=422, detail=f"El usuario '{nuevo}' no existe")
+                reasignado = existe["nombre_usuario"]
+                campos["vendedor"] = reasignado
+        if campos:
+            cursor.execute(
+                f"UPDATE prospectos SET {', '.join(f'{c} = %s' for c in campos)} WHERE id = %s AND eliminado = 0",
+                tuple(list(campos.values()) + [prospecto_id]),
+            )
+            conn.commit()
+            detalle = f" (reasignado a {reasignado})" if reasignado else ""
+            mov_reg.registrar_movimiento(usuario, f"Editó el prospecto {fila['nombre']}{detalle}: {', '.join(campos)}", "Prospectos")
         return {"id": prospecto_id, "actualizados": list(campos.keys())}
     except mysql.connector.Error as err:
         _error_db(conn, err, "editar")
@@ -386,7 +415,7 @@ async def convertir_a_cliente(prospecto_id: int, usuario: str = Depends(usuario_
         # abierta (si trae proxima_fecha); el resto queda cerrado para no duplicar pendientes.
         cursor.execute(
             """SELECT vendedor, tipo, fecha, resultado, notas, proxima_accion, proxima_fecha
-               FROM prospectos_seguimientos WHERE prospecto_id = %s ORDER BY fecha DESC, id DESC""",
+               FROM prospectos_seguimientos WHERE prospecto_id = %s AND eliminado = 0 ORDER BY fecha DESC, id DESC""",
             (prospecto_id,),
         )
         historial = cursor.fetchall()
@@ -428,12 +457,43 @@ async def eliminar_prospecto(prospecto_id: int, usuario: str = Depends(usuario_a
     cursor = conn.cursor(dictionary=True)
     try:
         fila = _autorizado(cursor, prospecto_id, usuario)
+        if fila["etapa"] == "convertido":
+            raise HTTPException(status_code=409, detail="Este prospecto ya es cliente; no se puede eliminar desde Prospectos")
         cursor.execute("UPDATE prospectos SET eliminado = 1 WHERE id = %s AND eliminado = 0", (prospecto_id,))
         conn.commit()
         mov_reg.registrar_movimiento(usuario, f"Eliminó el prospecto {fila['nombre']}", "Prospectos")
         return {"id": prospecto_id, "eliminado": True}
     except mysql.connector.Error as err:
         _error_db(conn, err, "eliminar")
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.delete("/prospectos/{prospecto_id}/seguimientos/{seguimiento_id}")
+async def eliminar_seguimiento(prospecto_id: int, seguimiento_id: int, usuario: str = Depends(usuario_autenticado)):
+    """Borrado lógico de un seguimiento (recuperable en BD). Lo elimina su autor o gerencia."""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        fila = _autorizado(cursor, prospecto_id, usuario)
+        if fila["etapa"] == "convertido":
+            raise HTTPException(status_code=409, detail="Este prospecto ya es cliente; su historial vive en el CRM")
+        cursor.execute(
+            "SELECT id, vendedor, tipo FROM prospectos_seguimientos WHERE id = %s AND prospecto_id = %s AND eliminado = 0",
+            (seguimiento_id, prospecto_id),
+        )
+        seg = cursor.fetchone()
+        if not seg:
+            raise HTTPException(status_code=404, detail="Seguimiento no encontrado")
+        if not es_gerencia(usuario) and str(seg.get("vendedor") or "").strip().lower() != str(usuario).strip().lower():
+            raise HTTPException(status_code=403, detail="Solo su autor o gerencia puede eliminar este seguimiento")
+        cursor.execute("UPDATE prospectos_seguimientos SET eliminado = 1 WHERE id = %s AND eliminado = 0", (seguimiento_id,))
+        conn.commit()
+        mov_reg.registrar_movimiento(usuario, f"Eliminó un seguimiento ({seg['tipo']}) del prospecto {fila['nombre']}", "Prospectos")
+        return {"id": seguimiento_id, "prospecto_id": prospecto_id, "eliminado": True}
+    except mysql.connector.Error as err:
+        _error_db(conn, err, "eliminar seguimiento")
     finally:
         cursor.close()
         conn.close()

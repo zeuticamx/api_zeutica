@@ -31,6 +31,7 @@ CREATE TABLE IF NOT EXISTS prospectos (
 );
 
 -- Bitácora de seguimiento por prospecto (espejo mínimo de crm_interacciones).
+-- `eliminado` = borrado lógico (recuperable en BD); las tablas viejas lo reciben por ALTER en crear_tablas_prospectos().
 CREATE TABLE IF NOT EXISTS prospectos_seguimientos (
   id                  INT           NOT NULL AUTO_INCREMENT PRIMARY KEY,
   prospecto_id        INT           NOT NULL,
@@ -42,6 +43,7 @@ CREATE TABLE IF NOT EXISTS prospectos_seguimientos (
   proxima_accion      VARCHAR(255)  NULL,
   proxima_fecha       DATE          NULL,
   seguimiento_cerrado TINYINT(1)    NOT NULL DEFAULT 0,
+  eliminado           TINYINT(1)    NOT NULL DEFAULT 0,
   creado              DATETIME      NOT NULL DEFAULT CURRENT_TIMESTAMP,
   INDEX idx_prosp_seg_prospecto (prospecto_id),
   INDEX idx_prosp_seg_vendedor_fecha (vendedor, fecha)
