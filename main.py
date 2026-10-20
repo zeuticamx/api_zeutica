@@ -18,7 +18,7 @@ from slowapi.errors import RateLimitExceeded
 from permisos import usuario_autenticado, asegurar_columna_token_expira, token_horas, es_gerencia
 from routers import cotizacionesBack, productos, ventas, clientes, traspaso, gastos, compras, cleanest, cuentas_pendientes,\
       abonos, estadisticas, inventario, empleados, notificaciones, cuentas_pagar, consulta_registros, pendientes, proveedores, genera_cotizacion, sofi_conversaciones, embarques, sofi_notificaciones, whatsapp_plantillas, skydropx
-from routers import crm, comisiones, prospectos, jobs, meli_webhook, meli_promos, anaqueles
+from routers import crm, comisiones, prospectos, jobs, meli_webhook, meli_promos, anaqueles, reorden
 import mysql.connector
 import skydropx_envios
 from fastapi.middleware.cors import CORSMiddleware
@@ -98,6 +98,12 @@ async def lifespan(app: FastAPI):
         comisiones.crear_tablas_comisiones()
     except Exception as e:
         print(f"❌ No se pudieron crear las tablas de comisiones: {e}")
+
+    # Parámetros por SKU del punto de reorden (lead time y nivel de servicio).
+    try:
+        reorden.crear_tabla_reorden()
+    except Exception as e:
+        print(f"❌ No se pudo crear la tabla de punto de reorden: {e}")
 
     # Columna usuario en devoluciones (auditoría de inventario).
     try:
@@ -234,6 +240,18 @@ async def lifespan(app: FastAPI):
                     print(f"⏰ Job por-facturar programado lun-vie a las {fa} America/Mexico_City.")
             except Exception as e:
                 print(f"❌ No se pudo programar el job por-facturar: {e}")
+            try:
+                from jobs import reorden_compras
+                if os.getenv("REORDEN_JOB_ENABLED", "1") == "1":
+                    rh = os.getenv("REORDEN_JOB_HORA", "09:00")
+                    rd = os.getenv("REORDEN_JOB_DIAS", "mon")
+                    # Semanal por defecto; zona CDMX dentro de crear_trigger.
+                    scheduler.add_job(_ejecucion.ejecutar, reorden_compras.crear_trigger(rh, rd),
+                                      kwargs={"modulo": reorden_compras, "motivo": "scheduler"}, id="reorden", replace_existing=True,
+                                      misfire_grace_time=600, coalesce=True, max_instances=1)
+                    print(f"⏰ Job punto de reorden programado ({rd}) a las {rh} America/Mexico_City.")
+            except Exception as e:
+                print(f"❌ No se pudo programar el job punto de reorden: {e}")
             # Verificación visible en logs: próxima corrida de cada job en hora CDMX.
             try:
                 for jb in scheduler.get_jobs():
@@ -325,6 +343,7 @@ app.include_router(prospectos.router, dependencies=[Depends(obtener_usuario_actu
 app.include_router(jobs.router, dependencies=[Depends(obtener_usuario_actual)])
 app.include_router(meli_promos.router, dependencies=[Depends(obtener_usuario_actual)])
 app.include_router(anaqueles.router, dependencies=[Depends(obtener_usuario_actual)])
+app.include_router(reorden.router, dependencies=[Depends(obtener_usuario_actual)])
 # Sin obtener_usuario_actual a proposito: el WebSocket valida el token por query
 # param y el POST de escalacion valida X-API-Key (n8n no tiene sesion de usuario).
 app.include_router(sofi_notificaciones.router)

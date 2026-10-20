@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from permisos import usuario_autenticado
+from permisos import usuario_autenticado, requerir_gerencia
 
 router = APIRouter(tags=["/jobs"], responses={404: {"Mensaje": "No encontrado"}})
 
@@ -236,5 +236,30 @@ async def ventas_facturar_status(usuario: str = Depends(usuario_autenticado)):
             "enabled": os.getenv("VENTASF_JOB_ENABLED", "1") == "1",
             "hora": os.getenv("VENTASF_JOB_HORA", "10:45"),
             "dias": "lun-vie",
+        },
+    }
+
+
+class ReordenRunIn(BaseModel):
+    motivo: str = Field(default="manual", max_length=40)
+
+
+@router.post("/jobs/reorden/run")
+async def reorden_run(datos: ReordenRunIn, usuario: str = Depends(requerir_gerencia)):
+    """Aviso de punto de reorden por Telegram en segundo plano (202). Solo gerencia."""
+    from jobs import reorden_compras
+    return _lanzar(reorden_compras, None, f"{datos.motivo} por {usuario}", "reorden")
+
+
+@router.get("/jobs/reorden/status")
+async def reorden_status(usuario: str = Depends(requerir_gerencia)):
+    """Último run + configuración (solo gerencia)."""
+    from jobs import reorden_compras
+    return {
+        "ultimo": reorden_compras.LAST_RUN,
+        "config": {
+            "enabled": os.getenv("REORDEN_JOB_ENABLED", "1") == "1",
+            "hora": os.getenv("REORDEN_JOB_HORA", "09:00"),
+            "dias": os.getenv("REORDEN_JOB_DIAS", "mon"),
         },
     }
