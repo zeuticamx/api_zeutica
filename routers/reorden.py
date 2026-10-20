@@ -58,13 +58,33 @@ SQL_PRODUCTOS = """
 """
 
 # Rango semiabierto sobre fecha_registro (usa idx_ventasregistro_fecha_registro).
-# '%%' porque la consulta lleva parámetros: mysql.connector interpreta los '%'.
+# Año y mes salen como números y la etiqueta 'YYYY-MM' se arma en Python: DATE_FORMAT puede
+# devolver bytearray según servidor/conector y entonces ningún mes coincidía con la ventana.
 SQL_CONSUMO = """
-    SELECT sku, DATE_FORMAT(fecha_registro, '%%Y-%%m') AS mes, SUM(cantidad) AS cantidad
+    SELECT sku, YEAR(fecha_registro) AS anio, MONTH(fecha_registro) AS mes, SUM(cantidad) AS cantidad
     FROM ventasRegistro
     WHERE estatus = 'activa' AND fecha_registro >= %s AND fecha_registro < %s
-    GROUP BY sku, mes
+    GROUP BY sku, anio, mes
 """
+
+
+def _texto(valor) -> str:
+    """Texto de un valor que el conector pudo entregar como bytes/bytearray."""
+    if isinstance(valor, (bytes, bytearray)):
+        return bytes(valor).decode("utf-8", "replace")
+    return str(valor if valor is not None else "")
+
+
+def armar_consumo(filas) -> dict:
+    """{sku: {'YYYY-MM': cantidad}} a partir de las filas de SQL_CONSUMO."""
+    consumo = {}
+    for f in filas:
+        if f.get("anio") is None or f.get("mes") is None:
+            continue
+        etiqueta = f"{int(f['anio']):04d}-{int(f['mes']):02d}"
+        por_mes = consumo.setdefault(_texto(f["sku"]).strip(), {})
+        por_mes[etiqueta] = por_mes.get(etiqueta, 0.0) + float(f["cantidad"] or 0)
+    return consumo
 
 SQL_TRANSITO = """
     SELECT i.sku, SUM(i.qty) AS qty
@@ -87,18 +107,21 @@ def cargar_reorden(hoy=None) -> dict:
         cursor.execute(SQL_PRODUCTOS)
         productos = cursor.fetchall()
         cursor.execute(SQL_CONSUMO, (desde, hasta))
-        consumo = {}
-        for f in cursor.fetchall():
-            consumo.setdefault(f["sku"], {})[f["mes"]] = float(f["cantidad"] or 0)
+        consumo = armar_consumo(cursor.fetchall())
         cursor.execute(SQL_TRANSITO)
-        transito = {f["sku"]: float(f["qty"] or 0) for f in cursor.fetchall()}
+        transito = {_texto(f["sku"]).strip(): float(f["qty"] or 0) for f in cursor.fetchall()}
         cursor.execute(SQL_PARAMETROS)
-        parametros = {f["sku"]: f for f in cursor.fetchall()}
+        parametros = {_texto(f["sku"]).strip(): f for f in cursor.fetchall()}
     finally:
         cursor.close()
         conn.close()
+    conocidos = {_texto(p["sku"]).strip().upper() for p in productos}
     return {
         "meses": etiquetas,
+        # Piezas vendidas en la ventana y SKU vendidos que no existen en productos: si el primero
+        # es 0 el panel avisa que no se encontraron ventas en vez de mostrar «sin demanda» en todo.
+        "ventas_en_ventana": round(sum(sum(m.values()) for m in consumo.values()), 2),
+        "skus_vendidos_sin_producto": sorted(k for k in consumo if k.upper() not in conocidos),
         "desde": desde.isoformat(),
         "hasta": hasta.isoformat(),  # exclusivo: día 1 del mes en curso
         "defaults": {"lead_time_meses": rl.LEAD_TIME_DEFAULT, "nivel_servicio_z": rl.Z_DEFAULT},

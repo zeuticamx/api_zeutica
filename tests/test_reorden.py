@@ -102,11 +102,22 @@ def test_evaluar_usa_parametros_propios_o_defaults_y_ordena():
 
 # ---------- SQL ----------
 
-def test_sql_consumo_solo_activas_por_mes_y_escapa_porcentajes():
+def test_sql_consumo_solo_activas_por_anio_y_mes_numericos():
     q = " ".join(reorden.SQL_CONSUMO.split())
-    assert "estatus = 'activa'" in q and "GROUP BY sku, mes" in q
-    assert "'%%Y-%%m'" in q  # lleva parámetros: mysql.connector exige '%%'
+    assert "estatus = 'activa'" in q and "GROUP BY sku, anio, mes" in q
+    assert "YEAR(fecha_registro)" in q and "MONTH(fecha_registro)" in q
+    assert "DATE_FORMAT" not in q  # podía devolver bytearray y dejar todo el consumo en 0
     assert "fecha_registro >= %s AND fecha_registro < %s" in q
+
+
+def test_armar_consumo_arma_etiqueta_y_tolera_bytes():
+    filas = [
+        {"sku": "GUA-M", "anio": 2026, "mes": 9, "cantidad": 30},
+        {"sku": bytearray(b" GUA-M "), "anio": 2026, "mes": 9, "cantidad": 5},   # bytes y espacios
+        {"sku": b"GUA-L", "anio": 2025, "mes": 12, "cantidad": None},
+        {"sku": "X", "anio": None, "mes": None, "cantidad": 9},                  # fecha nula: se omite
+    ]
+    assert reorden.armar_consumo(filas) == {"GUA-M": {"2026-09": 35.0}, "GUA-L": {"2025-12": 0.0}}
 
 
 def test_sql_transito_solo_embarques_sin_recibir_y_existencia_es_stock_total():
@@ -153,7 +164,7 @@ class FakeDB:
         self.commits = 0
         self.skus = {"GUANITRL-M"}
         self.productos = [{"sku": "GUANITRL-M", "nombre": "Guante", "categoria": "GUANTES", "existencia": 20}]
-        self.consumo = [{"sku": "GUANITRL-M", "mes": "2026-09", "cantidad": 30}]
+        self.consumo = [{"sku": "GUANITRL-M", "anio": 2026, "mes": 9, "cantidad": 30}]
         self.transito = [{"sku": "GUANITRL-M", "qty": 5}]
         self.parametros = []
 
@@ -196,9 +207,21 @@ def test_get_reorden_devuelve_filas_evaluadas(db):
     body = r.json()
     assert len(body["meses"]) == 12
     assert body["defaults"] == {"lead_time_meses": 3.0, "nivel_servicio_z": 1.65}
+    assert body["ventas_en_ventana"] == 30 and body["skus_vendidos_sin_producto"] == []
     f = body["filas"][0]
     assert f["sku"] == "GUANITRL-M" and f["en_transito"] == 5 and f["total_mercancia"] == 25
     assert f["decision"] in ("COMPRAR", "OK")
+
+
+def test_consumo_con_sku_en_bytes_llega_a_la_fila_y_sku_huerfano_se_reporta(db):
+    # Último mes completo de la ventana: el consumo debe aparecer en la fila del producto.
+    ultimo = rl.ventana_meses(datetime.now(CDMX).date())[0][-1]
+    anio, mes = int(ultimo[:4]), int(ultimo[5:])
+    db.consumo = [{"sku": bytearray(b"GUANITRL-M"), "anio": anio, "mes": mes, "cantidad": 7},
+                  {"sku": "NOEXISTE", "anio": anio, "mes": mes, "cantidad": 3}]
+    body = _cliente("gerencia").get("/reorden").json()
+    assert body["ventas_en_ventana"] == 10 and body["skus_vendidos_sin_producto"] == ["NOEXISTE"]
+    assert body["filas"][0]["consumos"][-1] == 7 and body["filas"][0]["decision"] != "SIN_DEMANDA"
 
 
 def test_put_parametros_guarda_con_usuario_del_token(db):
