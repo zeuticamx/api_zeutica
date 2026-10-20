@@ -44,16 +44,39 @@ def test_migracion_agrega_columnas_indice_y_backfill(monkeypatch):
     monkeypatch.setattr(schema_ventas, "get_db_connection", lambda: base)
     rep = schema_ventas.asegurar_columnas_ventas()
     qs = [q for q, _ in base.cursor_obj.ejecutados]
-    assert rep["columnas_agregadas"] == ["inventario_descontado", "costo_unitario", "es_full", "estatus"]
+    assert rep["columnas_agregadas"] == ["inventario_descontado", "costo_unitario", "es_full", "estatus",
+                                         "facturable", "facturada", "cotizacion", "factura"]
     assert rep["indice_creado"] is True and rep["backfill"] == 3
     assert rep["canceladas_backfill"] == 3
     assert any("ADD UNIQUE KEY uq_venta_partida" in q for q in qs)
+    assert any("ADD INDEX idx_ventasregistro_cotizacion (cotizacion)" in q for q in qs)
+    assert any("ADD INDEX idx_ventasregistro_por_facturar (facturable, facturada, estatus)" in q for q in qs)
     assert any("SET inventario_descontado = 1" in q for q in qs)
+
+
+def test_migracion_facturacion_respeta_columnas_existentes(monkeypatch):
+    # En producción facturable/facturada ya existen: solo se agregan cotizacion y factura.
+    base = FakeDB()
+
+    def execute_con_facturacion(self, query, params=None):
+        q = " ".join(query.split())
+        self.ejecutados.append((q, params))
+        if q.startswith("SELECT COLUMN_NAME"):
+            self._colas = [("id_ventas",), ("facturable",), ("facturada",)]
+        elif q.startswith("SELECT INDEX_NAME"):
+            self._colas = []
+
+    monkeypatch.setattr(FakeCursor, "execute", execute_con_facturacion)
+    monkeypatch.setattr(schema_ventas, "get_db_connection", lambda: base)
+    rep = schema_ventas.asegurar_columnas_ventas(backfill_descontado=False)
+    assert "facturable" not in rep["columnas_agregadas"] and "facturada" not in rep["columnas_agregadas"]
+    assert {"cotizacion", "factura"} <= set(rep["columnas_agregadas"])
 
 
 def test_migracion_idempotente_si_todo_existe(monkeypatch):
     base = FakeDB()
-    cols = [("id_ventas",), ("sku",), ("inventario_descontado",), ("costo_unitario",), ("es_full",), ("estatus",)]
+    cols = [("id_ventas",), ("sku",), ("inventario_descontado",), ("costo_unitario",), ("es_full",), ("estatus",),
+            ("facturable",), ("facturada",), ("cotizacion",), ("factura",)]
 
     orig_execute = FakeCursor.execute
 
@@ -63,7 +86,8 @@ def test_migracion_idempotente_si_todo_existe(monkeypatch):
         if q.startswith("SELECT COLUMN_NAME"):
             self._colas = list(cols)
         elif q.startswith("SELECT INDEX_NAME"):
-            self._colas = [("uq_venta_partida",), ("idx_ventasregistro_estatus",)]
+            self._colas = [("uq_venta_partida",), ("idx_ventasregistro_estatus",),
+                           ("idx_ventasregistro_cotizacion",), ("idx_ventasregistro_por_facturar",)]
 
     monkeypatch.setattr(FakeCursor, "execute", execute_con_todo)
     monkeypatch.setattr(schema_ventas, "get_db_connection", lambda: base)

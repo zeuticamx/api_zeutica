@@ -545,6 +545,12 @@ async def run_job(dry_run: bool | None = None, motivo: str = "manual", telegram:
         ordenes = [o for p in paginas for o in (p.get("results") or [])]
         if not ordenes:
             await avisar("📭 <b>Resumen de ventas MELI</b>\n\nNo hubo ventas pagadas en la ventana revisada (últimas 72 h).")
+            try:
+                import notificaciones_service
+                await notificaciones_service.crear_y_notificar_todos(
+                    "Sin ventas MELI", "No hubo ventas pagadas en las últimas 72 h.", "info")
+            except Exception as err:
+                print(f"Job MeLi: falló persistir notificaciones: {err}")
             resumen.update({"estado": "sin_ventas", "ordenes": 0})
         else:
             base = limpiar_ordenes(paginas)
@@ -577,6 +583,17 @@ async def run_job(dry_run: bool | None = None, motivo: str = "manual", telegram:
                 await avisar(txt[:4000], _alert_chat())
             for chunk in build_reporte(lineas, margenes):
                 await avisar(chunk)
+            # Sin DRY_RUN el aviso refleja cambios reales; en simulación no se notifica.
+            if not dry:
+                try:
+                    import notificaciones_service
+                    await notificaciones_service.crear_y_notificar_todos(
+                        "Ventas MELI procesadas",
+                        f"{stats['nuevas']} nuevas, {stats['descontadas']} descontadas, "
+                        f"{stats['sin_stock']} sin stock.",
+                        "warn" if stats["sin_stock"] else "info")
+                except Exception as err:
+                    print(f"Job MeLi: falló persistir notificaciones: {err}")
             try:
                 mov_reg.registrar_movimiento(
                     "job-meli", f"Job MeLi {motivo}: {stats['nuevas']} nuevas, {stats['descontadas']} descontadas, "

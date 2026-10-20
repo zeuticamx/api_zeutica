@@ -117,6 +117,19 @@ def armar_resumen(conteos, clientes, vencidos, movimientos, desde: date, hasta: 
     }
 
 
+def armar_prospectos_nuevos(filas):
+    """
+    filas: [{vendedor, total}]  prospectos creados en el periodo (tabla prospectos).
+    """
+    por_vendedor = []
+    for f in filas:
+        n = int(f.get("total") or 0)
+        if n:
+            por_vendedor.append({"vendedor": f.get("vendedor") or "(sin vendedor)", "total": n})
+    por_vendedor.sort(key=lambda v: (-v["total"], v["vendedor"]))
+    return {"total": sum(v["total"] for v in por_vendedor), "por_vendedor": por_vendedor}
+
+
 def armar_embudo(actual, movimientos):
     """
     actual:      [{vendedor, etapa, total}]  clientes por etapa hoy (crm_cartera)

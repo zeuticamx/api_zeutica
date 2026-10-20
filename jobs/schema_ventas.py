@@ -15,6 +15,20 @@ COLUMNAS_JOB = {
     "estatus": "VARCHAR(20) NOT NULL DEFAULT 'activa'",
 }
 
+# Facturación de ventas del portal (aparte de COLUMNAS_JOB para que
+# verificar_esquema_job de los marketplaces no dependa de ellas).
+# facturable/facturada ya existen en producción; se agregan solo si faltan.
+# cotizacion = folio de origen (cotizaciones.codigo_cotizacion), SIN FK: el
+# folio se valida en código y uno inexistente se guarda como NULL.
+COLUMNAS_FACTURACION = {
+    "facturable": "TINYINT(1) NOT NULL DEFAULT 0",
+    "facturada": "TINYINT(1) NOT NULL DEFAULT 0",
+    "cotizacion": "VARCHAR(20) NULL",
+    "factura": "VARCHAR(100) NULL",
+}
+INDICE_COTIZACION = ("idx_ventasregistro_cotizacion", "(cotizacion)")
+INDICE_POR_FACTURAR = ("idx_ventasregistro_por_facturar", "(facturable, facturada, estatus)")
+
 # Clave para que el INSERT ... ON DUPLICATE KEY de los jobs sea idempotente.
 # (id_ventas, sku, plataforma): una venta tiene una fila por partida.
 INDICE_PARTIDA = ("uq_venta_partida", "(id_ventas, sku, plataforma)")
@@ -48,13 +62,20 @@ def asegurar_columnas_ventas(backfill_descontado: bool = True) -> dict:
     cursor = conn.cursor()
     try:
         existentes = columnas_existentes(cursor, "ventasRegistro")
-        for columna, definicion in COLUMNAS_JOB.items():
+        for columna, definicion in {**COLUMNAS_JOB, **COLUMNAS_FACTURACION}.items():
             if columna not in existentes:
                 cursor.execute(f"ALTER TABLE ventasRegistro ADD COLUMN {columna} {definicion}")
                 reporte["columnas_agregadas"].append(columna)
         cursor.execute("SELECT INDEX_NAME FROM information_schema.STATISTICS "
                        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'ventasRegistro'")
         indices = {str(fila[0]).lower() for fila in cursor.fetchall()}
+        for nombre_fac, cols_fac in (INDICE_COTIZACION, INDICE_POR_FACTURAR):
+            if nombre_fac not in indices:
+                try:
+                    cursor.execute(f"ALTER TABLE ventasRegistro ADD INDEX {nombre_fac} {cols_fac}")
+                    reporte["indice_creado"] = True
+                except mysql.connector.Error as err:
+                    print(f"No se pudo crear {nombre_fac}: {err}")
         nombre, cols = INDICE_PARTIDA
         if nombre not in indices:
             try:

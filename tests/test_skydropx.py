@@ -204,13 +204,121 @@ async def test_crear_envio_dos_guias_mismo_articulo_reconsulta_y_guarda_cada_una
 @pytest.mark.asyncio
 async def test_crear_envio_sin_tracking_todavia_guarda_las_guias_igual(monkeypatch, sin_efectos):
     pendiente = fixture("shipment_v1_get")  # sigue "in_creation"
-    pedir_mock(monkeypatch, fixture("shipment_v2_post"), *([pendiente] * 6))
+    pedir_mock(monkeypatch, fixture("shipment_v2_post"), *([pendiente] * 8))
 
     r = await router.crear_envio(envio_request())
 
     assert len(r["paquetes"]) == 2
     assert len(sin_efectos) == 2
     assert all(g["tracking_number"] is None and g["package_id"] for g in sin_efectos)
+
+
+@pytest.mark.asyncio
+async def test_crear_envio_con_tracking_pero_sin_etiqueta_sigue_reconsultando(monkeypatch, sin_efectos):
+    un_shipment = fixture("shipment_v2_post")
+    un_shipment["data"] = un_shipment["data"][:1]
+    solo_tracking = con_tracking(fixture("shipment_v1_get"), "TRK-A", None)
+    completa = con_tracking(fixture("shipment_v1_get"), "TRK-A", "https://label/a")
+    mock = pedir_mock(monkeypatch, un_shipment, solo_tracking, completa)
+
+    r = await router.crear_envio(envio_request(cantidad_bultos=1))
+
+    assert [c.args[0] for c in mock.await_args_list] == ["POST", "GET", "GET"]
+    assert r["paquetes"][0]["etiqueta_url"] == "https://label/a"
+    assert sin_efectos[0]["etiqueta_url"] == "https://label/a"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Refresco de guias (tracking y etiqueta pendientes)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def fila_guardada(**extra):
+    fila = {"codigo_cotizacion": "COT-100", "shipment_id": SHIPMENT_A, "package_id": "PKG-A",
+            "tracking_number": None, "etiqueta_url": None}
+    fila.update(extra)
+    return fila
+
+
+@pytest.mark.asyncio
+async def test_refrescar_envios_trae_la_etiqueta_desde_skydropx(monkeypatch):
+    antes = [fila_guardada()]
+    despues = [fila_guardada(tracking_number="TRK-A", etiqueta_url="https://label/a")]
+    listas = iter([antes, despues])
+    monkeypatch.setattr(router.skydropx_envios, "listar_envios", lambda codigo: next(listas))
+    completados = []
+    monkeypatch.setattr(router.skydropx_envios, "completar_guias", lambda g: completados.append(g) or 1)
+    mock = pedir_mock(monkeypatch, con_tracking(fixture("shipment_v1_get"), "TRK-A", "https://label/a"))
+
+    r = await router.refrescar_envios(router.RefrescarEnviosRequest(codigo_cotizacion="COT-100"))
+
+    assert mock.await_args_list[0].args == ("GET", f"/api/v1/shipments/{SHIPMENT_A}")
+    assert completados[0][0]["etiqueta_url"] == "https://label/a"
+    assert r["envios"] == despues and r["errores"] == []
+
+
+@pytest.mark.asyncio
+async def test_refrescar_envios_no_consulta_lo_que_ya_esta_completo(monkeypatch):
+    completas = [fila_guardada(tracking_number="TRK-A", etiqueta_url="https://label/a")]
+    monkeypatch.setattr(router.skydropx_envios, "listar_envios", lambda codigo: completas)
+    mock = pedir_mock(monkeypatch)
+
+    r = await router.refrescar_envios(router.RefrescarEnviosRequest(codigo_cotizacion="COT-100"))
+
+    assert mock.await_count == 0
+    assert r["envios"] == completas
+
+
+@pytest.mark.asyncio
+async def test_refrescar_envios_tolera_error_de_skydropx(monkeypatch):
+    pendientes = [fila_guardada()]
+    monkeypatch.setattr(router.skydropx_envios, "listar_envios", lambda codigo: pendientes)
+    monkeypatch.setattr(router.skydropx_envios, "completar_guias", lambda g: 0)
+    pedir_mock(monkeypatch, skydropx_service.SkydropxServiceError("boom"))
+
+    r = await router.refrescar_envios(router.RefrescarEnviosRequest(codigo_cotizacion="COT-100"))
+
+    assert r["status"] == "success"
+    assert r["envios"] == pendientes
+    assert len(r["errores"]) == 1
+
+
+def test_completar_guias_solo_llena_huecos_y_no_toca_la_cotizacion(monkeypatch):
+    import skydropx_envios
+
+    ejecutadas = []
+
+    class FakeCursor:
+        rowcount = 1
+
+        def execute(self, sql, params):
+            ejecutadas.append((sql, params))
+
+        def close(self):
+            pass
+
+    class FakeConn:
+        def cursor(self):
+            return FakeCursor()
+
+        def commit(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(skydropx_envios, "get_db_connection", lambda: FakeConn())
+
+    n = skydropx_envios.completar_guias([
+        {"package_id": "PKG-A", "shipment_id": SHIPMENT_A, "tracking_number": "TRK-A",
+         "etiqueta_url": "https://label/a", "tracking_url": None, "orden_detalle_url": None},
+        {"package_id": None, "shipment_id": None, "tracking_number": "TRK-X", "etiqueta_url": None},  # sin llave
+        {"package_id": "PKG-B", "shipment_id": SHIPMENT_B, "tracking_number": None, "etiqueta_url": None},  # sin datos
+    ])
+
+    assert n == 1 and len(ejecutadas) == 1
+    sql, params = ejecutadas[0]
+    assert "codigo_cotizacion" not in sql and "WHERE package_id = %s" in sql
+    assert params == ("TRK-A", "https://label/a", "", "", "PKG-A")
 
 
 # ─────────────────────────────────────────────────────────────────────────────

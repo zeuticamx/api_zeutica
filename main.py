@@ -223,6 +223,17 @@ async def lifespan(app: FastAPI):
                     print(f"⏰ Job por-vender programado a las {int(vhh):02d}:{int(vmm):02d} America/Mexico_City.")
             except Exception as e:
                 print(f"❌ No se pudo programar el job por-vender: {e}")
+            try:
+                from jobs import ventas_por_facturar
+                if os.getenv("VENTASF_JOB_ENABLED", "1") == "1":
+                    fa = os.getenv("VENTASF_JOB_HORA", "10:45")
+                    # Lunes a viernes (único job que no es diario); zona CDMX dentro de crear_trigger.
+                    scheduler.add_job(_ejecucion.ejecutar, ventas_por_facturar.crear_trigger(fa),
+                                      kwargs={"modulo": ventas_por_facturar, "motivo": "scheduler"}, id="ventas_facturar", replace_existing=True,
+                                      misfire_grace_time=600, coalesce=True, max_instances=1)
+                    print(f"⏰ Job por-facturar programado lun-vie a las {fa} America/Mexico_City.")
+            except Exception as e:
+                print(f"❌ No se pudo programar el job por-facturar: {e}")
             # Verificación visible en logs: próxima corrida de cada job en hora CDMX.
             try:
                 for jb in scheduler.get_jobs():

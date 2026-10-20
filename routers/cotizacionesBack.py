@@ -232,18 +232,41 @@ async def vincular_factura(vinculos: List[VinculoFactura]):
     Registra la relacion de cotizacion a factura realizada para vincular pago.
     """
     connection = get_db_connection()
+    ventas_marcadas = {}  # codigo_cotizacion -> filas de ventasRegistro actualizadas
     try:
         with connection.cursor() as cursor:
             # Recorremos cada cotización modificada que llegó desde frontend
             for v in vinculos:
-                # Actualizamos el registro.                 
+                cursor.execute("SELECT relacion_factura FROM cotizaciones WHERE codigo_cotizacion = %s FOR UPDATE",
+                               (v.codigo_cotizacion,))
+                previa = cursor.fetchall()
+                factura_previa = str((previa[0][0] if previa else None) or "").strip() or None
+
+                # Actualizamos el registro.
                 sql = "UPDATE cotizaciones SET relacion_factura = %s, metodo_pago = %s, fecha_pago = %s WHERE codigo_cotizacion = %s"
-                cursor.execute(sql, (v.relacion_factura, v.metodo_pago, v.fecha_pago, v.codigo_cotizacion))            
-            
+                cursor.execute(sql, (v.relacion_factura, v.metodo_pago, v.fecha_pago, v.codigo_cotizacion))
+
+                # Las ventas que salieron de esta cotización (ventasRegistro.cotizacion, sin FK)
+                # quedan facturadas. Si se le quita la factura, regresan a pendientes solo las
+                # que tenían esa misma factura (no se pisa una marcada a mano desde Reportes).
+                # Cambiar solo forma/fecha de pago sin factura no toca las ventas.
+                factura = str(v.relacion_factura or "").strip() or None
+                if factura:
+                    cursor.execute(
+                        "UPDATE ventasRegistro SET facturada = 1, factura = %s WHERE cotizacion = %s",
+                        (factura, v.codigo_cotizacion))
+                    ventas_marcadas[v.codigo_cotizacion] = cursor.rowcount
+                elif factura_previa:
+                    cursor.execute(
+                        "UPDATE ventasRegistro SET facturada = 0, factura = NULL WHERE cotizacion = %s AND factura = %s",
+                        (v.codigo_cotizacion, factura_previa))
+
             # Guardamos los cambios
             connection.commit()
 
-            mov_reg.registrar_movimiento(vinculos[0].usuario, f"Vinculó factura {v.relacion_factura} a cotización {v.codigo_cotizacion}", "Cotizaciones")
+            # Bitácora: un movimiento por cada vínculo (después del commit, como antes).
+            for v in vinculos:
+                mov_reg.registrar_movimiento(v.usuario, f"Vinculó factura {v.relacion_factura} a cotización {v.codigo_cotizacion}", "Cotizaciones")
 
             # Aviso por vínculo (antes solo vivía en el workflow n8n, que nadie llama).
             for v in vinculos:
@@ -259,6 +282,8 @@ async def vincular_factura(vinculos: List[VinculoFactura]):
                     f"• <b>Fecha de pago:</b> {html.escape(str(v.fecha_pago or '—'))}\n"
                     f"• <b>Usuario:</b> {html.escape(str(v.usuario))}"
                 )
+                if ventas_marcadas.get(v.codigo_cotizacion):
+                    message += f"\n• <b>Partidas de venta marcadas facturadas:</b> {ventas_marcadas[v.codigo_cotizacion]}"
                 asyncio.create_task(send_telegram_alert(message))
             try:
                 import notificaciones_service

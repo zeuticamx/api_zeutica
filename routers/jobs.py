@@ -213,3 +213,28 @@ async def cotizaciones_vender_status(usuario: str = Depends(usuario_autenticado)
             "hora": os.getenv("COTIZV_JOB_HORA", "13:00"),
         },
     }
+
+
+class VentasFacturarRunIn(BaseModel):
+    motivo: str = Field(default="manual", max_length=40)
+
+
+@router.post("/jobs/ventas-facturar/run")
+async def ventas_facturar_run(datos: VentasFacturarRunIn, usuario: str = Depends(usuario_autenticado)):
+    """Ventas por facturar en segundo plano (202). Permiso general."""
+    from jobs import ventas_por_facturar
+    return _lanzar(ventas_por_facturar, None, f"{datos.motivo} por {usuario}", "ventas-facturar")
+
+
+@router.get("/jobs/ventas-facturar/status")
+async def ventas_facturar_status(usuario: str = Depends(usuario_autenticado)):
+    """Último run + configuración (permiso general)."""
+    from jobs import ventas_por_facturar
+    return {
+        "ultimo": ventas_por_facturar.LAST_RUN,
+        "config": {
+            "enabled": os.getenv("VENTASF_JOB_ENABLED", "1") == "1",
+            "hora": os.getenv("VENTASF_JOB_HORA", "10:45"),
+            "dias": "lun-vie",
+        },
+    }

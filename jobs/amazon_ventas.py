@@ -516,6 +516,17 @@ async def run_job(dry_run: bool | None = None, motivo: str = "manual", telegram:
             stats = aplicar_ventas(agrupadas, dry)
             for chunk in build_resumen(agrupadas):
                 await avisar(chunk)
+            # Sin DRY_RUN el aviso refleja cambios reales; en simulación no se notifica.
+            if not dry:
+                try:
+                    import notificaciones_service
+                    await notificaciones_service.crear_y_notificar_todos(
+                        "Ventas Amazon procesadas",
+                        f"{stats['nuevas']} nuevas, {stats['descontadas']} descontadas, "
+                        f"{stats['sin_stock']} sin stock, {stats['regresadas']} regresadas.",
+                        "warn" if stats["sin_stock"] else "info")
+                except Exception as err:
+                    print(f"Job Amazon: falló persistir notificaciones: {err}")
             try:
                 mov_reg.registrar_movimiento(
                     "job-amazon",

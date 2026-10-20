@@ -348,10 +348,10 @@ async def crear_envio(datos: EnvioRequest):
 
     # El POST casi siempre contesta antes de que el carrier asigne tracking y
     # etiqueta (sandbox: "in_creation" con tracking_number null). Se reconsulta
-    # cada shipment pendiente un par de veces; si sigue sin llegar, el webhook
-    # lo completara despues.
-    for _ in range(3):
-        pendientes = _shipments_sin_tracking(guias)
+    # cada shipment al que le falte tracking O etiqueta unas veces; si sigue sin
+    # llegar, lo completan el webhook o POST /skydropx/envios/refrescar.
+    for _ in range(4):
+        pendientes = _shipments_incompletos(guias)
         if not pendientes:
             break
         await asyncio.sleep(1.5)
@@ -427,6 +427,36 @@ async def listar_envios(
     que el front no tenga que conocer el catalogo de Skydropx.
     """
     return {"status": "success", "envios": skydropx_envios.listar_envios(codigo_cotizacion)}
+
+
+class RefrescarEnviosRequest(BaseModel):
+    codigo_cotizacion: str = Field(min_length=1, description="Cotizacion cuyas guias se completan")
+
+
+@router.post("/skydropx/envios/refrescar")
+async def refrescar_envios(datos: RefrescarEnviosRequest):
+    """
+    Completa tracking y etiqueta de las guias de una cotizacion consultando a
+    Skydropx directamente (GET del shipment), sin esperar al webhook.
+
+    La etiqueta casi nunca viene en la respuesta de la compra y, si el webhook no
+    la trae (o no esta configurado), la guia se quedaba sin nada que imprimir.
+    Solo se consultan los shipments a los que les falta tracking o etiqueta; un
+    error de Skydropx en uno no tumba a los demas. Devuelve la lista ya
+    actualizada, con el mismo formato que GET /skydropx/envios.
+    """
+    envios = skydropx_envios.listar_envios(datos.codigo_cotizacion)
+    errores: List[str] = []
+    for sid in _shipments_incompletos(envios):
+        try:
+            actualizado = await skydropx_service.obtener_envio(sid)
+        except SkydropxServiceError as err:
+            errores.append(f"{sid}: {err.detalle}")
+            continue
+        skydropx_envios.completar_guias(skydropx_service.extraer_guias(actualizado))
+    if errores:
+        print(f"Refresco de guias Skydropx con errores: {errores}")
+    return {"status": "success", "envios": skydropx_envios.listar_envios(datos.codigo_cotizacion), "errores": errores}
 
 
 @router.get("/skydropx/envios/{tracking_number}/eventos")
@@ -813,10 +843,15 @@ def _armar_packages(
     return packages
 
 
-def _shipments_sin_tracking(guias: List[Dict[str, Any]]) -> List[str]:
-    """shipment_id de las guias que todavia no traen tracking_number, sin repetir."""
+def _shipments_incompletos(guias: List[Dict[str, Any]], clave_etiqueta: str = "etiqueta_url") -> List[str]:
+    """
+    shipment_id de las guias a las que todavia les falta tracking_number o
+    etiqueta, sin repetir. La etiqueta suele llegar despues del tracking: sin
+    mirarla, la guia se guardaba sin nada que imprimir.
+    """
     return list(dict.fromkeys(
-        g["shipment_id"] for g in guias if g.get("shipment_id") and not g.get("tracking_number")
+        g["shipment_id"] for g in guias
+        if g.get("shipment_id") and not (g.get("tracking_number") and g.get(clave_etiqueta))
     ))
 
 

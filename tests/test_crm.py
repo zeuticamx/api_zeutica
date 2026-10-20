@@ -430,6 +430,25 @@ def test_resumen_endpoint_arma_reporte_con_filas_de_mysql(client, db):
     assert body["por_vendedor"][0]["vendedor"] == "ana"
 
 
+def test_embudo_endpoint_incluye_prospectos_nuevos_del_periodo(client, db):
+    db.respuestas += [
+        ("FROM prospectos", [{"vendedor": "luis", "total": 1}, {"vendedor": "ana", "total": 3}]),
+    ]
+    r = client.get("/crm/metricas/embudo", params={"desde": "2026-09-29", "hasta": "2026-10-01"}, headers=GER)
+    assert r.status_code == 200
+    assert r.json()["prospectos_nuevos"] == {
+        "total": 4,
+        "por_vendedor": [{"vendedor": "ana", "total": 3}, {"vendedor": "luis", "total": 1}],
+    }
+    q, params = db.consultas("SELECT vendedor, COUNT(*) AS total FROM prospectos")[0]
+    assert "eliminado = 0" in q
+    assert params[0] == date(2026, 9, 29) and params[1] == date(2026, 10, 2)
+
+
+def test_armar_prospectos_nuevos_vacio():
+    assert crm_metricas.armar_prospectos_nuevos([]) == {"total": 0, "por_vendedor": []}
+
+
 # ---------- Lógica de reportes (pura) ----------
 
 def test_agrupar_seguimientos_por_vencimiento():

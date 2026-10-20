@@ -1156,6 +1156,20 @@ async def crm_metricas_embudo(
         actual = cursor.fetchall()
         movimientos = _movimientos_etapa(cursor, desde, hasta, vendedor, por_vendedor=False)
         resultado = crm_metricas.armar_embudo(actual, movimientos)
+
+        # Prospectos capturados en Mis Seguimientos → Prospectos durante el periodo.
+        w_pros = ["eliminado = 0", "creado >= %s", "creado < %s"]
+        p_pros = [desde, hasta + timedelta(days=1)]
+        if vendedor:
+            frag, vals = _en("vendedor", vendedor)
+            w_pros.append(frag)
+            p_pros += vals
+        cursor.execute(
+            f"""SELECT vendedor, COUNT(*) AS total FROM prospectos
+                WHERE {' AND '.join(w_pros)} GROUP BY vendedor""",
+            tuple(p_pros),
+        )
+        resultado["prospectos_nuevos"] = crm_metricas.armar_prospectos_nuevos(cursor.fetchall())
         resultado.update({"desde": desde.isoformat(), "hasta": hasta.isoformat()})
         return resultado
     except mysql.connector.Error as err:

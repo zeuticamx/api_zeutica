@@ -1,13 +1,14 @@
 import mysql.connector, os, mov_reg, html, asyncio
 from datetime import date, timedelta
 from typing import List, Optional
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from mysql.connector import errorcode
 from pydantic import BaseModel, Field, field_validator
 from dotenv import load_dotenv
 from servicios.telegram.notificacion import send_telegram_alert
 from routers import comisiones
 from errores_db import detalle_error_db
+from permisos import usuario_autenticado
 
 router =APIRouter(tags=["/ventas"],responses={404: {"Mensaje":"No encontrado"}})
 load_dotenv() # Carga de credenciales .env
@@ -117,7 +118,15 @@ SQL_INSERT_VENTA = """
     VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 """
 
-SQL_RESTAR_STOCK = "UPDATE productos SET stock_bodega = stock_bodega - %s WHERE sku = %s AND stock_bodega >= %s"
+# Venta del portal: además guarda el folio de la cotización de origen y la facturación.
+SQL_INSERT_VENTA_PORTAL = """
+    INSERT INTO ventasRegistro
+    (id_ventas, sku, producto, cantidad, precio, fecha, nombreComprador, otros, plataforma, usuario, condicion_pago, saldo_pendiente,
+     cotizacion, facturable, facturada, factura)
+    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+"""
+
+SQL_RESTAR_STOCK ="UPDATE productos SET stock_bodega = stock_bodega - %s WHERE sku = %s AND stock_bodega >= %s"
 
 
 def mensaje_venta_duplicada(id_venta) -> str:
@@ -138,6 +147,24 @@ def existe_id_venta(cursor, id_venta) -> bool:
     )
     # fetchall y no fetchone: con cursor sin buffer, dejar filas sin leer rompe el siguiente execute
     return len(cursor.fetchall()) > 0
+
+
+def cotizacion_de_origen(cursor, folio):
+    """
+    (folio, factura) de la cotización de la que sale la venta. No hay FK entre
+    ventasRegistro y cotizaciones: un folio vacío o inexistente queda como (None, None).
+    factura es la relacion_factura si la cotización ya se facturó (pasa antes de
+    registrar la venta: es el caso del job de cotizaciones por vender).
+    """
+    folio = str(folio or "").strip()
+    if not folio:
+        return None, None
+    cursor.execute("SELECT relacion_factura FROM cotizaciones WHERE codigo_cotizacion = %s LIMIT 1", (folio,))
+    filas = cursor.fetchall()
+    if not filas:
+        return None, None
+    factura = str(filas[0]["relacion_factura"] or "").strip() or None
+    return folio, factura
 
 
 def es_conflicto_de_venta(err: mysql.connector.Error) -> bool:
@@ -309,6 +336,7 @@ class VentaCompletaSchema(BaseModel):
     usuario: str
     condicion_pago: str
     cotizacion: Optional[str] = None  # folio de la cotización cargada en el formulario, si la hubo
+    facturable: bool  # obligatorio: el vendedor indica al cobrar si la venta requiere factura
     items: List[ItemVentaSchema] = Field(min_length=1)
 
     @field_validator("items")
@@ -335,6 +363,7 @@ async def registrar_venta_completa(venta: VentaCompletaSchema):
     # productos no se bloqueen mutuamente (deadlock).
     items_por_sku = sorted(venta.items, key=lambda i: i.sku)
     stock_previo = {}
+    folio, factura = None, None
 
     connection = get_db_connection()
     try:
@@ -344,6 +373,9 @@ async def registrar_venta_completa(venta: VentaCompletaSchema):
             if existe_id_venta(cursor, venta.id_venta):
                 connection.rollback()
                 raise HTTPException(status_code=409, detail=mensaje_venta_duplicada(venta.id_venta))
+
+            # Si la cotización de origen ya tiene factura, la venta nace facturada.
+            folio, factura = cotizacion_de_origen(cursor, venta.cotizacion)
 
             # B. Verificar stock de cada SKU bloqueando su fila.
             for item in items_por_sku:
@@ -363,7 +395,7 @@ async def registrar_venta_completa(venta: VentaCompletaSchema):
             # C. Una fila por partida, en el orden del carrito. Igual que en /producto/venta,
             # a crédito el saldo inicial de cada partida es su total.
             for item in venta.items:
-                cursor.execute(SQL_INSERT_VENTA, (
+                cursor.execute(SQL_INSERT_VENTA_PORTAL, (
                     venta.id_venta,
                     item.sku,
                     item.producto,
@@ -376,6 +408,10 @@ async def registrar_venta_completa(venta: VentaCompletaSchema):
                     venta.usuario,
                     venta.condicion_pago,
                     item.precio * item.cantidad if es_credito else 0.00,
+                    folio,
+                    1 if venta.facturable else 0,
+                    1 if factura else 0,
+                    factura,
                 ))
 
             # D. Descontar inventario; stock_bodega >= %s es la segunda barrera ante carreras.
@@ -443,7 +479,9 @@ async def registrar_venta_completa(venta: VentaCompletaSchema):
         f"• <b>Plataforma:</b> {html.escape(venta.plataforma)}\n"
         f"• <b>Fecha:</b> {html.escape(venta.fecha)}\n"
         f"• <b>Condición de Pago:</b> {html.escape(venta.condicion_pago)}\n"
-        f"• <b>Saldo Pendiente:</b> ${saldo_inicial:,.2f}"
+        f"• <b>Saldo Pendiente:</b> ${saldo_inicial:,.2f}\n"
+        f"• <b>Requiere factura:</b> {'Sí' if venta.facturable else 'No'}"
+        + (f" (ya facturada: {html.escape(factura)})" if factura else "")
     ))
 
     return {
@@ -453,4 +491,48 @@ async def registrar_venta_completa(venta: VentaCompletaSchema):
         "total": total_operacion,
         "saldo_pendiente": saldo_inicial,
         "nuevo_stock": {i.sku: stock_previo[i.sku] - i.cantidad for i in venta.items},
+        "facturable": venta.facturable,
+        "facturada": bool(factura),
     }
+
+
+class FacturadaSchema(BaseModel):
+    facturada: bool
+    factura: Optional[str] = Field(None, max_length=100)  # folio de la factura, opcional
+
+
+@router.patch("/ventas/{id_ventas}/facturada")
+async def marcar_venta_facturada(id_ventas: str, datos: FacturadaSchema,
+                                 usuario: str = Depends(usuario_autenticado)):
+    """
+    Marca (o desmarca) como facturada una venta que no salió de una cotización o cuya
+    factura no se relacionó ahí. Aplica a todas sus partidas. El usuario de la bitácora
+    sale del token.
+    """
+    factura = (str(datos.factura or "").strip() or None) if datos.facturada else None
+    connection = get_db_connection()
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT id FROM ventasRegistro WHERE id_ventas = %s LIMIT 1", (id_ventas,))
+            if not cursor.fetchall():
+                raise HTTPException(status_code=404, detail="El registro de venta no existe")
+            cursor.execute(
+                "UPDATE ventasRegistro SET facturada = %s, factura = %s WHERE id_ventas = %s",
+                (1 if datos.facturada else 0, factura, id_ventas),
+            )
+            connection.commit()
+    except mysql.connector.Error as err:
+        connection.rollback()
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
+    finally:
+        if connection.is_connected():
+            connection.close()
+
+    accion = f"Marcó facturada la venta '{id_ventas}'" + (f" (factura {factura})" if factura else "") \
+        if datos.facturada else f"Desmarcó como facturada la venta '{id_ventas}'"
+    try:
+        mov_reg.registrar_movimiento(usuario, accion, "Ventas")
+    except mysql.connector.Error as err:
+        print(f"Venta {id_ventas} actualizada, pero falló la bitácora: {err}")
+
+    return {"id_venta": id_ventas, "facturada": datos.facturada, "factura": factura}

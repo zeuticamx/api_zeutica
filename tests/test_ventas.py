@@ -46,9 +46,18 @@ class FakeCursor:
             sku = params[0]
             if sku in self.db.stock:
                 self._resultado = [{"stock_bodega": self.db.stock[sku]}]
+        elif q.startswith("SELECT relacion_factura FROM cotizaciones"):
+            if params[0] in self.db.cotizaciones:
+                self._resultado = [{"relacion_factura": self.db.cotizaciones[params[0]]}]
         elif q.startswith("INSERT INTO ventasRegistro"):
-            self.db.registradas.append({"id_ventas": str(params[0]), "sku": params[1], "saldo_pendiente": params[11]})
+            fila = {"id_ventas": str(params[0]), "sku": params[1], "saldo_pendiente": params[11]}
+            if len(params) > 12:
+                fila.update({"cotizacion": params[12], "facturable": params[13],
+                             "facturada": params[14], "factura": params[15]})
+            self.db.registradas.append(fila)
             self.rowcount = 1
+        elif q.startswith("UPDATE ventasRegistro SET facturada"):
+            self.rowcount = sum(1 for v in self.db.registradas if v["id_ventas"] == params[2])
         elif q.startswith("UPDATE productos SET stock_bodega"):
             cantidad, sku, _ = params
             if self.db.stock.get(sku, 0) >= cantidad and not self.db.update_falla:
@@ -69,6 +78,7 @@ class FakeDB:
     def __init__(self):
         self.ventas = []          # filas que devuelve la consulta de reportes
         self.registradas = []     # filas insertadas en ventasRegistro
+        self.cotizaciones = {}    # codigo_cotizacion -> relacion_factura
         self.stock = {}
         self.ejecutados = []
         self.commits = 0
@@ -113,6 +123,7 @@ def db(monkeypatch):
 def client():
     app = FastAPI()
     app.include_router(ventas.router)
+    app.dependency_overrides[ventas.usuario_autenticado] = lambda: "ana"
     return TestClient(app)
 
 
@@ -125,6 +136,7 @@ def venta_completa(**extra):
         "plataforma": "Directo",
         "usuario": "tester",
         "condicion_pago": "CONTADO",
+        "facturable": False,
         "items": [
             {"sku": "B-002", "producto": "Guante", "cantidad": 2, "precio": 116.0},
             {"sku": "A-001", "producto": "Cubrebocas", "cantidad": 1, "precio": 58.0},
@@ -328,6 +340,7 @@ def test_registrar_venta_completa_carrera_de_stock_devuelve_409(client, db):
     {"items": [{"sku": "A-001", "producto": "x", "cantidad": 1, "precio": 1},
                {"sku": "A-001", "producto": "x", "cantidad": 2, "precio": 1}]},
     {"id_venta": None},
+    {"facturable": None},
 ])
 def test_registrar_venta_completa_payload_invalido_devuelve_422(client, db, cambio):
     r = client.post("/ventas/registrar", json=venta_completa(**cambio))
@@ -431,3 +444,81 @@ def test_venta_completa_persiste_un_solo_aviso(client, db):
     r = client.post("/ventas/registrar", json=venta_completa())
     assert r.status_code == 200, r.text
     assert notificaciones_service.crear_y_notificar_todos.await_count == 1
+
+
+# ---------- Facturación de la venta del portal ----------
+
+def test_venta_completa_sin_facturable_devuelve_422(client, db):
+    datos = venta_completa()
+    del datos["facturable"]
+    r = client.post("/ventas/registrar", json=datos)
+    assert r.status_code == 422
+    assert db.ejecutados == []
+
+
+def test_venta_completa_facturable_se_guarda_en_todas_las_partidas(client, db):
+    db.stock = {"A-001": 10, "B-002": 5}
+    r = client.post("/ventas/registrar", json=venta_completa(facturable=True))
+    assert r.status_code == 200, r.text
+    assert r.json()["facturable"] is True and r.json()["facturada"] is False
+    assert [(v["facturable"], v["facturada"], v["cotizacion"], v["factura"]) for v in db.registradas] \
+        == [(1, 0, None, None)] * 2
+    assert "Requiere factura:</b> Sí" in ventas.send_telegram_alert.call_args.args[0]
+
+
+def test_venta_completa_no_facturable(client, db):
+    db.stock = {"A-001": 10, "B-002": 5}
+    client.post("/ventas/registrar", json=venta_completa(facturable=False))
+    assert {v["facturable"] for v in db.registradas} == {0}
+
+
+def test_venta_de_cotizacion_sin_factura_guarda_el_folio(client, db):
+    db.stock = {"A-001": 10, "B-002": 5}
+    db.cotizaciones = {"ZTC-7": None}
+    client.post("/ventas/registrar", json=venta_completa(facturable=True, cotizacion=" ZTC-7 "))
+    assert {(v["cotizacion"], v["facturada"]) for v in db.registradas} == {("ZTC-7", 0)}
+
+
+def test_venta_de_cotizacion_ya_facturada_nace_facturada(client, db):
+    db.stock = {"A-001": 10, "B-002": 5}
+    db.cotizaciones = {"ZTC-8": "F-200"}
+    r = client.post("/ventas/registrar", json=venta_completa(facturable=True, cotizacion="ZTC-8"))
+    assert r.json()["facturada"] is True
+    assert {(v["cotizacion"], v["facturada"], v["factura"]) for v in db.registradas} == {("ZTC-8", 1, "F-200")}
+
+
+def test_venta_con_folio_inexistente_guarda_cotizacion_nula(client, db):
+    db.stock = {"A-001": 10, "B-002": 5}
+    client.post("/ventas/registrar", json=venta_completa(facturable=True, cotizacion="NO-EXISTE"))
+    assert {v["cotizacion"] for v in db.registradas} == {None}
+
+
+def test_marcar_facturada_actualiza_todas_las_partidas(client, db):
+    db.registradas = [{"id_ventas": "77", "sku": "A"}, {"id_ventas": "77", "sku": "B"}]
+    r = client.patch("/ventas/77/facturada", json={"facturada": True, "factura": " F-9 "})
+    assert r.status_code == 200, r.text
+    assert r.json() == {"id_venta": "77", "facturada": True, "factura": "F-9"}
+    (query, params), = db.consultas("UPDATE ventasRegistro SET facturada")
+    assert "WHERE id_ventas = %s" in query and params == (1, "F-9", "77")
+    assert db.commits == 1
+
+
+def test_desmarcar_facturada_limpia_la_factura(client, db):
+    db.registradas = [{"id_ventas": "77", "sku": "A"}]
+    client.patch("/ventas/77/facturada", json={"facturada": False, "factura": "F-9"})
+    (_, params), = db.consultas("UPDATE ventasRegistro SET facturada")
+    assert params == (0, None, "77")
+
+
+def test_marcar_facturada_usa_el_usuario_del_token(client, db, monkeypatch):
+    llamadas = []
+    monkeypatch.setattr(ventas.mov_reg, "registrar_movimiento", lambda *a, **k: llamadas.append(a))
+    db.registradas = [{"id_ventas": "77", "sku": "A"}]
+    client.patch("/ventas/77/facturada", json={"facturada": True})
+    assert llamadas[0][0] == "ana" and "77" in llamadas[0][1]
+
+
+def test_marcar_facturada_venta_inexistente_devuelve_404(client, db):
+    r = client.patch("/ventas/99/facturada", json={"facturada": True})
+    assert r.status_code == 404
+    assert db.consultas("UPDATE") == []

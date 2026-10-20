@@ -205,6 +205,62 @@ def guardar_envio(
             conn.close()
 
 
+def completar_guias(guias: List[Dict[str, Any]]) -> int:
+    """
+    Completa tracking, etiqueta y links de guias ya guardadas con lo que trae la
+    reconsulta a Skydropx (skydropx_service.extraer_guias). Devuelve cuantas
+    filas se actualizaron.
+
+    guardar_envio() no sirve para esto: su UPSERT reescribe codigo_cotizacion con
+    el valor recibido. Aqui solo se llenan huecos (COALESCE) y no se toca el
+    estatus, la cotizacion ni el costo. Nunca lanza.
+    """
+    actualizadas = 0
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        for guia in guias:
+            valores = (
+                _normaliza_tracking(guia.get("tracking_number")),
+                guia.get("etiqueta_url") or "",
+                guia.get("tracking_url") or "",
+                guia.get("orden_detalle_url") or "",
+            )
+            if not any(valores):
+                continue
+            if guia.get("package_id"):
+                llave, clave = "package_id", guia["package_id"]
+            elif guia.get("shipment_id"):
+                llave, clave = "shipment_id", guia["shipment_id"]
+            else:
+                continue
+            cursor.execute(
+                f"""
+                UPDATE skydropx_envios
+                SET tracking_number   = COALESCE(tracking_number, %s),
+                    etiqueta_url      = COALESCE(NULLIF(%s, ''), etiqueta_url),
+                    tracking_url      = COALESCE(NULLIF(%s, ''), tracking_url),
+                    orden_detalle_url = COALESCE(NULLIF(%s, ''), orden_detalle_url)
+                WHERE {llave} = %s
+                """,
+                (*valores, clave),
+            )
+            actualizadas += cursor.rowcount
+        conn.commit()
+    except mysql.connector.Error as err:
+        if conn:
+            conn.rollback()
+        print(f"Error completando guias Skydropx: {err}")
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+    return actualizadas
+
+
 def registrar_evento_webhook(evento: Dict[str, Any], payload_crudo: Optional[str] = None) -> Dict[str, Any]:
     """
     Aplica un evento del webhook: actualiza el estatus del envio y lo agrega a la
