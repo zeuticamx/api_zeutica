@@ -2,8 +2,9 @@
 # "Mis seguimientos" del vendedor y métricas para gerencia.
 #
 # Permisos (el usuario SIEMPRE sale del token, nunca de un parámetro):
-#   - Gerencia (permisos.es_gerencia) ve y gestiona todo; solo ella borra
-#     interacciones, reasigna cartera y consulta métricas.
+#   - Gerencia (permisos.es_gerencia) ve y gestiona todo; solo ella reasigna
+#     cartera y consulta métricas. Editar/borrar una interacción: su autor, el
+#     dueño actual del cliente o gerencia.
 #   - Vendedor: gestiona los clientes de su cartera. Dueño de un cliente =
 #     crm_cartera.vendedor; si el cliente aún no entra al CRM, su dueno
 #     provisional es clientes.usuario (quien lo dio de alta). Un cliente sin
@@ -734,9 +735,31 @@ async def crm_exportar_bitacora(
     )
 
 
+def _interaccion_autorizada(cursor, interaccion_id: int, usuario: str, accion: str):
+    """404 si no existe; 403 si no es el autor, el dueño actual del cliente ni gerencia."""
+    cursor.execute(
+        """SELECT i.id, i.vendedor, COALESCE(cc.vendedor, i.vendedor) AS dueno, c.nombre AS cliente
+           FROM crm_interacciones i
+           LEFT JOIN crm_cartera cc ON cc.cliente_id = i.cliente_id
+           LEFT JOIN clientes c ON c.id = i.cliente_id
+           WHERE i.id = %s AND i.eliminado = 0""",
+        (interaccion_id,),
+    )
+    fila = cursor.fetchone()
+    if not fila:
+        raise HTTPException(status_code=404, detail="Interacción no encontrada")
+    yo = str(usuario).strip().lower()
+    permitidos = {str(fila.get(k) or "").strip().lower() for k in ("vendedor", "dueno")}
+    if not es_gerencia(usuario) and yo not in permitidos:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Solo el autor, el dueño del cliente o gerencia pueden {accion} esta interacción")
+    return fila
+
+
 @router.patch("/crm/interacciones/{interaccion_id}")
 async def crm_editar_interaccion(interaccion_id: int, datos: InteraccionEditar, usuario: str = Depends(usuario_autenticado)):
-    """Edita notas / resultado / próxima acción o marca el seguimiento como hecho. Autor o gerencia."""
+    """Edita notas / resultado / próxima acción o marca el seguimiento como hecho. Autor, dueño actual del cliente o gerencia."""
     campos = {k: getattr(datos, k) for k in datos.model_fields_set}
     if not campos:
         raise HTTPException(status_code=422, detail="No se envió ningún campo para actualizar")
@@ -744,12 +767,7 @@ async def crm_editar_interaccion(interaccion_id: int, datos: InteraccionEditar, 
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
     try:
-        cursor.execute("SELECT id, vendedor FROM crm_interacciones WHERE id = %s AND eliminado = 0", (interaccion_id,))
-        fila = cursor.fetchone()
-        if not fila:
-            raise HTTPException(status_code=404, detail="Interacción no encontrada")
-        if not es_gerencia(usuario) and fila["vendedor"].strip().lower() != usuario.strip().lower():
-            raise HTTPException(status_code=403, detail="Solo el autor o gerencia pueden editar esta interacción")
+        fila = _interaccion_autorizada(cursor, interaccion_id, usuario, "editar")
 
         # Orden fijo de columnas: el nombre sale del schema, nunca del cliente.
         columnas = [c for c in ("resultado", "notas", "proxima_accion", "proxima_fecha", "seguimiento_cerrado") if c in campos]
@@ -759,6 +777,8 @@ async def crm_editar_interaccion(interaccion_id: int, datos: InteraccionEditar, 
             tuple(valores + [interaccion_id]),
         )
         conn.commit()
+        mov_reg.registrar_movimiento(
+            usuario, f"Editó la interacción CRM {interaccion_id} con {fila.get('cliente')} ({', '.join(columnas)})", "CRM")
         return {"id": interaccion_id, "actualizados": columnas}
     except mysql.connector.Error as err:
         _error_db(conn, err, "editar")
@@ -768,21 +788,27 @@ async def crm_editar_interaccion(interaccion_id: int, datos: InteraccionEditar, 
 
 
 @router.delete("/crm/interacciones/{interaccion_id}")
-async def crm_eliminar_interaccion(interaccion_id: int, usuario: str = Depends(requerir_gerencia)):
-    """Borrado lógico (solo gerencia): deja de contar en bitácora, seguimientos y métricas."""
+async def crm_eliminar_interaccion(interaccion_id: int, usuario: str = Depends(usuario_autenticado)):
+    """
+    Borrado lógico: deja de contar en bitácora, seguimientos y métricas. Lo puede
+    hacer el autor, el dueño actual del cliente o gerencia. No revierte la etapa.
+    """
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
     try:
+        fila = _interaccion_autorizada(cursor, interaccion_id, usuario, "eliminar")
         cursor.execute("UPDATE crm_interacciones SET eliminado = 1 WHERE id = %s AND eliminado = 0", (interaccion_id,))
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail="Interacción no encontrada")
         conn.commit()
-        mov_reg.registrar_movimiento(usuario, f"Eliminó la interacción CRM {interaccion_id}", "CRM")
-        _alertar(
-            "🗑️ <b>CRM · Interacción eliminada</b>\n\n"
-            f"• <b>Interacción:</b> <code>{interaccion_id}</code>\n"
-            f"• <b>Usuario:</b> {_esc(usuario)}"
-        )
+        mov_reg.registrar_movimiento(
+            usuario, f"Eliminó la interacción CRM {interaccion_id} con {fila.get('cliente')}", "CRM")
+        if es_gerencia(usuario):  # los vendedores que borran lo suyo solo dejan mov_reg
+            _alertar(
+                "🗑️ <b>CRM · Interacción eliminada</b>\n\n"
+                f"• <b>Interacción:</b> <code>{interaccion_id}</code>\n"
+                f"• <b>Usuario:</b> {_esc(usuario)}"
+            )
         return {"id": interaccion_id, "eliminado": True}
     except mysql.connector.Error as err:
         _error_db(conn, err, "eliminar")
@@ -816,7 +842,7 @@ async def crm_seguimientos(vendedor: Optional[str] = None, usuario: str = Depend
     try:
         cursor.execute(
             f"""SELECT i.id, i.cliente_id, c.nombre AS cliente, c.empresa, c.telefono, c.email,
-                       {dueno} AS vendedor, i.tipo, i.fecha, i.resultado, i.notas,
+                       {dueno} AS vendedor, i.vendedor AS autor, i.tipo, i.fecha, i.resultado, i.notas,
                        i.proxima_accion, i.proxima_fecha, cc.etapa
                 FROM crm_interacciones i
                 LEFT JOIN clientes c ON c.id = i.cliente_id

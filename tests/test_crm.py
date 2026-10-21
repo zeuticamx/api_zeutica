@@ -67,9 +67,12 @@ class FakeCursor:
         elif q.startswith("INSERT INTO crm_interacciones"):
             self.lastrowid = 501
             self.rowcount = 1
-        elif q.startswith("SELECT id, vendedor FROM crm_interacciones WHERE id"):
+        elif q.startswith("SELECT i.id, i.vendedor, COALESCE(cc.vendedor, i.vendedor) AS dueno"):
             i = db.interacciones.get(params[0])
-            self._resultado = [{"id": params[0], "vendedor": i["vendedor"]}] if i else []
+            self._resultado = [{
+                "id": params[0], "vendedor": i["vendedor"],
+                "dueno": i.get("dueno", i["vendedor"]), "cliente": i.get("cliente", "Cliente X"),
+            }] if i else []
         elif q.startswith("UPDATE crm_interacciones SET eliminado = 1"):
             self.rowcount = 1 if params[0] in db.interacciones else 0
         elif q.startswith("SELECT e.id, e.cliente_id"):
@@ -123,7 +126,8 @@ class FakeDB:
             3: {"vendedor": "ana", "etapa": "en_seguimiento"},
             4: {"vendedor": "luis", "etapa": "cotizado"},
         }
-        self.interacciones = {10: {"vendedor": "ana"}, 11: {"vendedor": "luis"}}
+        # 12: la escribió luis, pero el cliente ya es de la cartera de ana (reasignado)
+        self.interacciones = {10: {"vendedor": "ana"}, 11: {"vendedor": "luis"}, 12: {"vendedor": "luis", "dueno": "ana"}}
         self.abiertos = {3: 2}  # seguimientos abiertos por cliente
         self.historial = []
         self.evento = None            # fila única para SELECT e.id (autorización)
@@ -335,12 +339,30 @@ def test_metricas_solo_gerencia(client, db, ruta):
     assert client.get(ruta, headers=GER).status_code == 200
 
 
-def test_eliminar_interaccion_solo_gerencia(client, db):
-    assert client.delete("/crm/interacciones/10", headers=ANA).status_code == 403  # aunque sea la autora
+def test_eliminar_interaccion_autor_dueno_o_gerencia(client, db):
+    # ajeno (ni autor ni dueño actual del cliente): 403 y no escribe
+    assert client.delete("/crm/interacciones/11", headers=ANA).status_code == 403
     assert db.consultas("UPDATE") == []
-    r = client.delete("/crm/interacciones/10", headers=GER)
+    # la autora puede borrar lo suyo
+    r = client.delete("/crm/interacciones/10", headers=ANA)
     assert r.status_code == 200 and r.json()["eliminado"] is True
+    # gerencia borra cualquiera; inexistente da 404
+    assert client.delete("/crm/interacciones/11", headers=GER).status_code == 200
     assert client.delete("/crm/interacciones/999", headers=GER).status_code == 404
+
+
+def test_dueno_actual_edita_y_borra_aunque_no_sea_el_autor(client, db):
+    # 12 la escribió luis, pero el cliente ya es de ana
+    assert client.patch("/crm/interacciones/12", json={"notas": "x"}, headers=ANA).status_code == 200
+    assert client.delete("/crm/interacciones/12", headers=ANA).status_code == 200
+    # el autor conserva el acceso; quien no es autor ni dueño no lo tiene
+    assert client.patch("/crm/interacciones/12", json={"notas": "y"}, headers=LUIS).status_code == 200
+    assert client.patch("/crm/interacciones/10", json={"notas": "y"}, headers=LUIS).status_code == 403
+
+
+def test_eliminar_interaccion_queda_en_mov_reg(client, db):
+    client.delete("/crm/interacciones/10", headers=ANA)
+    assert any("ana" == m[0] and "10" in m[1] and m[2] == "CRM" for m in db.movimientos)
 
 
 def test_editar_interaccion_autor_o_gerencia(client, db):
@@ -352,6 +374,27 @@ def test_editar_interaccion_autor_o_gerencia(client, db):
     assert p == ("ok", 1, 10)
     assert client.patch("/crm/interacciones/11", json={"notas": "y"}, headers=GER).status_code == 200
     assert client.patch("/crm/interacciones/999", json={"notas": "y"}, headers=GER).status_code == 404
+
+
+def test_editar_interaccion_queda_en_mov_reg(client, db):
+    client.patch("/crm/interacciones/10", json={"notas": "z"}, headers=ANA)
+    assert any(m[0] == "ana" and "10" in m[1] and m[2] == "CRM" for m in db.movimientos)
+    # un 403 no registra nada
+    db.movimientos.clear()
+    client.patch("/crm/interacciones/11", json={"notas": "z"}, headers=ANA)
+    assert db.movimientos == []
+
+
+def test_editar_proxima_fecha_pasada_da_422_y_no_escribe(client, db):
+    r = client.patch("/crm/interacciones/10", json={"proxima_fecha": "2026-09-01"}, headers=ANA)
+    assert r.status_code == 422
+    assert db.consultas("UPDATE") == []
+
+
+def test_seguimientos_devuelve_el_autor(client, db):
+    client.get("/crm/seguimientos", headers=GER)
+    q, _ = db.consultas("SELECT i.id, i.cliente_id")[-1]
+    assert "i.vendedor AS autor" in q
 
 
 def test_asignar_vendedor_solo_gerencia_y_usuario_existente(client, db):
@@ -580,9 +623,11 @@ def test_asignar_vendedor_alerta_solo_si_cambia_el_dueno(client, db):
     assert len(db.alertas) == 1
 
 
-def test_eliminar_interaccion_alerta_solo_si_se_elimina(client, db):
-    client.delete("/crm/interacciones/10", headers=ANA)  # 403
+def test_eliminar_interaccion_alerta_solo_si_gerencia_elimina(client, db):
+    client.delete("/crm/interacciones/11", headers=ANA)  # 403
     client.delete("/crm/interacciones/999", headers=GER)  # 404
+    assert db.alertas == []
+    client.delete("/crm/interacciones/10", headers=ANA)  # el vendedor borra lo suyo: solo mov_reg
     assert db.alertas == []
     client.delete("/crm/interacciones/10", headers=GER)
     (msg,) = db.alertas
