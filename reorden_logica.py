@@ -6,7 +6,6 @@ import math
 import statistics
 from datetime import date
 
-MESES_HISTORIAL = 12
 LEAD_TIME_DEFAULT = 3.0   # meses
 Z_DEFAULT = 1.65          # 95 % de nivel de servicio
 CV_VOLATIL = 0.50
@@ -26,20 +25,33 @@ OK = "OK"
 SIN_DEMANDA = "SIN_DEMANDA"
 
 
-def ventana_meses(hoy: date, meses: int = MESES_HISTORIAL):
-    """Los `meses` meses calendario COMPLETOS antes del mes en curso (el actual va a medias
-    y bajaría el promedio). Devuelve (lista 'YYYY-MM' del más viejo al más reciente,
-    desde = día 1 del más viejo, hasta = día 1 del mes en curso, exclusivo)."""
+def ventana_meses(hoy: date, fecha_inicio: date):
+    """Devuelve los meses calendario COMPLETOS transcurridos desde `fecha_inicio`
+
+    hasta el último día del mes pasado (excluyendo el mes en curso).
+
+    Devuelve:
+        etiquetas: lista 'YYYY-MM' del mes más antiguo al más reciente.
+        desde: día 1 del mes de la `fecha_inicio`.
+        hasta: día 1 del mes en curso (límite exclusivo para consultas).
+    """
     hasta = hoy.replace(day=1)
-    y, m = hasta.year, hasta.month
+    desde = fecha_inicio.replace(day=1)
+
+    # Si la fecha de inicio es del mes actual o posterior, no hay meses completos pasados
+    if desde >= hasta:
+        return [], hasta, hasta
+
     etiquetas = []
-    for _ in range(meses):
-        m -= 1
-        if m == 0:
-            y, m = y - 1, 12
+    y, m = desde.year, desde.month
+
+    # Avanzamos mes a mes desde la fecha de inicio hasta llegar al mes en curso
+    while (y, m) < (hasta.year, hasta.month):
         etiquetas.append(f"{y:04d}-{m:02d}")
-    etiquetas.reverse()
-    desde = date(int(etiquetas[0][:4]), int(etiquetas[0][5:]), 1)
+        m += 1
+        if m > 12:
+            y, m = y + 1, 1
+
     return etiquetas, desde, hasta
 
 

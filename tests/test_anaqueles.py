@@ -467,10 +467,9 @@ def test_mover_a_la_misma_celda_otro_sku_o_inexistente(client, db):
 
 # ---------- Permisos y atribución por token ----------
 
-def test_guardar_disposicion_solo_gerencia(client_vendedor, db):
+def test_guardar_disposicion_abierto_a_cualquier_usuario_con_sesion(client_vendedor, db):
     r = client_vendedor.put("/anaqueles/disposicion", json=disposicion_actual(db))
-    assert r.status_code == 403
-    assert db.version == 3 and db.movimientos == []
+    assert r.status_code == 200
 
 
 def test_guardar_disposicion_registra_al_usuario_del_token_no_al_del_body(client, db):
@@ -488,9 +487,9 @@ def test_mover_registra_al_usuario_del_token_y_no_exige_usuario_en_el_body(clien
     assert r.status_code == 200
 
 
-def test_eliminar_ubicacion_solo_gerencia_y_usa_el_usuario_del_token(client, client_vendedor, db):
-    assert client_vendedor.delete("/producto/eliminarUbi/4").status_code == 403
-    assert client_vendedor.delete("/producto/eliminarUbi/4/ana").status_code == 403  # ruta vieja, mismo candado
+def test_eliminar_ubicacion_abierto_a_sesion_y_usa_el_usuario_del_token(client, client_vendedor, db):
+    assert client_vendedor.delete("/producto/eliminarUbi/5").status_code in (200, 404)  # sin candado de gerencia
+    assert client_vendedor.delete("/producto/eliminarUbi/5/ana").status_code in (200, 404)  # ruta vieja, igual
     assert 4 in db.tarjetas
     r = client.delete("/producto/eliminarUbi/4")
     assert r.status_code == 200 and 4 not in db.tarjetas

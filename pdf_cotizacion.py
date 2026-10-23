@@ -17,6 +17,7 @@ La función principal `generar_pdf_cotizacion` devuelve los bytes del PDF.
 import os
 from datetime import datetime
 from fpdf import FPDF
+from fpdf.enums import XPos, YPos
 
 # Paleta y datos fijos de la empresa
 AZUL = (31, 78, 121)        # azul corporativo (banners / encabezados de tabla)
@@ -57,14 +58,14 @@ class _CotizacionPDF(FPDF):
 
     def footer(self):
         self.set_y(-25)
-        self.set_font("Arial", "B", 8)
+        self.set_font("Helvetica", "B", 8)
         self.set_text_color(*NEGRO)
-        self.cell(0, 5, "Si tienes alguna pregunta por favor contáctanos", 0, 1, "C")
-        self.set_font("Arial", "", 8)
-        self.cell(0, 5, "Tel: 33-1299-5688 / E-mail: ventas1@zeutica.com", 0, 1, "C")
+        self.cell(0, 5, "Si tienes alguna pregunta por favor contáctanos", 0, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="C")
+        self.set_font("Helvetica", "", 8)
+        self.cell(0, 5, "Tel: 33-1299-5688 / E-mail: ventas1@zeutica.com", 0, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="C")
         self.set_y(-12)
-        self.set_font("Arial", "", 8)
-        self.cell(0, 5, f"Página {self.page_no()}", 0, 0, "R")
+        self.set_font("Helvetica", "", 8)
+        self.cell(0, 5, f"Página {self.page_no()}", 0, new_x=XPos.RIGHT, new_y=YPos.TOP, align="R")
 
 
 def _fila_item(pdf, anchos, textos, alineaciones, alto_linea=6):
@@ -121,45 +122,45 @@ def generar_pdf_cotizacion(cot) -> bytes:
     if os.path.exists(LOGO_PATH):
         pdf.image(LOGO_PATH, x=pdf.l_margin, y=y_top, w=50)
     else:
-        pdf.set_font("Arial", "B", 28)
+        pdf.set_font("Helvetica", "B", 28)
         pdf.set_text_color(*AZUL)
         pdf.text(pdf.l_margin, y_top + 12, "Zeutica")
 
     # Título a la derecha
     pdf.set_xy(pdf.l_margin + 90, y_top)
-    pdf.set_font("Arial", "B", 18)
+    pdf.set_font("Helvetica", "B", 18)
     pdf.set_text_color(*NEGRO)
-    pdf.cell(ancho - 90, 10, _txt(f"COTIZACION {cot.codigo_cotizacion}"), 0, 1, "R")
+    pdf.cell(ancho - 90, 10, _txt(f"COTIZACION {cot.codigo_cotizacion}"), 0, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="R")
 
     # Tabla Fecha / Válido Hasta (derecha, debajo del título)
     x_tabla = pdf.l_margin + ancho - 70
     fecha_hoy = datetime.now().strftime("%d/%m/%Y")
     pdf.set_xy(x_tabla, y_top + 14)
-    pdf.set_font("Arial", "B", 9)
-    pdf.cell(30, 7, "Fecha:", 1, 0, "L")
-    pdf.set_font("Arial", "", 9)
-    pdf.cell(40, 7, fecha_hoy, 1, 1, "R")
+    pdf.set_font("Helvetica", "B", 9)
+    pdf.cell(30, 7, "Fecha:", 1, new_x=XPos.RIGHT, new_y=YPos.TOP, align="L")
+    pdf.set_font("Helvetica", "", 9)
+    pdf.cell(40, 7, fecha_hoy, 1, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="R")
     pdf.set_x(x_tabla)
-    pdf.set_font("Arial", "B", 9)
-    pdf.cell(30, 7, "Válido Hasta:", 1, 0, "L")
-    pdf.set_font("Arial", "", 9)
-    pdf.cell(40, 7, VALIDO_HASTA, 1, 1, "R")
+    pdf.set_font("Helvetica", "B", 9)
+    pdf.cell(30, 7, "Válido Hasta:", 1, new_x=XPos.RIGHT, new_y=YPos.TOP, align="L")
+    pdf.set_font("Helvetica", "", 9)
+    pdf.cell(40, 7, VALIDO_HASTA, 1, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="R")
 
     # Datos de contacto de la empresa (izquierda, debajo del logo)
     pdf.set_xy(pdf.l_margin, y_top + 20)
-    pdf.set_font("Arial", "", 8)
+    pdf.set_font("Helvetica", "", 8)
     pdf.set_text_color(*NEGRO)
     for linea in (EMPRESA_DOMICILIO, EMPRESA_WEB, EMPRESA_TEL, EMPRESA_EMAIL,
                   f"Asesor: {_txt(cot.usuario)}"):
-        pdf.cell(115, 4.5, linea, 0, 1, "L")
+        pdf.cell(115, 4.5, linea, 0, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="L")
 
     pdf.ln(8)
 
     # ---------- BANNER CLIENTE ----------
     pdf.set_fill_color(*AZUL)
     pdf.set_text_color(*BLANCO)
-    pdf.set_font("Arial", "B", 11)
-    pdf.cell(ancho, 8, "  CLIENTE", 0, 1, "L", fill=True)
+    pdf.set_font("Helvetica", "B", 11)
+    pdf.cell(ancho, 8, "  CLIENTE", 0, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="L", fill=True)
     pdf.ln(1)
 
     # Datos del cliente (valores en mayúsculas como el ejemplo)
@@ -177,9 +178,9 @@ def generar_pdf_cotizacion(cot) -> bytes:
         # pero fpdf2 la deja al final de la celda; fijamos la X en cada fila
         # para que el bloque salga igual con cualquiera de las dos versiones.
         pdf.set_x(pdf.l_margin)
-        pdf.set_font("Arial", "B", 9)
-        pdf.cell(30, 6, etiqueta, 0, 0, "L")
-        pdf.set_font("Arial", "", 9)
+        pdf.set_font("Helvetica", "B", 9)
+        pdf.cell(30, 6, etiqueta, 0, new_x=XPos.RIGHT, new_y=YPos.TOP, align="L")
+        pdf.set_font("Helvetica", "", 9)
         pdf.multi_cell(ancho - 30, 6, _txt(valor).upper(), 0, "L")
 
     pdf.ln(4)
@@ -191,15 +192,15 @@ def generar_pdf_cotizacion(cot) -> bytes:
 
     pdf.set_fill_color(*AZUL)
     pdf.set_text_color(*BLANCO)
-    pdf.set_font("Arial", "B", 8)
-    pdf.cell(w_sku, 8, "CÓDIGO / SKU", 1, 0, "C", fill=True)
-    pdf.cell(w_desc, 8, "DESCRIPCIÓN", 1, 0, "C", fill=True)
-    pdf.cell(w_cant, 8, "CANTIDAD", 1, 0, "C", fill=True)
-    pdf.cell(w_precio, 8, "PRECIO UNITARIO", 1, 0, "C", fill=True)
-    pdf.cell(w_total, 8, "TOTAL", 1, 1, "C", fill=True)
+    pdf.set_font("Helvetica", "B", 8)
+    pdf.cell(w_sku, 8, "CÓDIGO / SKU", 1, new_x=XPos.RIGHT, new_y=YPos.TOP, align="C", fill=True)
+    pdf.cell(w_desc, 8, "DESCRIPCIÓN", 1, new_x=XPos.RIGHT, new_y=YPos.TOP, align="C", fill=True)
+    pdf.cell(w_cant, 8, "CANTIDAD", 1, new_x=XPos.RIGHT, new_y=YPos.TOP, align="C", fill=True)
+    pdf.cell(w_precio, 8, "PRECIO UNITARIO", 1, new_x=XPos.RIGHT, new_y=YPos.TOP, align="C", fill=True)
+    pdf.cell(w_total, 8, "TOTAL", 1, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="C", fill=True)
 
     pdf.set_text_color(*NEGRO)
-    pdf.set_font("Arial", "", 8)
+    pdf.set_font("Helvetica", "", 8)
     for item in cot.items:
         _fila_item(
             pdf,
@@ -239,20 +240,20 @@ def generar_pdf_cotizacion(cot) -> bytes:
         pdf.set_x(x_tot)
         if resaltar:
             pdf.set_fill_color(*GRIS)
-            pdf.set_font("Arial", "B", 9)
+            pdf.set_font("Helvetica", "B", 9)
         else:
             pdf.set_fill_color(*BLANCO)
-            pdf.set_font("Arial", "", 9)
-        pdf.cell(w_lbl, 7, etiqueta, 1, 0, "R", fill=True)
-        pdf.cell(w_val, 7, valor, 1, 1, "R", fill=True)
+            pdf.set_font("Helvetica", "", 9)
+        pdf.cell(w_lbl, 7, etiqueta, 1, new_x=XPos.RIGHT, new_y=YPos.TOP, align="R", fill=True)
+        pdf.cell(w_val, 7, valor, 1, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="R", fill=True)
 
     pdf.ln(6)
 
     # ---------- TÉRMINOS Y CONDICIONES ----------
     metodo_pago = getattr(cot, "metodo_pago", None) or METODO_PAGO_DEFAULT
-    pdf.set_font("Arial", "B", 10)
-    pdf.cell(0, 6, "TÉRMINOS Y CONDICIONES", 0, 1, "L")
-    pdf.set_font("Arial", "", 9)
+    pdf.set_font("Helvetica", "B", 10)
+    pdf.cell(0, 6, "TÉRMINOS Y CONDICIONES", 0, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="L")
+    pdf.set_font("Helvetica", "", 9)
     terminos = [
         f"1. FORMA DE PAGO: {_txt(cot.forma_pago).upper()}",
         f"2. MÉTODO DE PAGO: {_txt(metodo_pago).upper()}",
@@ -284,16 +285,16 @@ def generar_pdf_cotizacion(cot) -> bytes:
     pdf.set_line_width(0.2)
     pdf.set_draw_color(*NEGRO)
     pdf.set_xy(x_caja + 3, y_caja + 2)
-    pdf.set_font("Arial", "B", 9)
-    pdf.cell(0, 6, "DATOS BANCARIOS:", 0, 1, "L")
-    pdf.set_font("Arial", "", 9)
+    pdf.set_font("Helvetica", "B", 9)
+    pdf.cell(0, 6, "DATOS BANCARIOS:", 0, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="L")
+    pdf.set_font("Helvetica", "", 9)
     for linea in lineas_banco:
         pdf.set_x(x_caja + 3)
-        pdf.cell(0, 6, linea, 0, 1, "L")
+        pdf.cell(0, 6, linea, 0, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="L")
 
     # ---------- SALIDA BINARIA ----------
-    # fpdf 1.7.2: output(dest='S') devuelve str latin-1; lo pasamos a bytes.
-    salida = pdf.output(dest="S")
+    # fpdf2: output() devuelve bytearray (con fpdf 1.7.2 era str latin-1; se tolera por compatibilidad).
+    salida = pdf.output()
     if isinstance(salida, str):
         return salida.encode("latin-1")
     return bytes(salida)

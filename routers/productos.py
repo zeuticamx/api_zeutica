@@ -409,9 +409,9 @@ async def nueva_ubicacion(sku: str, datos: UbicacionEditSchema, usuario: str = D
 
 
 @router.delete("/producto/eliminarUbi/{id}")
-async def eliminar_ubicacion(id: int, usuario: str = Depends(requerir_gerencia)):
+async def eliminar_ubicacion(id: int, usuario: str = Depends(usuario_autenticado)):
     """
-    Borro el registro de stock_ubicacion que tenga ese id. Solo gerencia; el usuario
+    Borro el registro de stock_ubicacion que tenga ese id. Cualquier usuario con sesión; el usuario
     de la bitácora sale del token. Si no existe, aviso con 404.
     """
     conn = get_db_connection()
@@ -437,7 +437,7 @@ async def eliminar_ubicacion(id: int, usuario: str = Depends(requerir_gerencia))
 
 
 @router.delete("/producto/eliminarUbi/{id}/{_usuario_ignorado}", include_in_schema=False)
-async def eliminar_ubicacion_ruta_vieja(id: int, _usuario_ignorado: str, usuario: str = Depends(requerir_gerencia)):
+async def eliminar_ubicacion_ruta_vieja(id: int, _usuario_ignorado: str, usuario: str = Depends(usuario_autenticado)):
     """Alias de la ruta anterior (el usuario iba en la URL y se confiaba en él). Quitarlo cuando
     ningún panel use la versión vieja de api.jsx."""
     return await eliminar_ubicacion(id, usuario)

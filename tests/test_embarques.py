@@ -54,6 +54,9 @@ def _preparar_mocks(monkeypatch, fetchone_secuencia):
     conn = FakeConn(cursor)
     monkeypatch.setattr(embarques_router, "get_db_connection", lambda: conn)
     monkeypatch.setattr(embarques_router.mov_reg, "registrar_movimiento", lambda *a, **k: None)
+    # El cierre/reapertura del costeo con HL_LIQUIDADA se prueba en tests/test_landed_cost.py.
+    monkeypatch.setattr(embarques_router.landed_cost, "cerrar_costeo", lambda *a, **k: False)
+    monkeypatch.setattr(embarques_router.landed_cost, "reabrir_costeo", lambda *a, **k: False)
     return cursor
 
 

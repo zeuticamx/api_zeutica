@@ -18,7 +18,7 @@ from slowapi.errors import RateLimitExceeded
 from permisos import usuario_autenticado, asegurar_columna_token_expira, token_horas, es_gerencia
 from routers import cotizacionesBack, productos, ventas, clientes, traspaso, gastos, compras, cleanest, cuentas_pendientes,\
       abonos, estadisticas, inventario, empleados, notificaciones, cuentas_pagar, consulta_registros, pendientes, proveedores, genera_cotizacion, sofi_conversaciones, embarques, sofi_notificaciones, whatsapp_plantillas, skydropx
-from routers import crm, comisiones, prospectos, jobs, meli_webhook, meli_promos, anaqueles, reorden
+from routers import crm, comisiones, prospectos, jobs, meli_webhook, meli_promos, anaqueles, reorden, landed_cost
 import mysql.connector
 import skydropx_envios
 from fastapi.middleware.cors import CORSMiddleware
@@ -104,6 +104,14 @@ async def lifespan(app: FastAPI):
         reorden.crear_tabla_reorden()
     except Exception as e:
         print(f"❌ No se pudo crear la tabla de punto de reorden: {e}")
+
+    # Estado de ubicación de las compras (ubicada, cantidad_ubicada…); lo anterior queda como ubicado.
+    try:
+        rep = compras.asegurar_columnas_ubicacion()
+        if rep["columnas_agregadas"] or rep["backfill"]:
+            print(f"📦 Migración compras: {rep}")
+    except Exception as e:
+        print(f"❌ No se pudieron asegurar las columnas de ubicación de compras: {e}")
 
     # Columna usuario en devoluciones (auditoría de inventario).
     try:
@@ -301,7 +309,7 @@ PASSW_LIMITE = os.getenv("PASSW_RATE_LIMIT", "5/minute")
 _HASH_FALSO = bcrypt.hashpw(b"zeutica-hash-falso", bcrypt.gensalt()).decode("utf-8")
 
 # Corregido: FastAPI usa root_path, no prefix.
-app = FastAPI(root_path="/zeutica", tags=["login"], responses={404: {"Mensaje":"No encontrado"}}, lifespan=lifespan)
+app = FastAPI(root_path="/zeutica", responses={404: {"Mensaje":"No encontrado"}}, lifespan=lifespan)
 app.state.limiter = limiter
 
 
@@ -344,6 +352,7 @@ app.include_router(jobs.router, dependencies=[Depends(obtener_usuario_actual)])
 app.include_router(meli_promos.router, dependencies=[Depends(obtener_usuario_actual)])
 app.include_router(anaqueles.router, dependencies=[Depends(obtener_usuario_actual)])
 app.include_router(reorden.router, dependencies=[Depends(obtener_usuario_actual)])
+app.include_router(landed_cost.router, dependencies=[Depends(obtener_usuario_actual)])
 # Sin obtener_usuario_actual a proposito: el WebSocket valida el token por query
 # param y el POST de escalacion valida X-API-Key (n8n no tiene sesion de usuario).
 app.include_router(sofi_notificaciones.router)

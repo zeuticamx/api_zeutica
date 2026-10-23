@@ -5,7 +5,7 @@
 #   - consumo     = SUM(cantidad) de ventasRegistro activas por mes (todos los canales)
 #   - en tránsito = qty de embarque_items cuyos embarques no tienen fecha_de_recibido
 import os
-from datetime import datetime
+from datetime import date, datetime
 from zoneinfo import ZoneInfo
 
 import mysql.connector, mov_reg
@@ -67,6 +67,9 @@ SQL_CONSUMO = """
     GROUP BY sku, anio, mes
 """
 
+# La ventana arranca en el mes de la primera venta activa y llega hasta el mes pasado.
+SQL_PRIMERA_VENTA = "SELECT MIN(fecha_registro) AS primera FROM ventasRegistro WHERE estatus = 'activa'"
+
 
 def _texto(valor) -> str:
     """Texto de un valor que el conector pudo entregar como bytes/bytearray."""
@@ -100,10 +103,16 @@ SQL_PARAMETROS = "SELECT sku, lead_time_meses, nivel_servicio_z FROM reorden_par
 def cargar_reorden(hoy=None) -> dict:
     """Junta productos, consumo, tránsito y parámetros y evalúa cada SKU."""
     hoy = hoy or datetime.now(CDMX).date()
-    etiquetas, desde, hasta = rl.ventana_meses(hoy)
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
     try:
+        cursor.execute(SQL_PRIMERA_VENTA)
+        fila = cursor.fetchone()
+        primera = fila["primera"] if fila else None
+        if isinstance(primera, datetime):
+            primera = primera.date()
+        # Sin ventas no hay historial: la ventana queda vacía (el panel avisa en vez de mostrar ceros).
+        etiquetas, desde, hasta = rl.ventana_meses(hoy, primera if isinstance(primera, date) else hoy)
         cursor.execute(SQL_PRODUCTOS)
         productos = cursor.fetchall()
         cursor.execute(SQL_CONSUMO, (desde, hasta))

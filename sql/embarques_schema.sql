@@ -67,6 +67,38 @@ CREATE TABLE IF NOT EXISTS embarque_items (
     KEY idx_item_embarque (embarque_id)
 ) ENGINE=InnoDB;
 
+-- Costeo de importacion (Landed Cost, routers/landed_cost.py). Las entradas por item son
+-- columnas de embarque_items que agrega _migrar_columnas_embarques() (invoice, fecha_compra,
+-- paquete_venta, unit_price_fob_usd, ctns, arancel_porc, tipo_cambio_china).
+-- Datos de logistica y aduana del embarque (1:1). Solo entradas: el calculo no se guarda.
+CREATE TABLE IF NOT EXISTS embarque_liquidacion (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    embarque_id INT NOT NULL,
+    total_cbm_manual DECIMAL(10,4) NULL,
+    no_hoja_liquidacion VARCHAR(100) NULL,
+    tipo_cambio_log DECIMAL(10,4) NULL,
+    incrementales_usd DECIMAL(14,2) NULL,
+    igi_total_embarque DECIMAL(14,2) NULL,
+    iva_total_aduana DECIMAL(14,2) NULL,
+    total_hoja_liquidacion DECIMAL(14,2) NULL,
+    total_consolidado_porc DECIMAL(7,4) NULL,
+    total_pagado_calculo_excel DECIMAL(14,2) NULL,
+    pagado_china_mxn DECIMAL(14,2) NULL,
+    actualizado_por VARCHAR(100) NULL,
+    actualizado_en TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_liquidacion_embarque (embarque_id)
+) ENGINE=InnoDB;
+
+-- Foto del costeo (JSON) al completar la etapa HL_LIQUIDADA; desmarcarla la borra.
+CREATE TABLE IF NOT EXISTS embarque_costeo_cierre (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    embarque_id INT NOT NULL,
+    resultado LONGTEXT NOT NULL,
+    cerrado_por VARCHAR(100) NULL,
+    cerrado_en TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE KEY uq_cierre_embarque (embarque_id)
+) ENGINE=InnoDB;
+
 -- Cache diaria de tipo de cambio Banxico (fallback sin Redis)
 CREATE TABLE IF NOT EXISTS tipo_cambio_cache (
     fecha_consulta DATE PRIMARY KEY,

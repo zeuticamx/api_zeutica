@@ -19,17 +19,22 @@ CDMX = ZoneInfo("America/Mexico_City")
 
 # ---------- Ventana de meses ----------
 
-def test_ventana_son_12_meses_completos_sin_el_mes_en_curso():
-    etiquetas, desde, hasta = rl.ventana_meses(date(2026, 10, 20))
+def test_ventana_va_del_mes_de_la_primera_venta_al_mes_pasado():
+    etiquetas, desde, hasta = rl.ventana_meses(date(2026, 10, 20), date(2025, 10, 17))
     assert len(etiquetas) == 12
     assert etiquetas[0] == "2025-10" and etiquetas[-1] == "2026-09"
     assert desde == date(2025, 10, 1) and hasta == date(2026, 10, 1)
 
 
 def test_ventana_en_enero_cruza_de_anio():
-    etiquetas, desde, hasta = rl.ventana_meses(date(2026, 1, 5), meses=3)
+    etiquetas, desde, hasta = rl.ventana_meses(date(2026, 1, 5), date(2025, 10, 9))
     assert etiquetas == ["2025-10", "2025-11", "2025-12"]
     assert desde == date(2025, 10, 1) and hasta == date(2026, 1, 1)
+
+
+def test_ventana_vacia_si_la_primera_venta_es_de_este_mes_o_posterior():
+    assert rl.ventana_meses(date(2026, 10, 20), date(2026, 10, 1)) == ([], date(2026, 10, 1), date(2026, 10, 1))
+    assert rl.ventana_meses(date(2026, 10, 20), date(2026, 12, 1))[0] == []
 
 
 def test_serie_rellena_con_cero_los_meses_sin_venta():
@@ -135,7 +140,9 @@ class FakeCursor:
 
     def execute(self, sql, params=None):
         self.db.ejecutadas.append((sql, params))
-        if "FROM productos ORDER BY" in sql:
+        if "MIN(fecha_registro)" in sql:
+            self._res = [{"primera": self.db.primera_venta}]
+        elif "FROM productos ORDER BY" in sql:
             self._res = self.db.productos
         elif "FROM ventasRegistro" in sql:
             self._res = self.db.consumo
@@ -167,6 +174,7 @@ class FakeDB:
         self.consumo = [{"sku": "GUANITRL-M", "anio": 2026, "mes": 9, "cantidad": 30}]
         self.transito = [{"sku": "GUANITRL-M", "qty": 5}]
         self.parametros = []
+        self.primera_venta = datetime(2025, 10, 17, 9, 30)  # 12 meses completos antes del 2026-10
 
     def cursor(self, dictionary=False):
         return FakeCursor(self)
@@ -205,7 +213,7 @@ def test_get_reorden_devuelve_filas_evaluadas(db):
     r = _cliente("gerencia").get("/reorden")
     assert r.status_code == 200
     body = r.json()
-    assert len(body["meses"]) == 12
+    assert body["meses"][0] == "2025-10" and body["desde"] == "2025-10-01"
     assert body["defaults"] == {"lead_time_meses": 3.0, "nivel_servicio_z": 1.65}
     assert body["ventas_en_ventana"] == 30 and body["skus_vendidos_sin_producto"] == []
     f = body["filas"][0]
@@ -215,7 +223,7 @@ def test_get_reorden_devuelve_filas_evaluadas(db):
 
 def test_consumo_con_sku_en_bytes_llega_a_la_fila_y_sku_huerfano_se_reporta(db):
     # Último mes completo de la ventana: el consumo debe aparecer en la fila del producto.
-    ultimo = rl.ventana_meses(datetime.now(CDMX).date())[0][-1]
+    ultimo = rl.ventana_meses(datetime.now(CDMX).date(), date(2025, 10, 17))[0][-1]
     anio, mes = int(ultimo[:4]), int(ultimo[5:])
     db.consumo = [{"sku": bytearray(b"GUANITRL-M"), "anio": anio, "mes": mes, "cantidad": 7},
                   {"sku": "NOEXISTE", "anio": anio, "mes": mes, "cantidad": 3}]
@@ -320,3 +328,12 @@ async def test_run_job_error_queda_en_estado(monkeypatch, avisos):
     r = await job.run_job()
     assert r["estado"] == "error" and "sin conexión" in r["error"]
     assert "falló" in tg.await_args.args[0]
+
+
+def test_sin_ventas_registradas_la_ventana_queda_vacia_y_no_truena(db):
+    db.primera_venta = None
+    db.consumo = []
+    r = _cliente("gerencia").get("/reorden")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["meses"] == [] and body["ventas_en_ventana"] == 0

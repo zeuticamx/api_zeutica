@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict, field_validator
 
 import mov_reg
 from permisos import requerir_gerencia
+from routers import landed_cost
 from banxico_service import BanxicoServiceError, obtener_tipo_cambio_dia, obtener_tipo_cambio_fecha_especifica
 
 router = APIRouter(tags=["/embarques"], responses={404: {"Mensaje": "No encontrado"}})
@@ -48,6 +49,18 @@ _COLUMNAS_NUEVAS_EMBARQUE_ETAPAS = [
     ("tipo_cambio_fecha_dato", "DATE NULL"),
 ]
 
+# Entradas por item del costeo de importación (routers/landed_cost.py). No salen en el
+# detalle del embarque (_obtener_embarque_detalle lista columnas): solo gerencia las ve.
+_COLUMNAS_NUEVAS_EMBARQUE_ITEMS = [
+    ("invoice", "VARCHAR(255) NULL"),
+    ("fecha_compra", "DATE NULL"),
+    ("paquete_venta", "INT NULL"),
+    ("unit_price_fob_usd", "DECIMAL(14,6) NULL"),
+    ("ctns", "INT NULL"),
+    ("arancel_porc", "DECIMAL(6,4) NULL"),
+    ("tipo_cambio_china", "DECIMAL(10,4) NULL"),
+]
+
 
 def _columna_existe(cursor, tabla: str, columna: str) -> bool:
     cursor.execute(
@@ -76,6 +89,12 @@ def _migrar_columnas_embarques(cursor):
         if not _columna_existe(cursor, "embarque_etapas", columna):
             cursor.execute(f"ALTER TABLE embarque_etapas ADD COLUMN {columna} {definicion}")
             print(f"Columna embarque_etapas.{columna} agregada.")
+
+    # Agregar columnas de costeo a embarque_items.
+    for columna, definicion in _COLUMNAS_NUEVAS_EMBARQUE_ITEMS:
+        if not _columna_existe(cursor, "embarque_items", columna):
+            cursor.execute(f"ALTER TABLE embarque_items ADD COLUMN {columna} {definicion}")
+            print(f"Columna embarque_items.{columna} agregada.")
 
 
 def _migrar_contenedor_invoice_invertido(cursor):
@@ -480,6 +499,8 @@ async def eliminar_embarque(embarque_id: int, usuario: str = Depends(requerir_ge
         cursor.execute("DELETE FROM embarque_items WHERE embarque_id = %s", (embarque_id,))
         cursor.execute("DELETE FROM embarque_etapas WHERE embarque_id = %s", (embarque_id,))
         cursor.execute("DELETE FROM embarque_estatus WHERE embarque_id = %s", (embarque_id,))
+        cursor.execute("DELETE FROM embarque_liquidacion WHERE embarque_id = %s", (embarque_id,))
+        cursor.execute("DELETE FROM embarque_costeo_cierre WHERE embarque_id = %s", (embarque_id,))
         cursor.execute("DELETE FROM embarques WHERE id = %s", (embarque_id,))
         conn.commit()
 
@@ -597,6 +618,8 @@ async def eliminar_item(embarque_id: int, item_id: int):
 async def marcar_etapa(embarque_id: int, tipo: EtapaTipo, payload: EtapaUpdate):
     """
     Marca/desmarca una etapa (completado). Solo actualiza completado + nota.
+    HL_LIQUIDADA además cierra (completada) o reabre (desmarcada) el costeo de importación,
+    en la misma transacción.
     """
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
@@ -626,10 +649,21 @@ async def marcar_etapa(embarque_id: int, tipo: EtapaTipo, payload: EtapaUpdate):
             (payload.completado, nota_final, tc_fecha_final, tc_valor_final, tc_fecha_dato_final, etapa["id"])
         )
 
+        costeo = None
+        if tipo == EtapaTipo.HL_LIQUIDADA:
+            if payload.completado and landed_cost.cerrar_costeo(cursor, embarque_id, payload.usuario):
+                costeo = "cerró"
+            elif not payload.completado and landed_cost.reabrir_costeo(cursor, embarque_id):
+                costeo = "reabrió"
+
         conn.commit()
         mov_reg.registrar_movimiento(
             payload.usuario, f"Actualizo etapa {tipo.value} de embarque #{embarque_id}", "Importaciones"
         )
+        if costeo:
+            mov_reg.registrar_movimiento(
+                payload.usuario, f"Se {costeo} el costeo del embarque #{embarque_id}", "Importaciones"
+            )
 
         cursor.execute(
             "SELECT id, embarque_id, tipo, completado, nota, "

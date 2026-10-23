@@ -1,9 +1,11 @@
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from typing import List
 import os, html, asyncio
 import mysql.connector
 import mov_reg
+import compras_ubicacion_logica as ubic
+from permisos import usuario_autenticado
 from servicios.telegram.notificacion import send_telegram_alert
 from errores_db import detalle_error_db
 
@@ -18,7 +20,50 @@ def get_db_connection():
         database=os.getenv("DB_NAME")
     )
 
-class compraPromedio(BaseModel):   
+# Estado de ubicación de cada compra (ver compras_ubicacion_logica.py).
+COLUMNAS_UBICACION = {
+    "ubicada": "TINYINT(1) NOT NULL DEFAULT 0",
+    "cantidad_ubicada": "INT NOT NULL DEFAULT 0",
+    "sin_ubicacion": "TINYINT(1) NOT NULL DEFAULT 0",
+    "fecha_ubicada": "DATETIME NULL",
+    "ubicada_por": "VARCHAR(100) NULL",
+}
+
+
+def asegurar_columnas_ubicacion() -> dict:
+    """Agrega a `compras` las columnas de ubicación (se llama en el lifespan).
+
+    Al crear `ubicada` por primera vez, todo lo registrado hasta ese momento se marca como
+    ubicado: solo las compras nuevas aparecen por ubicar.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    reporte = {"columnas_agregadas": [], "backfill": 0}
+    try:
+        cursor.execute("SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+                       "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'compras'")
+        existentes = {str(fila[0]).lower() for fila in cursor.fetchall()}
+        for columna, definicion in COLUMNAS_UBICACION.items():
+            if columna not in existentes:
+                cursor.execute(f"ALTER TABLE compras ADD COLUMN {columna} {definicion}")
+                reporte["columnas_agregadas"].append(columna)
+        if "ubicada" in reporte["columnas_agregadas"]:
+            cursor.execute("UPDATE compras SET ubicada = 1, cantidad_ubicada = stock_bodega, sin_ubicacion = 0")
+            reporte["backfill"] = cursor.rowcount
+        conn.commit()
+        return reporte
+    finally:
+        cursor.close()
+        conn.close()
+
+
+class UbicarCompraModel(BaseModel):
+    warehouse_id: str = Field(min_length=1)
+    cantidad: int = Field(gt=0)
+    cama: int = Field(default=0, ge=0)
+
+
+class compraPromedio(BaseModel):
     sku: str     
     costo_prom: float
 
@@ -220,3 +265,119 @@ async def obtener_compras():
     finally:
         conn.close()
         cursor.close()
+
+# ---- Compras por ubicar ----
+
+@router.get("/compras/por-ubicar")
+async def compras_por_ubicar():
+    """Compras que aún no tienen todas sus piezas repartidas en tarjetas, agrupadas por factura."""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("""
+            SELECT id, sku, nombre, stock_bodega AS cantidad, cantidad_ubicada,
+                   num_factura, proveedor, fecha_registro
+            FROM compras WHERE COALESCE(ubicada, 0) = 0
+            ORDER BY fecha_registro DESC, id DESC
+        """)
+        filas = cursor.fetchall()
+        facturas = ubic.agrupar_por_factura(filas)
+        return {"total": len(filas), "facturas": facturas}
+    except mysql.connector.Error as err:
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.post("/compras/{compra_id}/ubicar")
+async def ubicar_compra(compra_id: int, datos: UbicarCompraModel, usuario: str = Depends(usuario_autenticado)):
+    """Reparte `cantidad` de la compra en una celda: crea la tarjeta en stock_ubicacion y suma lo ubicado.
+
+    Una sola transacción con la fila bloqueada: dos usuarios no pueden ubicar de más la misma compra.
+    Cuando lo ubicado alcanza lo comprado, la compra deja de aparecer.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(
+            "SELECT id, sku, stock_bodega, cantidad_ubicada, ubicada FROM compras WHERE id = %s FOR UPDATE",
+            (compra_id,))
+        compra = cursor.fetchone()
+        if not compra:
+            raise HTTPException(status_code=404, detail="Compra no encontrada")
+        if compra["ubicada"]:
+            raise HTTPException(status_code=409, detail="Esta compra ya está ubicada")
+
+        error = ubic.validar_cantidad(datos.cantidad, compra["stock_bodega"], compra["cantidad_ubicada"])
+        if error:
+            raise HTTPException(status_code=422, detail=error)
+
+        almacen = datos.warehouse_id.strip()
+        if not almacen:
+            raise HTTPException(status_code=422, detail="Indica la ubicación")
+
+        completa = ubic.queda_ubicada(compra["stock_bodega"], compra["cantidad_ubicada"], datos.cantidad)
+        cursor.execute(
+            "INSERT INTO stock_ubicacion (sku, warehouse_id, cama, cantidad) VALUES (%s, %s, %s, %s)",
+            (compra["sku"], almacen, datos.cama, datos.cantidad))
+        cursor.execute(
+            "UPDATE compras SET cantidad_ubicada = cantidad_ubicada + %s, ubicada = %s, "
+            "fecha_ubicada = IF(%s = 1, NOW(), fecha_ubicada), ubicada_por = IF(%s = 1, %s, ubicada_por) WHERE id = %s",
+            (datos.cantidad, int(completa), int(completa), int(completa), usuario, compra_id))
+        conn.commit()
+
+        try:
+            mov_reg.registrar_movimiento(
+                usuario, f"Ubicó {datos.cantidad} de '{compra['sku']}' (compra #{compra_id}) en '{almacen}'", "Compras")
+        except Exception as err:
+            print(f"Compra ubicada, pero falló la bitácora: {err}")
+
+        return {
+            "mensaje": "Ubicación creada",
+            "id": compra_id,
+            "sku": compra["sku"],
+            "warehouse_id": almacen,
+            "cantidad": datos.cantidad,
+            "pendiente": ubic.pendiente(compra["stock_bodega"], compra["cantidad_ubicada"] + datos.cantidad),
+            "ubicada": completa,
+        }
+    except mysql.connector.Error as err:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.post("/compras/{compra_id}/sin-ubicacion")
+async def compra_sin_ubicacion(compra_id: int, usuario: str = Depends(usuario_autenticado)):
+    """Saca la compra de la lista sin crear tarjetas (p. ej. un SKU que no se almacena o ya se ubicó a mano)."""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute("SELECT id, sku, ubicada FROM compras WHERE id = %s FOR UPDATE", (compra_id,))
+        compra = cursor.fetchone()
+        if not compra:
+            raise HTTPException(status_code=404, detail="Compra no encontrada")
+        if compra["ubicada"]:
+            raise HTTPException(status_code=409, detail="Esta compra ya está ubicada")
+
+        cursor.execute(
+            "UPDATE compras SET ubicada = 1, sin_ubicacion = 1, fecha_ubicada = NOW(), ubicada_por = %s WHERE id = %s",
+            (usuario, compra_id))
+        conn.commit()
+
+        try:
+            mov_reg.registrar_movimiento(
+                usuario, f"Marcó sin ubicación '{compra['sku']}' (compra #{compra_id})", "Compras")
+        except Exception as err:
+            print(f"Compra marcada, pero falló la bitácora: {err}")
+
+        return {"mensaje": "Compra marcada sin ubicación", "id": compra_id}
+    except mysql.connector.Error as err:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
+    finally:
+        cursor.close()
+        conn.close()

@@ -10,7 +10,7 @@ from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from typing import Optional
-from permisos import requerir_gerencia
+from permisos import usuario_autenticado
 from errores_db import detalle_error_db
 
 router = APIRouter(tags=["/anaqueles"], responses={404: {"Mensaje": "No encontrado"}})
@@ -271,12 +271,12 @@ async def consultar_tarjetas():
 
 
 @router.put("/anaqueles/disposicion")
-async def guardar_disposicion(datos: DisposicionSchema, usuario: str = Depends(requerir_gerencia)):
+async def guardar_disposicion(datos: DisposicionSchema, usuario: str = Depends(usuario_autenticado)):
     """
     Reemplaza la disposición completa en una transacción. Si cambia el ID de
     una celda, las tarjetas de esa celda (de todos los SKUs) cambian su
     warehouse_id al nuevo. Exige la versión leída: 409 si alguien guardó antes.
-    Solo gerencia; el usuario de la bitácora sale del token.
+    Cualquier usuario con sesión; el usuario de la bitácora sale del token.
     """
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
