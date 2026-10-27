@@ -72,7 +72,7 @@ async def traspaso_multiple(lote: LoteTraspaso):
         # Iniciamos el proceso para todos los items
         for item in items:
             # A. Verificar stock bloqueando la fila.
-            cursor.execute("SELECT stock_bodega FROM productos WHERE sku = %s FOR UPDATE", (item.sku,))
+            cursor.execute("SELECT stock_bodega FROM productos WHERE sku = %s AND eliminado = 0 FOR UPDATE", (item.sku,))
             res = cursor.fetchone()
 
             if not res:
@@ -190,7 +190,7 @@ async def traspaso_multiple_clean(lote: LoteTraspaso):
         # Iniciamos el proceso para todos los items
         for item in items:
             # A. Verificar stock bloqueando la fila.
-            cursor.execute("SELECT stock_bodega FROM productos WHERE sku = %s FOR UPDATE", (item.sku,))
+            cursor.execute("SELECT stock_bodega FROM productos WHERE sku = %s AND eliminado = 0 FOR UPDATE", (item.sku,))
             res = cursor.fetchone()
 
             if not res:

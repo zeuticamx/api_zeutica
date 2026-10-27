@@ -3,7 +3,8 @@
 # jobs/reorden_compras.py); este router solo junta datos y guarda parámetros.
 #   - existencia  = stock_bodega + stock_fba + stock_clean de productos (stock total)
 #   - consumo     = SUM(cantidad) de ventasRegistro activas por mes (todos los canales)
-#   - en tránsito = qty de embarque_items cuyos embarques no tienen fecha_de_recibido
+#   - en tránsito = qty de embarque_items cuyos embarques no tienen fecha_llegada_real
+#                   («Llegada a Bodega» en Pendiente; con fecha ya llegaron y no suman)
 import os
 from datetime import date, datetime
 from zoneinfo import ZoneInfo
@@ -54,7 +55,7 @@ def crear_tabla_reorden():
 SQL_PRODUCTOS = """
     SELECT sku, nombre, categoria,
            COALESCE(stock_bodega, 0) + COALESCE(stock_fba, 0) + COALESCE(stock_clean, 0) AS existencia
-    FROM productos ORDER BY sku
+    FROM productos WHERE eliminado = 0 ORDER BY sku
 """
 
 # Rango semiabierto sobre fecha_registro (usa idx_ventasregistro_fecha_registro).
@@ -93,7 +94,7 @@ SQL_TRANSITO = """
     SELECT i.sku, SUM(i.qty) AS qty
     FROM embarque_items i
     JOIN embarques e ON e.id = i.embarque_id
-    WHERE e.fecha_de_recibido IS NULL
+    WHERE e.fecha_llegada_real IS NULL
     GROUP BY i.sku
 """
 

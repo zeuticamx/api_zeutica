@@ -18,7 +18,7 @@ from slowapi.errors import RateLimitExceeded
 from permisos import usuario_autenticado, asegurar_columna_token_expira, token_horas, es_gerencia
 from routers import cotizacionesBack, productos, ventas, clientes, traspaso, gastos, compras, cleanest, cuentas_pendientes,\
       abonos, estadisticas, inventario, empleados, notificaciones, cuentas_pagar, consulta_registros, pendientes, proveedores, genera_cotizacion, sofi_conversaciones, embarques, sofi_notificaciones, whatsapp_plantillas, skydropx
-from routers import crm, comisiones, prospectos, jobs, meli_webhook, meli_promos, anaqueles, reorden, landed_cost
+from routers import crm, comisiones, prospectos, jobs, meli_webhook, meli_promos, anaqueles, reorden, landed_cost, mercado_ads
 import mysql.connector
 import skydropx_envios
 from fastapi.middleware.cors import CORSMiddleware
@@ -105,6 +105,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"❌ No se pudo crear la tabla de punto de reorden: {e}")
 
+    # Reglas y estado del Motor Zentor (página Mercado Ads): una fila.
+    try:
+        mercado_ads.crear_tabla_zentor()
+    except Exception as e:
+        print(f"❌ No se pudo crear la tabla de reglas de Zentor: {e}")
+
     # Estado de ubicación de las compras (ubicada, cantidad_ubicada…); lo anterior queda como ubicado.
     try:
         rep = compras.asegurar_columnas_ubicacion()
@@ -112,6 +118,13 @@ async def lifespan(app: FastAPI):
             print(f"📦 Migración compras: {rep}")
     except Exception as e:
         print(f"❌ No se pudieron asegurar las columnas de ubicación de compras: {e}")
+
+    # Borrado lógico de SKUs (productos.eliminado, fecha_eliminado, eliminado_por).
+    try:
+        from routers.productos import asegurar_columnas_eliminado
+        asegurar_columnas_eliminado()
+    except Exception as e:
+        print(f"❌ No se pudieron asegurar las columnas de borrado lógico de productos: {e}")
 
     # Columna usuario en devoluciones (auditoría de inventario).
     try:
@@ -260,6 +273,17 @@ async def lifespan(app: FastAPI):
                     print(f"⏰ Job punto de reorden programado ({rd}) a las {rh} America/Mexico_City.")
             except Exception as e:
                 print(f"❌ No se pudo programar el job punto de reorden: {e}")
+            try:
+                from jobs import zentor_piloto
+                if os.getenv("ZENTOR_JOB_ENABLED", "1") == "1":
+                    zh = os.getenv("ZENTOR_JOB_HORA", "13:00")
+                    # Diario; zona CDMX dentro de crear_trigger. Solo pausa si el piloto está encendido.
+                    scheduler.add_job(_ejecucion.ejecutar, zentor_piloto.crear_trigger(zh),
+                                      kwargs={"modulo": zentor_piloto, "motivo": "scheduler"}, id="zentor", replace_existing=True,
+                                      misfire_grace_time=600, coalesce=True, max_instances=1)
+                    print(f"⏰ Job Zentor (Mercado Ads) programado a las {zh} America/Mexico_City.")
+            except Exception as e:
+                print(f"❌ No se pudo programar el job Zentor: {e}")
             # Verificación visible en logs: próxima corrida de cada job en hora CDMX.
             try:
                 for jb in scheduler.get_jobs():
@@ -352,6 +376,7 @@ app.include_router(jobs.router, dependencies=[Depends(obtener_usuario_actual)])
 app.include_router(meli_promos.router, dependencies=[Depends(obtener_usuario_actual)])
 app.include_router(anaqueles.router, dependencies=[Depends(obtener_usuario_actual)])
 app.include_router(reorden.router, dependencies=[Depends(obtener_usuario_actual)])
+app.include_router(mercado_ads.router, dependencies=[Depends(obtener_usuario_actual)])
 app.include_router(landed_cost.router, dependencies=[Depends(obtener_usuario_actual)])
 # Sin obtener_usuario_actual a proposito: el WebSocket valida el token por query
 # param y el POST de escalacion valida X-API-Key (n8n no tiene sesion de usuario).

@@ -11,7 +11,7 @@ import os, mov_reg
 from dotenv import load_dotenv
 from typing import Optional
 from servicios.telegram.notificacion import send_telegram_alert
-from permisos import usuario_autenticado, requerir_gerencia
+from permisos import usuario_autenticado, requerir_gerencia, es_gerencia
 from errores_db import detalle_error_db
 
 router =APIRouter(tags=["/productos"],responses={404: {"Mensaje":"No encontrado"}})
@@ -58,25 +58,80 @@ class ProdNuevoSchema(BaseModel):
     usuario: str  # Usuario que crea el producto, para registro de movimientos
 
 
+# Borrado lógico de SKUs: el producto se oculta pero la fila (y su historial) se conserva.
+COLUMNAS_ELIMINADO = {
+    "eliminado": "TINYINT(1) NOT NULL DEFAULT 0",
+    "fecha_eliminado": "DATETIME NULL",
+    "eliminado_por": "VARCHAR(100) NULL",
+}
+
+SQL_EMBARQUES_PENDIENTES = (
+    "SELECT COUNT(*) AS n FROM embarque_items i JOIN embarques e ON e.id = i.embarque_id "
+    "WHERE i.sku = %s AND e.fecha_llegada_real IS NULL"
+)
+SQL_COMPRAS_PENDIENTES = "SELECT COUNT(*) AS n FROM compras WHERE sku = %s AND COALESCE(ubicada, 0) = 0"
+
+
+def asegurar_columnas_eliminado():
+    """Agrega a productos las columnas del borrado lógico (se llama en el lifespan)."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+                       "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'productos'")
+        existentes = {str(fila[0]).lower() for fila in cursor.fetchall()}
+        for columna, definicion in COLUMNAS_ELIMINADO.items():
+            if columna not in existentes:
+                cursor.execute(f"ALTER TABLE productos ADD COLUMN {columna} {definicion}")
+        conn.commit()
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def motivos_bloqueo_eliminar(stocks: dict, embarques_pendientes: int, compras_pendientes: int) -> list[str]:
+    """Razones por las que un SKU no se puede eliminar (lista vacía = se puede).
+    Cualquier existencia distinta de 0 bloquea (también negativa); stock_total es una columna
+    autogenerada por las demás bodegas, por eso se revisan las cuatro."""
+    motivos = []
+    valores = {k: (stocks.get(k) or 0) for k in ("stock_bodega", "stock_fba", "stock_clean", "stock_total")}
+    if any(v != 0 for v in valores.values()):
+        motivos.append(
+            f"Tiene inventario (bodega {valores['stock_bodega']}, FBA {valores['stock_fba']}, "
+            f"Clean {valores['stock_clean']}, total {valores['stock_total']}): debe estar en 0"
+        )
+    if embarques_pendientes:
+        motivos.append(f"Tiene {embarques_pendientes} partida(s) en embarques con llegada a bodega pendiente")
+    if compras_pendientes:
+        motivos.append(f"Tiene {compras_pendientes} compra(s) pendientes de ubicar")
+    return motivos
+
+
 @router.get("/productos")
-async def consultar_inventario_completo():
+async def consultar_inventario_completo(eliminados: bool = False, usuario: str = Depends(usuario_autenticado)):
     """
-    Consulta inventario de productos para monitoreo.
+    Consulta inventario de productos para monitoreo. Oculta los SKUs eliminados;
+    `?eliminados=true` (solo gerencia) lista únicamente los eliminados para poder restaurarlos.
     """
+    if eliminados and not es_gerencia(usuario):
+        raise HTTPException(status_code=403, detail="Se requiere nivel de gerencia para esta acción")
+
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True) # Usamos dictionary=True para que devuelva claves como 'sku'
-    
+
     query = "SELECT sku, nombre, categoria, medida, ubicacion, stock_minimo," \
     " stock_bodega, stock_fba, stock_clean, stock_total, numero_referencia, costo_total, precio, " \
-    "precio_2, precio_3, precio_amazon, precio_clean FROM productos ORDER BY sku ASC"
-    
+    "precio_2, precio_3, precio_amazon, precio_clean" \
+    + (", fecha_eliminado, eliminado_por" if eliminados else "") \
+    + f" FROM productos WHERE eliminado = {1 if eliminados else 0} ORDER BY sku ASC"
+
     try:
-        cursor.execute(query) 
+        cursor.execute(query)
         productos = cursor.fetchall()
-        
-        if not productos:
+
+        if not productos and not eliminados:
             raise HTTPException(status_code=404, detail="No se han encontrado productos")
-            
+
         return productos # FastAPI lo convierte automáticamente a JSON
 
     except mysql.connector.Error as err:
@@ -284,11 +339,13 @@ async def crear_producto(prod: ProdNuevoSchema):
         cursor = conn.cursor()
         
         # Primero verifico si el SKU ya existe (no dejo duplicados)
-        sql_check = "SELECT sku FROM productos WHERE sku = %s"
+        sql_check = "SELECT sku, eliminado FROM productos WHERE sku = %s"
         cursor.execute(sql_check, (prod.sku,))
         existe = cursor.fetchone()
-        
+
         if existe:
+            if existe[1]:
+                raise HTTPException(status_code=409, detail=f"El SKU '{prod.sku}' está eliminado; pídele a gerencia que lo restaure")
             raise HTTPException(status_code=400, detail=f"El SKU '{prod.sku}' ya existe en la BD")
         
         # Inserto el nuevo producto
@@ -441,6 +498,86 @@ async def eliminar_ubicacion_ruta_vieja(id: int, _usuario_ignorado: str, usuario
     """Alias de la ruta anterior (el usuario iba en la URL y se confiaba en él). Quitarlo cuando
     ningún panel use la versión vieja de api.jsx."""
     return await eliminar_ubicacion(id, usuario)
+
+
+@router.delete("/producto/{sku}")
+async def eliminar_producto(sku: str, usuario: str = Depends(requerir_gerencia)):
+    """
+    Borrado lógico de un SKU (solo gerencia): queda oculto pero la fila se conserva.
+    Se bloquea con 409 si tiene existencias distintas de 0, partidas en embarques con llegada a bodega pendiente
+    o compras pendientes de ubicar. Sus tarjetas de ubicación (stock_ubicacion) se borran en la
+    misma transacción. El FOR UPDATE lo serializa contra ventas/compras/traspasos del mismo SKU.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True, buffered=True)
+
+    try:
+        cursor.execute(
+            "SELECT sku, nombre, stock_bodega, stock_fba, stock_clean, stock_total "
+            "FROM productos WHERE sku = %s AND eliminado = 0 FOR UPDATE", (sku,))
+        producto = cursor.fetchone()
+        if not producto:
+            conn.rollback()
+            raise HTTPException(status_code=404, detail=f"Producto '{sku}' no encontrado")
+
+        cursor.execute(SQL_EMBARQUES_PENDIENTES, (sku,))
+        embarques = (cursor.fetchone() or {}).get("n", 0)
+        cursor.execute(SQL_COMPRAS_PENDIENTES, (sku,))
+        compras = (cursor.fetchone() or {}).get("n", 0)
+
+        motivos = motivos_bloqueo_eliminar(producto, embarques, compras)
+        if motivos:
+            conn.rollback()
+            raise HTTPException(status_code=409, detail="No se puede eliminar: " + "; ".join(motivos))
+
+        cursor.execute("DELETE FROM stock_ubicacion WHERE sku = %s", (sku,))
+        tarjetas = cursor.rowcount
+        cursor.execute(
+            "UPDATE productos SET eliminado = 1, fecha_eliminado = NOW(), eliminado_por = %s "
+            "WHERE sku = %s AND eliminado = 0", (usuario, sku))
+        conn.commit()
+
+        mov_reg.registrar_movimiento(
+            usuario, f"Eliminó producto '{sku}' ({producto['nombre']}); tarjetas de ubicación borradas: {tarjetas}", "Productos")
+        return {"mensaje": "Producto eliminado", "sku": sku, "tarjetas_eliminadas": tarjetas}
+
+    except mysql.connector.Error as err:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
+
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.post("/producto/{sku}/restaurar")
+async def restaurar_producto(sku: str, usuario: str = Depends(requerir_gerencia)):
+    """Devuelve a la vista un SKU eliminado (solo gerencia). Sus tarjetas de ubicación no se recuperan."""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True, buffered=True)
+
+    try:
+        cursor.execute("SELECT nombre FROM productos WHERE sku = %s AND eliminado = 1 FOR UPDATE", (sku,))
+        producto = cursor.fetchone()
+        if not producto:
+            conn.rollback()
+            raise HTTPException(status_code=404, detail=f"No hay un producto eliminado con SKU '{sku}'")
+
+        cursor.execute(
+            "UPDATE productos SET eliminado = 0, fecha_eliminado = NULL, eliminado_por = NULL "
+            "WHERE sku = %s AND eliminado = 1", (sku,))
+        conn.commit()
+
+        mov_reg.registrar_movimiento(usuario, f"Restauró producto '{sku}' ({producto['nombre']})", "Productos")
+        return {"mensaje": "Producto restaurado", "sku": sku}
+
+    except mysql.connector.Error as err:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
+
+    finally:
+        cursor.close()
+        conn.close()
 
 
 @router.put("/ubicacion/editar/{id}")
@@ -840,7 +977,7 @@ async def registrar_devolucion(sku: str, datos: DevolucionSchema):
         cursor.execute(sql_ins, (sku, datos.producto, datos.cantidad, datos.plataforma, datos.reingreso, datos.usuario))
 
         if datos.reingreso:
-            cursor.execute("SELECT stock_bodega FROM productos WHERE sku = %s FOR UPDATE", (sku,))
+            cursor.execute("SELECT stock_bodega FROM productos WHERE sku = %s AND eliminado = 0 FOR UPDATE", (sku,))
             fila = cursor.fetchone()
             if not fila:
                 conn.rollback()

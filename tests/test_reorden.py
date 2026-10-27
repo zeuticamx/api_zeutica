@@ -126,7 +126,9 @@ def test_armar_consumo_arma_etiqueta_y_tolera_bytes():
 
 
 def test_sql_transito_solo_embarques_sin_recibir_y_existencia_es_stock_total():
-    assert "fecha_de_recibido IS NULL" in reorden.SQL_TRANSITO
+    # «Llegada a Bodega» pendiente = sin fecha_llegada_real; fecha_de_recibido ya no interviene.
+    assert "fecha_llegada_real IS NULL" in reorden.SQL_TRANSITO
+    assert "fecha_de_recibido" not in reorden.SQL_TRANSITO
     q = " ".join(reorden.SQL_PRODUCTOS.split())
     assert "stock_bodega" in q and "stock_fba" in q and "stock_clean" in q
 
@@ -142,7 +144,7 @@ class FakeCursor:
         self.db.ejecutadas.append((sql, params))
         if "MIN(fecha_registro)" in sql:
             self._res = [{"primera": self.db.primera_venta}]
-        elif "FROM productos ORDER BY" in sql:
+        elif "FROM productos WHERE eliminado = 0 ORDER BY" in sql:
             self._res = self.db.productos
         elif "FROM ventasRegistro" in sql:
             self._res = self.db.consumo

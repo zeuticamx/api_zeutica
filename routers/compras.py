@@ -93,7 +93,7 @@ async def recibir_compra(compras: List[CompraModel]):
         for compra in compras:
             # Verifico si el producto existe bloqueando la fila.
             cursor.execute(
-                "SELECT stock_bodega FROM productos WHERE sku = %s FOR UPDATE",
+                "SELECT stock_bodega FROM productos WHERE sku = %s AND eliminado = 0 FOR UPDATE",
                 (compra.sku,)
             )
             res_existe = cursor.fetchone()

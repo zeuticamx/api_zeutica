@@ -209,7 +209,9 @@ async def registrar_venta(venta: VentaSchema):
 
             # A. Verificar stock y bloquear la fila (FOR UPDATE) para evitar que dos ventas
             # concurrentes del mismo SKU lean el mismo stock y ambas pasen la validación
-            sql_check = "SELECT stock_bodega FROM productos WHERE sku = %s FOR UPDATE"
+            # AND eliminado = 0: un SKU eliminado (borrado lógico) ya no se vende; el FOR UPDATE
+            # lo serializa contra DELETE /producto/{sku}.
+            sql_check = "SELECT stock_bodega FROM productos WHERE sku = %s AND eliminado = 0 FOR UPDATE"
             cursor.execute(sql_check, (venta.sku,))
             resultado = cursor.fetchone()
 
@@ -379,7 +381,7 @@ async def registrar_venta_completa(venta: VentaCompletaSchema):
 
             # B. Verificar stock de cada SKU bloqueando su fila.
             for item in items_por_sku:
-                cursor.execute("SELECT stock_bodega FROM productos WHERE sku = %s FOR UPDATE", (item.sku,))
+                cursor.execute("SELECT stock_bodega FROM productos WHERE sku = %s AND eliminado = 0 FOR UPDATE", (item.sku,))
                 fila = cursor.fetchone()
                 if not fila:
                     connection.rollback()

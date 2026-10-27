@@ -316,7 +316,7 @@ async def ingresar_venta(venta: VentaSchema):
             raise HTTPException(status_code=409, detail=mensaje_venta_duplicada(venta.id_venta))
 
         # B. Bloqueo de fila y validación de stock.
-        cursor.execute("SELECT COALESCE(stock_clean, 0) AS stock_clean FROM productos WHERE sku = %s FOR UPDATE", (venta.sku,))
+        cursor.execute("SELECT COALESCE(stock_clean, 0) AS stock_clean FROM productos WHERE sku = %s AND eliminado = 0 FOR UPDATE", (venta.sku,))
         res_existe = cursor.fetchone()
 
         if not res_existe:
