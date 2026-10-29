@@ -13,6 +13,10 @@
 CREATE TABLE IF NOT EXISTS skydropx_envios (
     id INT AUTO_INCREMENT PRIMARY KEY,
     codigo_cotizacion VARCHAR(100) NULL,
+    -- Compra (ronda cotizar -> comprar) a la que pertenece la guia dentro de su
+    -- cotizacion: 1, 2, 3... Una compra con varios bultos son varias filas con el
+    -- mismo numero. Las filas anteriores a la columna quedan como compra 1.
+    numero_envio INT NOT NULL DEFAULT 1,
     tracking_number VARCHAR(100) NULL,
     shipment_id VARCHAR(100) NULL,
     -- Id del paquete en Skydropx (una guia = un paquete). Con V2 la guia nace
@@ -102,3 +106,23 @@ INSERT IGNORE INTO skydropx_cajas (nombre, length, width, height, weight, packag
     ('Caja chica', 25, 20, 15, 2, '4G'),
     ('Caja mediana', 40, 30, 25, 5, '4G'),
     ('Caja grande', 60, 40, 40, 12, '4G');
+
+-- Bitacora CRUDA de todo lo que llega al webhook (ya autenticado por firma), se
+-- haya podido ligar a una guia o no. Existe para diagnosticar: si un evento
+-- (p. ej. una cancelacion) no se aplica, aqui queda el payload tal cual y el
+-- motivo en `resultado`. A diferencia de skydropx_envio_eventos (linea de tiempo
+-- deduplicada), aqui no se deduplica ni se descarta nada. Se purga a los 90 dias.
+-- resultado: aplicado | fila_nueva | estatus_protegido | sin_estatus | sin_llave | error
+CREATE TABLE IF NOT EXISTS skydropx_webhook_recibidos (
+    id INT AUTO_INCREMENT PRIMARY KEY,
+    recibido_en TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    tipo VARCHAR(40) NULL,
+    estatus VARCHAR(60) NULL,
+    tracking_number VARCHAR(100) NULL,
+    shipment_id VARCHAR(100) NULL,
+    package_id VARCHAR(100) NULL,
+    resultado VARCHAR(30) NULL,
+    payload MEDIUMTEXT NULL,
+    KEY idx_sky_wh_recibido (recibido_en),
+    KEY idx_sky_wh_estatus (estatus)
+) ENGINE=InnoDB;

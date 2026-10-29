@@ -7,6 +7,7 @@
 import copy
 import json
 import os
+from contextlib import contextmanager
 from datetime import date
 from unittest.mock import AsyncMock
 
@@ -16,6 +17,9 @@ from pydantic import ValidationError
 
 import skydropx_service
 from routers import skydropx as router
+
+# El fixture autouse sustituye reservar_envio en el modulo; las pruebas del candado usan el real.
+reservar_real = router.skydropx_envios.reservar_envio
 
 FIXTURES = os.path.join(os.path.dirname(__file__), "fixtures", "skydropx")
 
@@ -38,6 +42,16 @@ def con_tracking(respuesta, tracking, etiqueta):
     return r
 
 
+def _reserva_fija(numero=None, error=None):
+    """Sustituto de skydropx_envios.reservar_envio: cede `numero` o lanza `error` al entrar."""
+    @contextmanager
+    def reservar(codigo):
+        if error is not None:
+            raise error
+        yield numero
+    return reservar
+
+
 @pytest.fixture(autouse=True)
 def sin_efectos(monkeypatch):
     """Nada de BD, bitacora, esperas ni caches compartidas entre tests."""
@@ -45,6 +59,9 @@ def sin_efectos(monkeypatch):
     monkeypatch.setattr(router.skydropx_envios, "guardar_envio", lambda **k: guardados.append(k) or True)
     monkeypatch.setattr(router.mov_reg, "registrar_movimiento", lambda *a, **k: None)
     monkeypatch.setattr(router.asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr(router.cotizacion_cancelacion, "exigir_no_cancelada_codigo", lambda codigo: None)
+    # El tope por cotizacion necesita MySQL (GET_LOCK): aqui siempre es el envio 1.
+    monkeypatch.setattr(router.skydropx_envios, "reservar_envio", _reserva_fija(1))
     skydropx_service.invalidar_catalogos()
     return guardados
 
@@ -211,6 +228,189 @@ async def test_crear_envio_sin_tracking_todavia_guarda_las_guias_igual(monkeypat
     assert len(r["paquetes"]) == 2
     assert len(sin_efectos) == 2
     assert all(g["tracking_number"] is None and g["package_id"] for g in sin_efectos)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Varios envios por cotizacion (tope de 10)
+# ─────────────────────────────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_crear_envio_guarda_cada_guia_con_su_numero_de_envio(monkeypatch, sin_efectos):
+    monkeypatch.setattr(router.skydropx_envios, "reservar_envio", _reserva_fija(3))
+    pedir_mock(monkeypatch, fixture("shipment_v2_post"), *([fixture("shipment_v1_get")] * 8))
+
+    r = await router.crear_envio(envio_request())
+
+    assert r["numero_envio"] == 3
+    assert [g["numero_envio"] for g in sin_efectos] == [3, 3]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error, estatus", [
+    (router.skydropx_envios.LimiteEnviosAlcanzado(10), 409),
+    (router.skydropx_envios.CompraEnCurso("COT-100"), 409),
+    (router.skydropx_envios.ReservaNoDisponible("COT-100"), 503),
+])
+async def test_crear_envio_sin_reserva_no_contrata_nada(monkeypatch, sin_efectos, error, estatus):
+    monkeypatch.setattr(router.skydropx_envios, "reservar_envio", _reserva_fija(error=error))
+    mock = pedir_mock(monkeypatch, fixture("shipment_v2_post"))
+
+    with pytest.raises(HTTPException) as err:
+        await router.crear_envio(envio_request())
+
+    assert err.value.status_code == estatus
+    assert mock.await_count == 0 and sin_efectos == []
+
+
+@pytest.mark.asyncio
+async def test_crear_envio_el_mensaje_del_tope_dice_el_maximo(monkeypatch):
+    monkeypatch.setattr(router.skydropx_envios, "reservar_envio",
+                        _reserva_fija(error=router.skydropx_envios.LimiteEnviosAlcanzado(10)))
+
+    with pytest.raises(HTTPException) as err:
+        await router.crear_envio(envio_request())
+
+    assert "10 envíos" in err.value.detail
+
+
+def _conexion_falsa(monkeypatch, respuestas, ejecutadas, bloqueo=1):
+    """Conexion falsa para reservar_envio: devuelve `respuestas` en orden a cada fetchone()."""
+    import skydropx_envios
+
+    cola = [(bloqueo,), *respuestas]
+
+    class FakeCursor:
+        def execute(self, sql, params=None):
+            ejecutadas.append((sql, params))
+
+        def fetchone(self):
+            return cola.pop(0) if cola else (1,)
+
+        def close(self):
+            pass
+
+    class FakeConn:
+        cerrada = False
+
+        def cursor(self):
+            return FakeCursor()
+
+        def close(self):
+            FakeConn.cerrada = True
+
+    monkeypatch.setattr(skydropx_envios, "get_db_connection", lambda: FakeConn())
+    return FakeConn
+
+
+def test_reservar_envio_cede_el_siguiente_numero_y_suelta_el_candado(monkeypatch):
+    import skydropx_envios
+
+    ejecutadas = []
+    conn = _conexion_falsa(monkeypatch, [(2,), (4,)], ejecutadas)  # 2 activos, el mayor es el 4
+
+    with reservar_real("COT-100") as numero:
+        assert numero == 5
+
+    sqls = [s for s, _ in ejecutadas]
+    assert "GET_LOCK" in sqls[0] and "RELEASE_LOCK" in sqls[-1]
+    assert conn.cerrada
+
+
+def test_reservar_envio_con_diez_activos_lanza_limite_y_suelta_el_candado(monkeypatch):
+    import skydropx_envios
+
+    ejecutadas = []
+    conn = _conexion_falsa(monkeypatch, [(10,)], ejecutadas)
+
+    with pytest.raises(skydropx_envios.LimiteEnviosAlcanzado):
+        with reservar_real("COT-100"):
+            pytest.fail("no debe ceder el control con el tope alcanzado")
+
+    assert "RELEASE_LOCK" in ejecutadas[-1][0] and conn.cerrada
+
+
+def test_reservar_envio_cuenta_solo_activos_y_numera_sobre_todos(monkeypatch):
+    import skydropx_envios
+
+    ejecutadas = []
+    _conexion_falsa(monkeypatch, [(1,), (7,)], ejecutadas)
+
+    with reservar_real("COT-100"):
+        pass
+
+    cuenta, maximo = ejecutadas[1][0], ejecutadas[2][0]
+    assert "NOT IN ('canceled', 'cancelled')" in cuenta
+    assert "MAX(numero_envio)" in maximo and "estatus" not in maximo
+
+
+def test_reservar_envio_con_candado_ocupado_lanza_compra_en_curso(monkeypatch):
+    import skydropx_envios
+
+    ejecutadas = []
+    conn = _conexion_falsa(monkeypatch, [], ejecutadas, bloqueo=0)
+
+    with pytest.raises(skydropx_envios.CompraEnCurso):
+        with reservar_real("COT-100"):
+            pytest.fail("no debe ceder el control")
+
+    assert conn.cerrada
+
+
+def test_reservar_envio_sin_codigo_no_toca_la_bd(monkeypatch):
+    import skydropx_envios
+
+    def no_debe_conectar():
+        raise AssertionError("sin codigo no hay a que limitar")
+    monkeypatch.setattr(skydropx_envios, "get_db_connection", no_debe_conectar)
+
+    with reservar_real(None) as numero:
+        assert numero == 1
+
+
+def _cancelada(monkeypatch, canceladas):
+    """Simula la verificación de cotizaciones canceladas (409 como en el módulo real)."""
+    def exigir(codigo):
+        if codigo in canceladas:
+            raise HTTPException(status_code=409, detail=f"La cotización {codigo} está cancelada")
+    monkeypatch.setattr(router.cotizacion_cancelacion, "exigir_no_cancelada_codigo", exigir)
+
+
+@pytest.mark.asyncio
+async def test_crear_envio_de_cotizacion_cancelada_da_409_sin_llamar_a_skydropx(monkeypatch, sin_efectos):
+    _cancelada(monkeypatch, {"COT-100"})
+    mock = pedir_mock(monkeypatch, fixture("shipment_v2_post"))
+
+    with pytest.raises(HTTPException) as err:
+        await router.crear_envio(envio_request())
+
+    assert err.value.status_code == 409
+    assert mock.await_count == 0 and sin_efectos == []
+
+
+@pytest.mark.asyncio
+async def test_crear_envio_valida_tambien_la_referencia_si_no_hay_codigo(monkeypatch, sin_efectos):
+    _cancelada(monkeypatch, {"REF-1"})
+    mock = pedir_mock(monkeypatch, fixture("shipment_v2_post"))
+
+    with pytest.raises(HTTPException) as err:
+        await router.crear_envio(envio_request(codigo_cotizacion=None, referencia="REF-1"))
+
+    assert err.value.status_code == 409 and mock.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_cotizar_envio_de_cotizacion_cancelada_da_409(monkeypatch):
+    _cancelada(monkeypatch, {"COT-100"})
+    mock = pedir_mock(monkeypatch, {})
+    direccion = {"postal_code": "64000", "country_code": "MX"}
+    datos = router.CotizacionRequest(
+        address_from=direccion, address_to=direccion,
+        parcels=[{"length": 10, "width": 10, "height": 10, "weight": 1}], codigo_cotizacion="COT-100")
+
+    with pytest.raises(HTTPException) as err:
+        await router.crear_cotizacion(datos)
+
+    assert err.value.status_code == 409 and mock.await_count == 0
 
 
 @pytest.mark.asyncio

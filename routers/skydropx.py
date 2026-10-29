@@ -9,11 +9,13 @@ from typing import Any, Dict, List, Literal, Optional
 
 import asyncio
 
+import cotizacion_cancelacion
 import mov_reg
 import notificaciones_service
 import skydropx_envios
 import skydropx_service
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from permisos import requerir_gerencia
 from pydantic import BaseModel, ConfigDict, Field
 from skydropx_service import SkydropxServiceError
 
@@ -107,6 +109,9 @@ class CotizacionRequest(BaseModel):
     # respetan tal cual. El limite de 20 es un tope de seguridad, no un valor
     # confirmado contra Skydropx.
     cantidad_bultos: int = Field(default=1, ge=1, le=20, description="Cantidad de bultos del envio (multipaquete)")
+    # Cotizacion interna que origina la consulta de tarifas. Solo sirve para rechazar (409)
+    # las canceladas; no se manda a Skydropx.
+    codigo_cotizacion: Optional[str] = Field(default=None, description="Cotizacion interna de origen")
 
 
 class EnvioRequest(BaseModel):
@@ -248,6 +253,8 @@ async def crear_cotizacion(datos: CotizacionRequest):
 
     No genera guia ni cobra nada: cotizar es gratis.
     """
+    # Una cotizacion cancelada no cotiza envios (409).
+    cotizacion_cancelacion.exigir_no_cancelada_codigo(datos.codigo_cotizacion)
     parcels = _clonar_parcelas(
         [p.model_dump(exclude_none=True) for p in datos.parcels],
         datos.cantidad_bultos,
@@ -313,6 +320,36 @@ async def crear_envio(datos: EnvioRequest):
     ("multipackage"). En los dos casos `paquetes` trae una entrada por guia,
     cada una con su shipment_id, y se guarda un renglon por guia.
     """
+    # Antes de contratar (y cobrar) nada: una cotizacion cancelada no compra guias (409).
+    codigo = datos.codigo_cotizacion or datos.referencia
+    cotizacion_cancelacion.exigir_no_cancelada_codigo(codigo)
+
+    # Tope de MAX_ENVIOS_POR_COTIZACION compras por cotizacion. El candado se mantiene hasta
+    # guardar las guias para que dos compras simultaneas (doble clic, dos usuarios) no lo pasen.
+    try:
+        with skydropx_envios.reservar_envio(codigo) as numero_envio:
+            return await _contratar_envio(datos, codigo, numero_envio)
+    except skydropx_envios.LimiteEnviosAlcanzado:
+        raise HTTPException(
+            status_code=409,
+            detail=f"La cotización {codigo} ya tiene {skydropx_envios.MAX_ENVIOS_POR_COTIZACION} envíos "
+                   "activos, que es el máximo. Cancela alguno en Skydropx para poder comprar otro.",
+        )
+    except skydropx_envios.CompraEnCurso:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Ya hay una compra de guía en curso para la cotización {codigo}. "
+                   "Espera a que termine y revisa la lista de envíos antes de intentar de nuevo.",
+        )
+    except skydropx_envios.ReservaNoDisponible:
+        raise HTTPException(
+            status_code=503,
+            detail="No se pudo verificar el límite de envíos de la cotización; no se contrató nada. Intenta de nuevo.",
+        )
+
+
+async def _contratar_envio(datos: "EnvioRequest", codigo: Optional[str], numero_envio: int):
+    """Contrata la(s) guia(s) y las guarda como el envio `numero_envio` de la cotizacion."""
     # Nivel shipment: si no vienen explicitos, se heredan del primer paquete
     # (el modal los captura ahi). Skydropx los exige a este nivel.
     primer_paquete = datos.parcels[0] if datos.parcels else None
@@ -362,8 +399,6 @@ async def crear_envio(datos: EnvioRequest):
                 continue  # no tumbar la respuesta: la guia ya se genero y se cobro
             guias = _reemplazar_guias_de(guias, sid, skydropx_service.extraer_guias(actualizado))
 
-    codigo = datos.codigo_cotizacion or datos.referencia
-
     # Un renglon en skydropx_envios por guia. costo/servicio son los de la
     # tarifa elegida, que cubre el envio completo (Skydropx no los desglosa por
     # bulto): se repiten igual en cada renglon. Si algun reporte llega a sumar
@@ -376,6 +411,7 @@ async def crear_envio(datos: EnvioRequest):
         try:
             if skydropx_envios.guardar_envio(
                 codigo_cotizacion=codigo,
+                numero_envio=numero_envio,
                 tracking_number=guia.get("tracking_number"),
                 shipment_id=guia.get("shipment_id"),
                 package_id=guia.get("package_id"),
@@ -397,9 +433,10 @@ async def crear_envio(datos: EnvioRequest):
         tracking = next((g["tracking_number"] for g in guias if g.get("tracking_number")), None)
         referencia = codigo or tracking or datos.rate_id
         sufijo = f" x{len(guias)} guias" if len(guias) > 1 else ""
+        envio_n = f" envio {numero_envio}/{skydropx_envios.MAX_ENVIOS_POR_COTIZACION}" if codigo else ""
         mov_reg.registrar_movimiento(
             datos.usuario or "sistema",
-            f"Genero guia Skydropx{sufijo} ({referencia})",
+            f"Genero guia Skydropx{sufijo} ({referencia}){envio_n}",
             "Envios Skydropx",
         )
     except Exception as err:
@@ -409,6 +446,7 @@ async def crear_envio(datos: EnvioRequest):
         "status": "success",
         "envio": envio,
         "guardado": guardado,
+        "numero_envio": numero_envio,
         # Mismo contrato que antes para el panel, mas package_id y carrier.
         "paquetes": guias,
         "shipment_ids": list(dict.fromkeys(g["shipment_id"] for g in guias if g.get("shipment_id"))),
@@ -735,11 +773,18 @@ async def recibir_webhook(request: Request):
     try:
         skydropx_service.verificar_firma_webhook(cuerpo_crudo, request.headers.get(cabecera))
     except SkydropxServiceError as err:
+        # Sin esta linea un webhook rechazado por firma (p. ej. un evento que Skydropx firma
+        # distinto) no deja ningun rastro de que llego. No se guarda en BD: aun no esta autenticado.
+        print(f"Webhook Skydropx RECHAZADO ({err.status}): {err.detalle} "
+              f"[{len(cuerpo_crudo)} bytes, cabecera {cabecera} {'presente' if request.headers.get(cabecera) else 'ausente'}]")
         raise HTTPException(status_code=err.status, detail=err.detalle)
+
+    payload_texto = cuerpo_crudo.decode("utf-8", errors="replace")
 
     try:
         evento = await request.json()
     except Exception:
+        skydropx_envios.guardar_webhook_recibido({}, payload_texto[:20000], "json_invalido")
         raise HTTPException(status_code=400, detail="El webhook de Skydropx no trae JSON valido.")
 
     datos = skydropx_service.extraer_evento_webhook(evento)
@@ -747,19 +792,23 @@ async def recibir_webhook(request: Request):
     # Guardar nunca debe tumbar la respuesta: si contestamos error, Skydropx
     # reintenta el mismo evento y se acumulan reintentos por una falla nuestra
     # de base de datos. Se responde 200 y queda el rastro en el log.
-    resultado = {"aplicado": False}
+    resultado = {"aplicado": False, "motivo": "error"}
     try:
-        resultado = skydropx_envios.registrar_evento_webhook(
-            datos,
-            payload_crudo=cuerpo_crudo.decode("utf-8", errors="replace")[:4000],
-        )
+        resultado = skydropx_envios.registrar_evento_webhook(datos, payload_crudo=payload_texto[:4000])
     except Exception as err:
         print(f"Error procesando webhook Skydropx: {err}")
 
+    # Rastro crudo de TODO evento recibido, se haya podido aplicar o no (ver
+    # GET /skydropx/webhook/recibidos). Es lo que permite diagnosticar uno que no cuadra.
+    skydropx_envios.guardar_webhook_recibido(
+        datos, payload_texto[:20000], _resultado_webhook(resultado)
+    )
+
     print(
-        f"Webhook Skydropx: tracking={datos.get('tracking_number')} "
+        f"Webhook Skydropx: tipo={datos.get('tipo')} tracking={datos.get('tracking_number')} "
         f"estatus={datos.get('estatus')} aplicado={resultado.get('aplicado')} "
-        f"envio_encontrado={resultado.get('envio_encontrado')}"
+        f"envio_encontrado={resultado.get('envio_encontrado')} "
+        f"protegido={resultado.get('estatus_protegido')} motivo={resultado.get('motivo')}"
     )
 
     # Avisa en vivo al usuario que genero la guia y a los destinatarios fijos
@@ -768,7 +817,8 @@ async def recibir_webhook(request: Request):
     # evento_nuevo=True: la huella en skydropx_envios evita que un reintento de
     # Skydropx (mismo tracking+estatus) duplique el aviso. Si algo aqui falla no
     # debe tumbar la respuesta al webhook.
-    if resultado.get("aplicado") and resultado.get("evento_nuevo"):
+    # Un evento que no cambio nada porque la guia ya estaba cancelada tampoco se avisa.
+    if resultado.get("aplicado") and resultado.get("evento_nuevo") and not resultado.get("estatus_protegido"):
         try:
             destinatarios = []
             for nombre in (resultado.get("usuario"), *USUARIOS_ENVIO_SIEMPRE):
@@ -794,6 +844,35 @@ async def recibir_webhook(request: Request):
 
     # 200 rapido: Skydropx reintenta si tarda o si responde error.
     return {"status": "success", "recibido": True, **resultado}
+
+
+def _resultado_webhook(resultado: Dict[str, Any]) -> str:
+    """Etiqueta corta de lo que paso con un evento (columna `resultado` de la bitacora cruda)."""
+    if not resultado.get("aplicado"):
+        return resultado.get("motivo") or "no_aplicado"
+    if resultado.get("motivo"):
+        return resultado["motivo"]
+    if resultado.get("estatus_protegido"):
+        return "estatus_protegido"
+    return "aplicado" if resultado.get("envio_encontrado") else "fila_nueva"
+
+
+@router.get("/skydropx/webhook/recibidos")
+async def webhooks_recibidos(
+    limite: int = Query(default=50, ge=1, le=500),
+    estatus: Optional[str] = Query(default=None, description="Filtra por estatus, p. ej. canceled"),
+    _: str = Depends(requerir_gerencia),
+):
+    """
+    Ultimos eventos crudos que llegaron al webhook (solo gerencia), con el payload tal cual y lo
+    que se hizo con cada uno (`resultado`). Sirve para ver si Skydropx esta mandando un estatus
+    (p. ej. canceled) y por que no se aplico.
+    """
+    try:
+        return {"status": "success", "eventos": skydropx_envios.listar_webhooks_recibidos(limite, estatus)}
+    except Exception as err:
+        print(f"Error leyendo webhooks recibidos de Skydropx: {err}")
+        raise HTTPException(status_code=500, detail="No se pudo leer la bitácora del webhook")
 
 
 def _leer_id(cotizacion: Dict[str, Any]) -> Optional[str]:

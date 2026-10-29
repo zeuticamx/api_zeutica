@@ -387,7 +387,8 @@ async def comisiones_candidatos(id_ventas: str, usuario: str = Depends(usuario_a
             seguimientos = cursor.fetchall()
         cursor.execute(
             """SELECT codigo_cotizacion, empresa, fecha, total, vendido FROM cotizaciones
-               WHERE TRIM(empresa) = %s AND usuario = %s ORDER BY fecha DESC, id DESC LIMIT 20""",
+               WHERE TRIM(empresa) = %s AND usuario = %s AND COALESCE(cancelada, 0) = 0
+               ORDER BY fecha DESC, id DESC LIMIT 20""",
             (str(venta["comprador"] or "").strip(), venta["vendedor"]),
         )
         return {"cliente_id": cliente_id, "seguimientos": seguimientos, "cotizaciones": cursor.fetchall()}

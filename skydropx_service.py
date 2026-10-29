@@ -890,8 +890,17 @@ def extraer_evento_webhook(evento: Dict[str, Any]) -> Dict[str, Any]:
     if not isinstance(evento, dict):
         return {}
 
-    datos = evento.get("data") if isinstance(evento.get("data"), dict) else evento
+    datos = evento.get("data")
+    if isinstance(datos, list):  # algunos webhooks mandan un arreglo: se toma el primer evento
+        datos = next((d for d in datos if isinstance(d, dict)), None)
+    if not isinstance(datos, dict):
+        datos = evento
     atributos = datos.get("attributes") if isinstance(datos.get("attributes"), dict) else {}
+
+    # `type` dice de que objeto es el evento. Con "shipments" el data.id es el SHIPMENT, no el
+    # package: tomarlo como package_id (lo de siempre) dejaba el evento sin forma de ligarse.
+    tipo = str(datos.get("type") or evento.get("type") or "").strip().lower() or None
+    es_shipment = tipo in ("shipment", "shipments")
 
     def leer(*claves):
         for k in claves:
@@ -907,11 +916,16 @@ def extraer_evento_webhook(evento: Dict[str, Any]) -> Dict[str, Any]:
         envio_rel = relaciones.get("shipment")
         if isinstance(envio_rel, dict) and isinstance(envio_rel.get("data"), dict):
             shipment_id = envio_rel["data"].get("id")
+    if not shipment_id and es_shipment:
+        shipment_id = datos.get("id")
     if not shipment_id:
         shipment_id = leer("shipment_id")
 
+    package_id = leer("package_id") if es_shipment else datos.get("id")
+
     return {
-        "package_id": datos.get("id") if isinstance(datos, dict) else None,
+        "tipo": tipo,
+        "package_id": str(package_id) if package_id else None,
         "shipment_id": str(shipment_id) if shipment_id else None,
         "tracking_number": leer("tracking_number"),
         "estatus": leer("status", "estatus"),

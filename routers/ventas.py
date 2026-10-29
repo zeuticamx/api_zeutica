@@ -159,10 +159,14 @@ def cotizacion_de_origen(cursor, folio):
     folio = str(folio or "").strip()
     if not folio:
         return None, None
-    cursor.execute("SELECT relacion_factura FROM cotizaciones WHERE codigo_cotizacion = %s LIMIT 1", (folio,))
+    cursor.execute("SELECT relacion_factura, COALESCE(cancelada, 0) AS cancelada FROM cotizaciones WHERE codigo_cotizacion = %s LIMIT 1", (folio,))
     filas = cursor.fetchall()
     if not filas:
         return None, None
+    # Una cotización cancelada no origina ventas (el modal de Ventas ya no la lista; esto cubre
+    # una cancelación posterior a cargarla en el carrito).
+    if filas[0].get("cancelada"):
+        raise HTTPException(status_code=409, detail=f"La cotización {folio} está cancelada")
     factura = str(filas[0]["relacion_factura"] or "").strip() or None
     return folio, factura
 

@@ -83,6 +83,7 @@ def cargar_cotizaciones() -> list:
             """SELECT codigo_cotizacion, empresa, fecha_vencimiento, relacion_factura FROM cotizaciones
                WHERE DATE(fecha_vencimiento) = DATE_ADD(CURDATE(), INTERVAL 3 DAY)
                  AND (relacion_factura IS NULL OR relacion_factura = '')
+                 AND COALESCE(cancelada, 0) = 0
                ORDER BY codigo_cotizacion""")
         return cur.fetchall()
     finally:

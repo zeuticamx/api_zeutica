@@ -16,7 +16,8 @@
 import hashlib
 import json
 import os
-from typing import Any, Dict, List, Optional
+from contextlib import contextmanager
+from typing import Any, Dict, Iterator, List, Optional
 
 import mysql.connector
 from dotenv import load_dotenv
@@ -56,6 +57,18 @@ _ESTATUS = {
 }
 
 
+# Una guia cancelada no se reactiva: un evento posterior (retraso, reintento fuera de orden)
+# no debe devolverla a «activa». Los UPDATE del webhook usan estas dos expresiones.
+_CANCELADOS = ("canceled", "cancelled")
+_SQL_ESTATUS = "IF(LOWER(estatus) IN ('canceled', 'cancelled'), estatus, %s)"
+_SQL_DESCRIPCION = ("IF(LOWER(estatus) IN ('canceled', 'cancelled'), estatus_descripcion, "
+                    "COALESCE(%s, estatus_descripcion))")
+
+
+def es_cancelado(estatus: Optional[str]) -> bool:
+    return (estatus or "").strip().lower() in _CANCELADOS
+
+
 def describir_estatus(estatus: Optional[str]) -> Dict[str, str]:
     """
     Traduce el estatus crudo a texto y tono para el panel. Un estatus que no
@@ -76,6 +89,7 @@ def describir_estatus(estatus: Optional[str]) -> Dict[str, str]:
 _COLUMNAS_NUEVAS_ENVIOS = [
     ("orden_detalle_url", "TEXT NULL AFTER etiqueta_url"),
     ("package_id", "VARCHAR(100) NULL AFTER shipment_id"),
+    ("numero_envio", "INT NOT NULL DEFAULT 1 AFTER codigo_cotizacion"),
 ]
 
 # Indices que acompanan a columnas nuevas (mismo motivo que arriba).
@@ -141,6 +155,79 @@ def _normaliza_tracking(valor: Optional[str]) -> Optional[str]:
     return v or None
 
 
+# Tope de compras (envios) por cotizacion. Una compra con varios bultos cuenta una vez.
+MAX_ENVIOS_POR_COTIZACION = 10
+
+
+class LimiteEnviosAlcanzado(Exception):
+    """La cotizacion ya tiene MAX_ENVIOS_POR_COTIZACION envios activos."""
+
+
+class CompraEnCurso(Exception):
+    """Otra compra de la misma cotizacion tiene el candado (doble clic o dos usuarios)."""
+
+
+class ReservaNoDisponible(Exception):
+    """No se pudo verificar el tope en la BD; se prefiere no contratar (cuesta dinero)."""
+
+
+@contextmanager
+def reservar_envio(codigo_cotizacion: Optional[str]) -> Iterator[int]:
+    """
+    Reserva el siguiente numero de envio de una cotizacion y mantiene un candado mientras el
+    llamador compra y guarda las guias, para que dos compras simultaneas no pasen del tope.
+
+    Cuenta los envios ACTIVOS: uno cuyas guias estan todas canceladas no cuenta, para poder
+    reponerlo. El numero nuevo es MAX + 1 sobre todos (los cancelados incluidos), asi nunca se
+    repite. Sin codigo de cotizacion no hay a que limitar y devuelve 1.
+
+    El candado es GET_LOCK sobre la conexion que se queda abierta durante el `with`; con
+    timeout 0 una segunda compra recibe CompraEnCurso al instante (no bloquea el event loop).
+    Lanza LimiteEnviosAlcanzado, CompraEnCurso o ReservaNoDisponible ANTES de ceder el control.
+    """
+    if not codigo_cotizacion:
+        yield 1
+        return
+
+    nombre = "skydropx:" + hashlib.sha1(codigo_cotizacion.encode("utf-8")).hexdigest()
+    conn = None
+    cursor = None
+    try:
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute("SELECT GET_LOCK(%s, 0)", (nombre,))
+            if cursor.fetchone()[0] != 1:
+                raise CompraEnCurso(codigo_cotizacion)
+            cursor.execute(
+                "SELECT COUNT(DISTINCT numero_envio) FROM skydropx_envios "
+                "WHERE codigo_cotizacion = %s AND LOWER(estatus) NOT IN ('canceled', 'cancelled')",
+                (codigo_cotizacion,)
+            )
+            activos = int(cursor.fetchone()[0] or 0)
+            if activos >= MAX_ENVIOS_POR_COTIZACION:
+                raise LimiteEnviosAlcanzado(activos)
+            cursor.execute(
+                "SELECT COALESCE(MAX(numero_envio), 0) FROM skydropx_envios WHERE codigo_cotizacion = %s",
+                (codigo_cotizacion,)
+            )
+            siguiente = int(cursor.fetchone()[0] or 0) + 1
+        except mysql.connector.Error as err:
+            print(f"Error reservando envio Skydropx de {codigo_cotizacion}: {err}")
+            raise ReservaNoDisponible(codigo_cotizacion) from err
+        yield siguiente
+    finally:
+        if cursor:
+            try:
+                cursor.execute("SELECT RELEASE_LOCK(%s)", (nombre,))
+                cursor.fetchone()
+            except mysql.connector.Error:
+                pass  # al cerrar la conexion MySQL suelta el candado igual
+            cursor.close()
+        if conn:
+            conn.close()
+
+
 def guardar_envio(
     codigo_cotizacion: Optional[str],
     tracking_number: Optional[str],
@@ -153,6 +240,7 @@ def guardar_envio(
     tracking_url: Optional[str] = None,
     usuario: Optional[str] = None,
     package_id: Optional[str] = None,
+    numero_envio: int = 1,
 ) -> bool:
     """
     Registra la guia recien generada. Devuelve True si se guardo.
@@ -172,11 +260,12 @@ def guardar_envio(
         cursor.execute(
             """
             INSERT INTO skydropx_envios
-                (codigo_cotizacion, tracking_number, shipment_id, package_id, carrier, servicio,
-                 costo, etiqueta_url, orden_detalle_url, tracking_url, usuario)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                (codigo_cotizacion, numero_envio, tracking_number, shipment_id, package_id, carrier,
+                 servicio, costo, etiqueta_url, orden_detalle_url, tracking_url, usuario)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
                 codigo_cotizacion = VALUES(codigo_cotizacion),
+                numero_envio      = VALUES(numero_envio),
                 tracking_number   = COALESCE(VALUES(tracking_number), tracking_number),
                 shipment_id       = COALESCE(VALUES(shipment_id), shipment_id),
                 package_id        = COALESCE(VALUES(package_id), package_id),
@@ -188,7 +277,7 @@ def guardar_envio(
                 tracking_url      = COALESCE(VALUES(tracking_url), tracking_url),
                 usuario           = COALESCE(VALUES(usuario), usuario)
             """,
-            (codigo_cotizacion, tracking, shipment_id, package_id, carrier, servicio,
+            (codigo_cotizacion, numero_envio, tracking, shipment_id, package_id, carrier, servicio,
              costo, etiqueta_url, orden_detalle_url, tracking_url, usuario)
         )
         conn.commit()
@@ -261,13 +350,39 @@ def completar_guias(guias: List[Dict[str, Any]]) -> int:
     return actualizadas
 
 
+def _buscar_envio(cursor, package_id, tracking, shipment_id):
+    """
+    Guia a la que apunta un evento: (columna, fila) con fila = (usuario, codigo_cotizacion,
+    estatus), o (None, None). De la llave mas precisa a la mas general: en multipaquete
+    varios paquetes comparten shipment_id y ahi un LIMIT 1 podria traer el de otra guia.
+
+    Se busca con SELECT y no con el rowcount de un UPDATE: este conector devuelve filas
+    AFECTADAS, asi que un UPDATE que no cambia nada (reintento identico, o evento ignorado
+    por la guarda de «cancelada») daria 0 y la guia parecería no existir.
+    """
+    for columna, valor in (("package_id", package_id), ("tracking_number", tracking),
+                           ("shipment_id", shipment_id)):
+        if not valor:
+            continue
+        cursor.execute(
+            f"SELECT usuario, codigo_cotizacion, estatus FROM skydropx_envios WHERE {columna} = %s LIMIT 1",
+            (valor,)
+        )
+        fila = cursor.fetchone()
+        if fila:
+            return columna, fila
+    return None, None
+
+
 def registrar_evento_webhook(evento: Dict[str, Any], payload_crudo: Optional[str] = None) -> Dict[str, Any]:
     """
     Aplica un evento del webhook: actualiza el estatus del envio y lo agrega a la
     bitacora. `evento` es lo que devuelve skydropx_service.extraer_evento_webhook().
 
-    Devuelve {"aplicado": bool, "envio_encontrado": bool, "evento_nuevo": bool}
-    para que el router pueda dejar rastro claro en el log.
+    Devuelve {"aplicado", "envio_encontrado", "evento_nuevo", "usuario", "codigo_cotizacion",
+    "estatus_protegido", "motivo"} para que el router deje rastro claro. `motivo` dice por
+    que no se aplico del todo (sin_llave, sin_estatus, error). `estatus_protegido` es True
+    cuando la guia ya estaba cancelada y el evento (no cancelado) no cambio nada.
 
     Si el envio no existe todavia (webhook antes de que guardemos la guia), se
     crea la fila con lo que trae el evento. El codigo de cotizacion se completa
@@ -278,17 +393,20 @@ def registrar_evento_webhook(evento: Dict[str, Any], payload_crudo: Optional[str
     descripcion = (evento.get("descripcion") or "").strip() or None
     shipment_id = evento.get("shipment_id")
     package_id = evento.get("package_id")
+    etiqueta = evento.get("etiqueta_url") or ""
+    url_rastreo = evento.get("tracking_url") or ""
 
-    if not tracking and not shipment_id:
-        print("Webhook Skydropx sin tracking_number ni shipment_id: no hay como ligarlo.")
+    if not tracking and not shipment_id and not package_id:
+        print("Webhook Skydropx sin tracking_number, shipment_id ni package_id: no hay como ligarlo.")
         return {
             "aplicado": False, "envio_encontrado": False, "evento_nuevo": False,
-            "usuario": None, "codigo_cotizacion": None,
+            "usuario": None, "codigo_cotizacion": None, "estatus_protegido": False,
+            "motivo": "sin_llave",
         }
 
     # Huella para no duplicar el mismo evento cuando Skydropx reintenta.
     huella = hashlib.sha1(
-        f"{tracking or shipment_id}|{estatus or ''}|{descripcion or ''}".encode("utf-8")
+        f"{tracking or shipment_id or package_id}|{estatus or ''}|{descripcion or ''}".encode("utf-8")
     ).hexdigest()
 
     conn = None
@@ -303,73 +421,67 @@ def registrar_evento_webhook(evento: Dict[str, Any], payload_crudo: Optional[str
                 (tracking_number, shipment_id, estatus, descripcion, huella, payload)
             VALUES (%s, %s, %s, %s, %s, %s)
             """,
-            (tracking, shipment_id, estatus, descripcion, huella, payload_crudo)
+            (tracking, shipment_id or package_id, estatus, descripcion, huella, payload_crudo)
         )
         evento_nuevo = cursor.rowcount > 0
 
         encontrado = False
         if estatus:
-            # Primero por package_id: con V2 la guia nace sin tracking, y en
-            # multipaquete varios paquetes comparten shipment_id, asi que es la
-            # unica llave que apunta a UNA sola fila desde el principio.
-            if package_id:
+            columna, _ = _buscar_envio(cursor, package_id, tracking, shipment_id)
+            encontrado = columna is not None
+
+            # OJO con el orden del SET: MySQL asigna de izquierda a derecha y las columnas
+            # siguientes ya ven el valor nuevo, asi que la descripcion va ANTES que el estatus
+            # para que la guarda de «cancelada» mire el estatus anterior.
+            if columna == "package_id":
+                # Con V2 la guia nace sin tracking, y en multipaquete varios paquetes comparten
+                # shipment_id: package_id es la unica llave que apunta a UNA sola fila.
                 cursor.execute(
-                    """
+                    f"""
                     UPDATE skydropx_envios
-                    SET estatus = %s,
-                        estatus_descripcion = COALESCE(%s, estatus_descripcion),
+                    SET estatus_descripcion = {_SQL_DESCRIPCION},
+                        estatus = {_SQL_ESTATUS},
                         tracking_number = COALESCE(tracking_number, %s),
                         etiqueta_url = COALESCE(NULLIF(%s, ''), etiqueta_url),
                         tracking_url = COALESCE(NULLIF(%s, ''), tracking_url),
                         shipment_id = COALESCE(shipment_id, %s)
                     WHERE package_id = %s
                     """,
-                    (estatus, descripcion, tracking, evento.get("etiqueta_url") or "",
-                     evento.get("tracking_url") or "", shipment_id, package_id)
+                    (descripcion, estatus, tracking, etiqueta, url_rastreo, shipment_id, package_id)
                 )
-                encontrado = cursor.rowcount > 0
-
-            # Luego por tracking; si no, por shipment.
-            if tracking and not encontrado:
+            elif columna == "tracking_number":
                 cursor.execute(
-                    """
+                    f"""
                     UPDATE skydropx_envios
-                    SET estatus = %s,
-                        estatus_descripcion = COALESCE(%s, estatus_descripcion),
+                    SET estatus_descripcion = {_SQL_DESCRIPCION},
+                        estatus = {_SQL_ESTATUS},
                         etiqueta_url = COALESCE(NULLIF(%s, ''), etiqueta_url),
                         tracking_url = COALESCE(NULLIF(%s, ''), tracking_url),
                         shipment_id = COALESCE(shipment_id, %s)
                     WHERE tracking_number = %s
                     """,
-                    (estatus, descripcion, evento.get("etiqueta_url") or "",
-                     evento.get("tracking_url") or "", shipment_id, tracking)
+                    (descripcion, estatus, etiqueta, url_rastreo, shipment_id, tracking)
                 )
-                encontrado = cursor.rowcount > 0
-
-            if not encontrado and shipment_id:
-                # Mismos campos que la rama de arriba (por tracking_number): si no se
-                # actualizan aqui tambien, un envio cuyo PRIMER evento trae tracking_number
-                # Y label_url a la vez (caso comun: "label_created" como unico evento)
-                # se queda con etiqueta_url en NULL para siempre, porque esta rama es la
-                # que lo encuentra (todavia no tenia tracking_number guardado) y no
-                # llegara un segundo evento que la vuelva a mandar.
+            elif columna == "shipment_id":
+                # Mismos campos que la rama de tracking: un envio cuyo PRIMER evento trae
+                # tracking_number Y label_url a la vez (caso comun: «label_created» como unico
+                # evento) se encuentra aqui (todavia no tenia tracking guardado), y si no se
+                # actualizan aqui tambien se queda con etiqueta_url en NULL para siempre.
+                # Un evento de SHIPMENT (sin package_id) actualiza todos sus paquetes.
                 cursor.execute(
-                    """
+                    f"""
                     UPDATE skydropx_envios
-                    SET estatus = %s,
-                        estatus_descripcion = COALESCE(%s, estatus_descripcion),
+                    SET estatus_descripcion = {_SQL_DESCRIPCION},
+                        estatus = {_SQL_ESTATUS},
                         tracking_number = COALESCE(tracking_number, %s),
                         etiqueta_url = COALESCE(NULLIF(%s, ''), etiqueta_url),
                         tracking_url = COALESCE(NULLIF(%s, ''), tracking_url)
                     WHERE shipment_id = %s
                     """,
-                    (estatus, descripcion, tracking,
-                     evento.get("etiqueta_url") or "", evento.get("tracking_url") or "", shipment_id)
+                    (descripcion, estatus, tracking, etiqueta, url_rastreo, shipment_id)
                 )
-                encontrado = cursor.rowcount > 0
-
-            # Webhook antes que la guia: se crea la fila para no perder el estatus.
-            if not encontrado:
+            else:
+                # Webhook antes que la guia: se crea la fila para no perder el estatus.
                 cursor.execute(
                     """
                     INSERT INTO skydropx_envios
@@ -377,30 +489,26 @@ def registrar_evento_webhook(evento: Dict[str, Any], payload_crudo: Optional[str
                          estatus_descripcion, etiqueta_url, tracking_url)
                     VALUES (NULL, %s, %s, %s, %s, %s, NULLIF(%s, ''), NULLIF(%s, ''))
                     ON DUPLICATE KEY UPDATE
-                        estatus = VALUES(estatus),
-                        estatus_descripcion = COALESCE(VALUES(estatus_descripcion), estatus_descripcion)
+                        estatus_descripcion = IF(LOWER(estatus) IN ('canceled', 'cancelled'),
+                                                 estatus_descripcion,
+                                                 COALESCE(VALUES(estatus_descripcion), estatus_descripcion)),
+                        estatus = IF(LOWER(estatus) IN ('canceled', 'cancelled'), estatus, VALUES(estatus))
                     """,
-                    (tracking, shipment_id, package_id, estatus, descripcion,
-                     evento.get("etiqueta_url") or "", evento.get("tracking_url") or "")
+                    (tracking, shipment_id, package_id, estatus, descripcion, etiqueta, url_rastreo)
                 )
 
-        # Dueno del envio, para poder avisarle por notificaciones_service. Se
-        # busca por cualquiera de las dos llaves porque la fila puede haberse
-        # localizado o creado por una u otra segun lo que trajo el evento.
+        # Dueno del envio, para poder avisarle por notificaciones_service, y estatus que
+        # quedo guardado (la fila pudo localizarse o crearse por cualquiera de las llaves).
         usuario_dueno = None
         codigo_cotizacion = None
+        estatus_protegido = False
         if estatus:
-            cursor.execute(
-                """
-                SELECT usuario, codigo_cotizacion FROM skydropx_envios
-                WHERE tracking_number = %s OR shipment_id = %s
-                LIMIT 1
-                """,
-                (tracking, shipment_id)
-            )
-            fila = cursor.fetchone()
+            _, fila = _buscar_envio(cursor, package_id, tracking, shipment_id)
             if fila:
                 usuario_dueno, codigo_cotizacion = fila[0], fila[1]
+                # La guarda del UPDATE dejo la cancelacion intacta: este evento (viejo o
+                # tardio) no cambio nada, asi que tampoco debe avisarse como novedad.
+                estatus_protegido = es_cancelado(fila[2]) and not es_cancelado(estatus)
 
         conn.commit()
         return {
@@ -409,6 +517,8 @@ def registrar_evento_webhook(evento: Dict[str, Any], payload_crudo: Optional[str
             "evento_nuevo": evento_nuevo,
             "usuario": usuario_dueno,
             "codigo_cotizacion": codigo_cotizacion,
+            "estatus_protegido": estatus_protegido,
+            "motivo": None if estatus else "sin_estatus",
         }
     except mysql.connector.Error as err:
         if conn:
@@ -416,13 +526,75 @@ def registrar_evento_webhook(evento: Dict[str, Any], payload_crudo: Optional[str
         print(f"Error aplicando webhook Skydropx: {err}")
         return {
             "aplicado": False, "envio_encontrado": False, "evento_nuevo": False,
-            "usuario": None, "codigo_cotizacion": None,
+            "usuario": None, "codigo_cotizacion": None, "estatus_protegido": False,
+            "motivo": "error",
         }
     finally:
         if cursor:
             cursor.close()
         if conn:
             conn.close()
+
+
+# Dias que se conserva la bitacora cruda del webhook.
+DIAS_RETENCION_WEBHOOK = 90
+
+
+def guardar_webhook_recibido(datos: Dict[str, Any], payload_crudo: Optional[str], resultado: str) -> None:
+    """
+    Guarda TAL CUAL lo que llego al webhook (ya autenticado por firma), se haya podido ligar a una
+    guia o no, junto con lo que se hizo (`resultado`). Es la unica forma de ver despues un evento
+    que no se aplico: skydropx_envio_eventos solo recibe los que se pudieron ligar.
+    Nunca lanza: guardar el rastro no debe tumbar la respuesta al webhook.
+    """
+    conn = None
+    cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            INSERT INTO skydropx_webhook_recibidos
+                (tipo, estatus, tracking_number, shipment_id, package_id, resultado, payload)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            """,
+            (datos.get("tipo"), datos.get("estatus"), _normaliza_tracking(datos.get("tracking_number")),
+             datos.get("shipment_id"), datos.get("package_id"), resultado, payload_crudo)
+        )
+        cursor.execute(
+            "DELETE FROM skydropx_webhook_recibidos WHERE recibido_en < NOW() - INTERVAL %s DAY",
+            (DIAS_RETENCION_WEBHOOK,)
+        )
+        conn.commit()
+    except Exception as err:
+        print(f"No se pudo guardar el webhook Skydropx recibido: {err}")
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+def listar_webhooks_recibidos(limite: int = 50, estatus: Optional[str] = None) -> List[Dict[str, Any]]:
+    """Ultimos eventos crudos recibidos (mas reciente primero), opcionalmente de un estatus."""
+    limite = max(1, min(int(limite or 50), 500))
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        if estatus:
+            cursor.execute(
+                "SELECT * FROM skydropx_webhook_recibidos WHERE LOWER(estatus) = %s ORDER BY id DESC LIMIT %s",
+                (estatus.strip().lower(), limite)
+            )
+        else:
+            cursor.execute("SELECT * FROM skydropx_webhook_recibidos ORDER BY id DESC LIMIT %s", (limite,))
+        filas = cursor.fetchall()
+    finally:
+        cursor.close()
+        conn.close()
+    for fila in filas:
+        fila["recibido_en"] = str(fila["recibido_en"])
+    return filas
 
 
 def _con_estatus(fila: Dict[str, Any]) -> Dict[str, Any]:

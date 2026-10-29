@@ -1,6 +1,6 @@
 import mysql.connector, html, asyncio
 from pydantic import BaseModel
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from typing import List
 from decimal import Decimal
 import datetime
@@ -10,6 +10,9 @@ from typing import Optional
 from cotizacion_service import generar_nuevo_codigo, guardar_cotizacion_db
 from servicios.telegram.notificacion import send_telegram_alert #notificaciones a telegram
 from errores_db import detalle_error_db
+import cotizacion_cancelacion as cancelacion
+import skydropx_envios
+from permisos import usuario_autenticado, es_gerencia
 
 router =APIRouter(tags=["/cotizaciones"],responses={404: {"Mensaje":"No encontrado"}})
 load_dotenv() # Cargar credenciales .env
@@ -169,6 +172,11 @@ async def consulta_cotizacion():
                     c.vendido,
                     c.seguimiento,
                     c.fecha_vencimiento,
+                    c.usuario,
+                    COALESCE(c.cancelada, 0) AS cancelada,
+                    c.fecha_cancelada,
+                    c.cancelada_por,
+                    c.motivo_cancelacion,
                     i.nombre_producto
                 FROM cotizaciones c
                 JOIN cotizacion_items i ON c.id = i.cotizacion_id
@@ -202,6 +210,11 @@ async def consulta_cotizacion():
                         # Se devuelve sin filtrar por fecha: el panel decide que
                         # mostrar con sus pestañas Vigentes / Vencidas / Todas.
                         "fecha_vencimiento": str(fila["fecha_vencimiento"]) if isinstance(fila["fecha_vencimiento"], (datetime.date, datetime.datetime)) else fila["fecha_vencimiento"],
+                        "usuario": fila["usuario"],
+                        "cancelada": int(fila["cancelada"] or 0),
+                        "fecha_cancelada": str(fila["fecha_cancelada"]) if fila["fecha_cancelada"] else None,
+                        "cancelada_por": fila["cancelada_por"],
+                        "motivo_cancelacion": fila["motivo_cancelacion"],
                         "empresa": fila["empresa"],
                         "fecha": str(fila["fecha"]) if isinstance(fila["fecha"], (datetime.date, datetime.datetime)) else fila["fecha"],
                         "subtotal": str(fila["subtotal"]) if isinstance(fila["subtotal"], Decimal) else fila["subtotal"],
@@ -237,9 +250,13 @@ async def vincular_factura(vinculos: List[VinculoFactura]):
         with connection.cursor() as cursor:
             # Recorremos cada cotización modificada que llegó desde frontend
             for v in vinculos:
-                cursor.execute("SELECT relacion_factura FROM cotizaciones WHERE codigo_cotizacion = %s FOR UPDATE",
+                cursor.execute("SELECT relacion_factura, COALESCE(cancelada, 0) FROM cotizaciones WHERE codigo_cotizacion = %s FOR UPDATE",
                                (v.codigo_cotizacion,))
                 previa = cursor.fetchall()
+                # Una cotización cancelada no se factura ni se le quita la factura: 409 y no se
+                # guarda nada del lote (el rollback deshace los vínculos anteriores).
+                if previa and previa[0][1]:
+                    raise HTTPException(status_code=409, detail=cancelacion.mensaje_cancelada(v.codigo_cotizacion))
                 factura_previa = str((previa[0][0] if previa else None) or "").strip() or None
 
                 # Actualizamos el registro.
@@ -299,7 +316,10 @@ async def vincular_factura(vinculos: List[VinculoFactura]):
                 print(f"Vinculó factura, pero falló persistir notificaciones: {err}")
             
         return {"status": "success", "mensaje": "Facturas vinculadas"}
-        
+
+    except HTTPException:
+        connection.rollback()
+        raise
     except Exception as e:
         connection.rollback()
         print(f"Error al vincular factura: {e}")
@@ -321,6 +341,7 @@ async def registrar_complemento_pago(vinculo: vinculoPago):
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
+            cancelacion.exigir_no_cancelada(cursor, vinculo.codigo_cotizacion)
             # Inyectamos el complemento de pago en la cotización
             sql_pago = "INSERT INTO complemento_pago (id_cot, complemento, pago) VALUES (%s, %s, %s)"
             cursor.execute(sql_pago, (vinculo.codigo_cotizacion, vinculo.complemento, vinculo.pago))
@@ -330,7 +351,10 @@ async def registrar_complemento_pago(vinculo: vinculoPago):
             mov_reg.registrar_movimiento(vinculo.usuario or "", f"Registró complemento de pago para cotización con ID {vinculo.codigo_cotizacion}", "Cotizaciones")
             
         return {"status": "success", "mensaje": "Complemento de pago registrado"}
-        
+
+    except HTTPException:
+        connection.rollback()
+        raise
     except Exception as e:
         connection.rollback()
         print(f"Error al registrar complemento de pago: {e}")
@@ -353,6 +377,7 @@ async def guardar_firma(firma: FirmaEnvio):
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
+            cancelacion.exigir_no_cancelada(cursor, firma.codigo_cotizacion)
             # Inyecto la firma en la cotización que me piden, nada más
             sql = "UPDATE cotizaciones SET firma_envio = %s WHERE codigo_cotizacion = %s"
             cursor.execute(sql, (firma.firma_base64, firma.codigo_cotizacion))
@@ -467,16 +492,23 @@ async def marcar_vendido(vendido: vendido):
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
+            # Marcar como vendida una cancelada no se permite (desmarcarla sí).
+            if vendido.vendido:
+                cancelacion.exigir_no_cancelada(cursor, vendido.codigo_cotizacion)
+
             # Insertar en la tabla principal (Maestro)
             sql_maestro = """
               UPDATE cotizaciones SET vendido = %s WHERE codigo_cotizacion = %s
             """
 
-            cursor.execute(sql_maestro, (vendido.vendido, vendido.codigo_cotizacion))      
-                                 
+            cursor.execute(sql_maestro, (vendido.vendido, vendido.codigo_cotizacion))
+
             connection.commit()
-            return {"status": "success"}            
-   
+            return {"status": "success"}
+
+    except HTTPException:
+        connection.rollback()
+        raise
     except Exception as e:
         connection.rollback()
         print(f"Error inesperado: {e}")
@@ -511,7 +543,7 @@ async def cotizaciones_para_venta():
                     i.total_linea
                 FROM cotizaciones c
                 LEFT JOIN cotizacion_items i ON c.id = i.cotizacion_id
-                WHERE c.vendido = 0 OR c.vendido IS NULL
+                WHERE (c.vendido = 0 OR c.vendido IS NULL) AND COALESCE(c.cancelada, 0) = 0
                 ORDER BY c.codigo_cotizacion DESC;
             """)
             filas = cursor.fetchall()
@@ -550,6 +582,118 @@ async def cotizaciones_para_venta():
         raise HTTPException(status_code=500, detail=detalle_error_db(e, "Error en BD"))
     finally:
         connection.close()
+
+class CancelarCotizacion(BaseModel):
+    motivo: Optional[str] = None
+
+
+def _guias_de_cotizacion(codigo: str) -> int:
+    """Guías de Skydropx ya generadas para la cotización (cancelar no las cancela).
+    Nunca lanza: es solo para el aviso de la respuesta."""
+    try:
+        return len(skydropx_envios.listar_envios(codigo))
+    except Exception as err:
+        print(f"No se pudieron contar las guías de {codigo}: {err}")
+        return 0
+
+
+@router.post("/cotizaciones/{codigo_cotizacion}/cancelar")
+async def cancelar_cotizacion(codigo_cotizacion: str, datos: CancelarCotizacion = CancelarCotizacion(),
+                              usuario: str = Depends(usuario_autenticado)):
+    """
+    Cancela (inactiva) una cotización sin eliminarla. Queda fuera de cotizar/comprar guías
+    con Skydropx, del modal de Ventas y de los avisos. La puede cancelar su autor o gerencia;
+    409 si ya está cancelada, vendida o con factura relacionada. Si ya tiene guías de
+    Skydropx se permite y la respuesta lo avisa (las guías no se cancelan).
+    El usuario de la bitácora sale del token.
+    """
+    motivo = cancelacion.normalizar_motivo(datos.motivo)
+    connection = get_db_connection()
+    try:
+        with connection.cursor(dictionary=True) as cursor:
+            cursor.execute(
+                "SELECT usuario, vendido, relacion_factura, COALESCE(cancelada, 0) AS cancelada "
+                "FROM cotizaciones WHERE codigo_cotizacion = %s FOR UPDATE", (codigo_cotizacion,))
+            fila = cursor.fetchone()
+            if not fila:
+                connection.rollback()
+                raise HTTPException(status_code=404, detail=f"Cotización {codigo_cotizacion} no encontrada")
+            if not cancelacion.es_autor_o_gerencia(usuario, fila["usuario"], es_gerencia):
+                connection.rollback()
+                raise HTTPException(status_code=403, detail="Solo el autor de la cotización o gerencia puede cancelarla")
+            if fila["cancelada"]:
+                connection.rollback()
+                raise HTTPException(status_code=409, detail=cancelacion.mensaje_cancelada(codigo_cotizacion))
+            if fila["vendido"]:
+                connection.rollback()
+                raise HTTPException(status_code=409, detail=f"La cotización {codigo_cotizacion} ya está vendida y no se puede cancelar")
+            if str(fila["relacion_factura"] or "").strip():
+                connection.rollback()
+                raise HTTPException(status_code=409, detail=f"La cotización {codigo_cotizacion} ya tiene factura relacionada y no se puede cancelar")
+
+            cursor.execute(
+                "UPDATE cotizaciones SET cancelada = 1, fecha_cancelada = %s, cancelada_por = %s, "
+                "motivo_cancelacion = %s WHERE codigo_cotizacion = %s",
+                (cancelacion.ahora_cdmx(), usuario, motivo, codigo_cotizacion))
+            connection.commit()
+
+        detalle = f" Motivo: {motivo}" if motivo else ""
+        mov_reg.registrar_movimiento(usuario, f"Canceló la cotización {codigo_cotizacion}.{detalle}", "Cotizaciones")
+
+        guias = _guias_de_cotizacion(codigo_cotizacion)
+        respuesta = {"status": "success", "mensaje": f"Cotización {codigo_cotizacion} cancelada", "guias_activas": guias}
+        if guias:
+            respuesta["aviso"] = (f"La cotización tiene {guias} guía(s) de Skydropx ya generadas; "
+                                  "cancelarla no las cancela, hay que gestionarlas en Skydropx.")
+        return respuesta
+
+    except HTTPException:
+        raise
+    except mysql.connector.Error as err:
+        connection.rollback()
+        print(f"Error BD al cancelar cotización: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error BD"))
+    finally:
+        connection.close()
+
+
+@router.post("/cotizaciones/{codigo_cotizacion}/reactivar")
+async def reactivar_cotizacion(codigo_cotizacion: str, usuario: str = Depends(usuario_autenticado)):
+    """Revierte la cancelación (autor o gerencia). 404 si no existe, 409 si no está cancelada."""
+    connection = get_db_connection()
+    try:
+        with connection.cursor(dictionary=True) as cursor:
+            cursor.execute(
+                "SELECT usuario, COALESCE(cancelada, 0) AS cancelada FROM cotizaciones "
+                "WHERE codigo_cotizacion = %s FOR UPDATE", (codigo_cotizacion,))
+            fila = cursor.fetchone()
+            if not fila:
+                connection.rollback()
+                raise HTTPException(status_code=404, detail=f"Cotización {codigo_cotizacion} no encontrada")
+            if not cancelacion.es_autor_o_gerencia(usuario, fila["usuario"], es_gerencia):
+                connection.rollback()
+                raise HTTPException(status_code=403, detail="Solo el autor de la cotización o gerencia puede reactivarla")
+            if not fila["cancelada"]:
+                connection.rollback()
+                raise HTTPException(status_code=409, detail=f"La cotización {codigo_cotizacion} no está cancelada")
+
+            cursor.execute(
+                "UPDATE cotizaciones SET cancelada = 0, fecha_cancelada = NULL, cancelada_por = NULL, "
+                "motivo_cancelacion = NULL WHERE codigo_cotizacion = %s", (codigo_cotizacion,))
+            connection.commit()
+
+        mov_reg.registrar_movimiento(usuario, f"Reactivó la cotización {codigo_cotizacion}", "Cotizaciones")
+        return {"status": "success", "mensaje": f"Cotización {codigo_cotizacion} reactivada"}
+
+    except HTTPException:
+        raise
+    except mysql.connector.Error as err:
+        connection.rollback()
+        print(f"Error BD al reactivar cotización: {err}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error BD"))
+    finally:
+        connection.close()
+
 
 @router.get("/cotizaciones/base64/{codigo_cotizacion}")
 async def obtener_pdf_base64(codigo_cotizacion: str):

@@ -8,10 +8,11 @@ from routers import cotizacionesBack
 
 
 class FakeCursor:
-    def __init__(self, facturas_previas=None):
+    def __init__(self, facturas_previas=None, canceladas=()):
         self.ejecutados = []
         self.rowcount = 0
         self.facturas_previas = facturas_previas or {}  # codigo_cotizacion -> relacion_factura en BD
+        self.canceladas = set(canceladas)
         self._filas = []
 
     def __enter__(self):
@@ -24,8 +25,8 @@ class FakeCursor:
         q = " ".join(query.split())
         self.ejecutados.append((q, params))
         self._filas = []
-        if q.startswith("SELECT relacion_factura FROM cotizaciones"):
-            self._filas = [(self.facturas_previas.get(params[0]),)]
+        if q.startswith("SELECT relacion_factura, COALESCE(cancelada, 0) FROM cotizaciones"):
+            self._filas = [(self.facturas_previas.get(params[0]), 1 if params[0] in self.canceladas else 0)]
         # Dos partidas de venta salieron de ZTC-1.
         self.rowcount = 2 if q.startswith("UPDATE ventasRegistro") and "ZTC-1" in params else 0
 
@@ -34,8 +35,8 @@ class FakeCursor:
 
 
 class FakeDB:
-    def __init__(self, facturas_previas=None):
-        self.cursor_obj = FakeCursor(facturas_previas)
+    def __init__(self, facturas_previas=None, canceladas=()):
+        self.cursor_obj = FakeCursor(facturas_previas, canceladas)
         self.commits = 0
 
     def cursor(self):
@@ -108,6 +109,19 @@ def test_quitar_la_factura_regresa_a_pendientes_solo_las_de_esa_factura(monkeypa
         facturas_previas={"ZTC-2": "F-50"})
     assert upd == [("UPDATE ventasRegistro SET facturada = 0, factura = NULL WHERE cotizacion = %s AND factura = %s",
                      ("ZTC-2", "F-50"))]
+
+
+def test_vincular_factura_a_cotizacion_cancelada_da_409_y_no_guarda(monkeypatch):
+    base = FakeDB(canceladas={"ZTC-9"})
+    monkeypatch.setattr(cotizacionesBack, "get_db_connection", lambda: base)
+    monkeypatch.setattr(cotizacionesBack, "send_telegram_alert", AsyncMock())
+    monkeypatch.setattr(cotizacionesBack.mov_reg, "registrar_movimiento", lambda *a, **k: None)
+    with _app() as client:
+        r = client.post("/relacionFactura", json=[
+            {"id": 9, "codigo_cotizacion": "ZTC-9", "relacion_factura": "F-1", "usuario": "ana"}])
+    assert r.status_code == 409 and "cancelada" in r.json()["detail"]
+    assert base.commits == 0
+    assert not [q for q, _ in base.cursor_obj.ejecutados if q.startswith("UPDATE")]
 
 
 def test_cambiar_solo_pago_sin_factura_no_toca_ventas(monkeypatch):

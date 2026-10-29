@@ -46,9 +46,10 @@ class FakeCursor:
             sku = params[0]
             if sku in self.db.stock:
                 self._resultado = [{"stock_bodega": self.db.stock[sku]}]
-        elif q.startswith("SELECT relacion_factura FROM cotizaciones"):
+        elif q.startswith("SELECT relacion_factura, COALESCE(cancelada, 0) AS cancelada FROM cotizaciones"):
             if params[0] in self.db.cotizaciones:
-                self._resultado = [{"relacion_factura": self.db.cotizaciones[params[0]]}]
+                self._resultado = [{"relacion_factura": self.db.cotizaciones[params[0]],
+                                    "cancelada": 1 if params[0] in self.db.canceladas else 0}]
         elif q.startswith("INSERT INTO ventasRegistro"):
             fila = {"id_ventas": str(params[0]), "sku": params[1], "saldo_pendiente": params[11]}
             if len(params) > 12:
@@ -79,6 +80,7 @@ class FakeDB:
         self.ventas = []          # filas que devuelve la consulta de reportes
         self.registradas = []     # filas insertadas en ventasRegistro
         self.cotizaciones = {}    # codigo_cotizacion -> relacion_factura
+        self.canceladas = set()   # codigos de cotizaciones canceladas
         self.stock = {}
         self.ejecutados = []
         self.commits = 0
@@ -485,6 +487,15 @@ def test_venta_de_cotizacion_ya_facturada_nace_facturada(client, db):
     r = client.post("/ventas/registrar", json=venta_completa(facturable=True, cotizacion="ZTC-8"))
     assert r.json()["facturada"] is True
     assert {(v["cotizacion"], v["facturada"], v["factura"]) for v in db.registradas} == {("ZTC-8", 1, "F-200")}
+
+
+def test_venta_de_cotizacion_cancelada_da_409_y_no_registra_nada(client, db):
+    db.stock = {"A-001": 10, "B-002": 5}
+    db.cotizaciones = {"ZTC-9": None}
+    db.canceladas = {"ZTC-9"}
+    r = client.post("/ventas/registrar", json=venta_completa(facturable=True, cotizacion="ZTC-9"))
+    assert r.status_code == 409 and "cancelada" in r.json()["detail"]
+    assert db.registradas == [] and db.stock == {"A-001": 10, "B-002": 5}
 
 
 def test_venta_con_folio_inexistente_guarda_cotizacion_nula(client, db):

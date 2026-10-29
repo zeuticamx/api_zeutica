@@ -132,6 +132,13 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"❌ No se pudieron asegurar las columnas de borrado lógico de productos: {e}")
 
+    # Cancelación de cotizaciones (cancelada, fecha_cancelada, cancelada_por, motivo_cancelacion).
+    try:
+        import cotizacion_cancelacion
+        cotizacion_cancelacion.asegurar_columnas_cancelacion()
+    except Exception as e:
+        print(f"❌ No se pudieron asegurar las columnas de cancelación de cotizaciones: {e}")
+
     # Columna usuario en devoluciones (auditoría de inventario).
     try:
         from routers.productos import asegurar_columnas_devolucion

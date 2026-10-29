@@ -54,7 +54,8 @@ def cargar_cotizaciones_por_vender() -> list:
     try:
         cur.execute(
             """SELECT codigo_cotizacion, empresa, total, relacion_factura FROM cotizaciones
-               WHERE vendido = 0 AND relacion_factura IS NOT NULL AND TRIM(relacion_factura) <> ''
+               WHERE vendido = 0 AND COALESCE(cancelada, 0) = 0
+                 AND relacion_factura IS NOT NULL AND TRIM(relacion_factura) <> ''
                ORDER BY codigo_cotizacion""")
         return cur.fetchall()
     finally:
