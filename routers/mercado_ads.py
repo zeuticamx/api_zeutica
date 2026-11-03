@@ -210,6 +210,8 @@ class AplicarIn(BaseModel):
     accion: Literal["pausar", "activar"]
     desde: Optional[date] = None
     hasta: Optional[date] = None
+    # manual = decisión de gerencia: no depende de la recomendación del motor.
+    manual: bool = False
 
 
 @router.post("/mercado-ads/acciones/aplicar")
@@ -218,6 +220,9 @@ async def aplicar_accion(datos: AplicarIn, usuario: str = Depends(requerir_geren
 
     Antes de tocar nada vuelve a consultar el anuncio y a diagnosticarlo: si la recomendación ya no es la
     que vio quien hizo clic (o ya se aplicó, p. ej. doble clic), responde 409 con la situación actual.
+
+    Con `manual = true` (pausa/reactivación a criterio de gerencia) no se exige que el motor lo recomiende,
+    pero sí que el anuncio exista y que no esté ya en el estado pedido (doble clic → 409).
     """
     reglas = _leer_reglas_o_500()
     if reglas["estado_motor"] == zl.MOTOR_PAUSA:
@@ -229,16 +234,23 @@ async def aplicar_accion(datos: AplicarIn, usuario: str = Depends(requerir_geren
         actual = next((e for e in evaluadas if e["item_id"] == datos.item_id), None)
         if actual is None:
             raise HTTPException(status_code=404, detail="El anuncio ya no aparece en Mercado Ads")
-        if actual["diagnostico"]["accion"] != datos.accion:
-            raise HTTPException(status_code=409, detail=(
-                f"La recomendación cambió: ahora es «{actual['diagnostico']['accion']}» "
-                f"({actual['diagnostico']['motivo']}). Actualiza la tabla."))
         nuevo = "paused" if datos.accion == zl.PAUSAR else "active"
+        if datos.manual:
+            if actual["estado"] == nuevo:
+                raise HTTPException(status_code=409, detail=(
+                    f"El anuncio ya está {'pausado' if nuevo == 'paused' else 'activo'}. Actualiza la tabla."))
+            motivo = "manual"
+        else:
+            if actual["diagnostico"]["accion"] != datos.accion:
+                raise HTTPException(status_code=409, detail=(
+                    f"La recomendación cambió: ahora es «{actual['diagnostico']['accion']}» "
+                    f"({actual['diagnostico']['motivo']}). Actualiza la tabla."))
+            motivo = actual["diagnostico"]["motivo"]
         await zentor_service.cambiar_estado(datos.item_id, nuevo)
     except zentor_service.MercadoAdsError as err:
         _lanzar_error_ads(err)
     mov_reg.registrar_movimiento(
-        usuario, f"Zentor: {datos.accion} anuncio {datos.item_id} ({actual['diagnostico']['motivo']})", SECCION)
+        usuario, f"Zentor: {datos.accion} anuncio {datos.item_id} ({motivo})", SECCION)
     return {"item_id": datos.item_id, "accion": datos.accion, "estado": nuevo}
 
 

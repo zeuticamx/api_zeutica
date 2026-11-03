@@ -366,6 +366,35 @@ def test_aplicar_con_recomendacion_vencida_da_409(db, ads):
     assert r.status_code == 409 and "cambió" in r.json()["detail"] and ads == []
 
 
+def test_aplicar_manual_pausa_aunque_el_motor_diga_mantener(db, ads):
+    r = _cliente("gerencia").post("/mercado-ads/acciones/aplicar", json={"item_id": "OK", "accion": "pausar", "manual": True})
+    assert r.status_code == 200 and r.json()["estado"] == "paused"
+    assert ads == [("OK", "paused")]
+    assert "manual" in db.bitacora[-1][1]
+
+
+def test_aplicar_manual_solo_gerencia(db, ads):
+    r = _cliente("ana").post("/mercado-ads/acciones/aplicar", json={"item_id": "OK", "accion": "pausar", "manual": True})
+    assert r.status_code == 403 and ads == []
+
+
+def test_aplicar_manual_con_motor_en_pausa_409(db, ads):
+    db.fila["estado_motor"] = "pausa"
+    r = _cliente("gerencia").post("/mercado-ads/acciones/aplicar", json={"item_id": "OK", "accion": "pausar", "manual": True})
+    assert r.status_code == 409 and ads == []
+
+
+def test_aplicar_manual_si_ya_esta_en_ese_estado_409(db, ads):
+    # «OK» está activo: pedir «activar» manualmente no tiene nada que hacer.
+    r = _cliente("gerencia").post("/mercado-ads/acciones/aplicar", json={"item_id": "OK", "accion": "activar", "manual": True})
+    assert r.status_code == 409 and ads == []
+
+
+def test_aplicar_manual_anuncio_inexistente_404(db, ads):
+    r = _cliente("gerencia").post("/mercado-ads/acciones/aplicar", json={"item_id": "NOEXISTE", "accion": "pausar", "manual": True})
+    assert r.status_code == 404 and ads == []
+
+
 def test_aplicar_anuncio_inexistente_404(db, ads):
     r = _cliente("gerencia").post("/mercado-ads/acciones/aplicar", json={"item_id": "NOEXISTE", "accion": "pausar"})
     assert r.status_code == 404 and ads == []

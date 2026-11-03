@@ -64,8 +64,19 @@ class FakeCursor:
         elif q.startswith("SELECT id, sku, ubicada FROM compras"):
             c = db.compras.get(params[0])
             self._resultado = [dict(c)] if c else []
+        elif q.startswith("SELECT id, cantidad FROM stock_ubicacion"):
+            t = db.existentes.get((params[0], params[1].strip().lower()))
+            self._resultado = [{"id": t["id"], "cantidad": t["cantidad"]}] if t else []
+        elif q.startswith("UPDATE stock_ubicacion SET cantidad"):
+            cajas, tid = params
+            for t in db.existentes.values():
+                if t["id"] == tid:
+                    t["cantidad"] += cajas
+            db.actualizadas.append(params)
         elif q.startswith("INSERT INTO stock_ubicacion"):
             db.tarjetas.append(params)
+            sku, almacen, cama, cajas = params
+            db.existentes[(sku, almacen.strip().lower())] = {"id": 100 + len(db.tarjetas), "cantidad": cajas, "cama": cama}
         elif q.startswith("UPDATE compras SET cantidad_ubicada"):
             cantidad, completa, _, _, _, cid = params
             c = db.compras[cid]
@@ -95,12 +106,14 @@ class FakeCursor:
 class FakeDB:
     def __init__(self):
         self.compras = {
-            1: {"id": 1, "sku": "BOLECO17", "nombre": "Bolsa", "cantidad": 10, "stock_bodega": 10,
+            1: {"id": 1, "sku": "BOLECO38", "nombre": "Bolsa", "cantidad": 10, "stock_bodega": 10,
                 "cantidad_ubicada": 0, "ubicada": 0, "num_factura": "F1", "proveedor": "P", "fecha_registro": "2026-10-20"},
             2: {"id": 2, "sku": "GEL", "nombre": "Gel", "cantidad": 5, "stock_bodega": 5,
                 "cantidad_ubicada": 5, "ubicada": 1, "num_factura": "F1", "proveedor": "P", "fecha_registro": "2026-10-20"},
         }
         self.tarjetas = []
+        self.existentes = {}   # tarjetas ya en stock_ubicacion: (sku, celda en minúsculas) -> fila
+        self.actualizadas = []
         self.ejecutados = []
         self.alter = []
         self.backfill = False
@@ -144,18 +157,20 @@ def test_por_ubicar_solo_trae_las_pendientes_agrupadas(client):
     assert r.status_code == 200
     cuerpo = r.json()
     assert cuerpo["total"] == 1
-    assert cuerpo["facturas"][0]["items"][0]["sku"] == "BOLECO17"
+    assert cuerpo["facturas"][0]["items"][0]["sku"] == "BOLECO38"
     assert cuerpo["facturas"][0]["items"][0]["pendiente"] == 10
 
 
 def test_ubicar_en_varias_celdas_cierra_al_completar(client, db):
-    r = client.post("/compras/1/ubicar", json={"warehouse_id": "A-1", "cantidad": 4, "cama": 2})
-    assert r.status_code == 200 and r.json()["ubicada"] is False and r.json()["pendiente"] == 6
+    # BOLECO38: 5 piezas por caja → 5 pzas = 1 caja, 5 pzas = 1 caja.
+    r = client.post("/compras/1/ubicar", json={"warehouse_id": "A-1", "cantidad": 5, "cama": 2})
+    assert r.status_code == 200 and r.json()["ubicada"] is False and r.json()["pendiente"] == 5
+    assert r.json()["cajas"] == 1 and r.json()["multiplo"] == 5 and r.json()["tarjeta_nueva"] is True
     assert db.compras[1]["ubicada"] == 0
-    r = client.post("/compras/1/ubicar", json={"warehouse_id": "B-2", "cantidad": 6})
+    r = client.post("/compras/1/ubicar", json={"warehouse_id": "B-2", "cantidad": 5})
     assert r.status_code == 200 and r.json()["ubicada"] is True and r.json()["pendiente"] == 0
     assert db.compras[1]["ubicada"] == 1 and db.compras[1]["cantidad_ubicada"] == 10
-    assert db.tarjetas == [("BOLECO17", "A-1", 2, 4), ("BOLECO17", "B-2", 0, 6)]
+    assert db.tarjetas == [("BOLECO38", "A-1", 2, 1), ("BOLECO38", "B-2", 0, 1)]
     assert all(m[0] == "ana" for m in db.movimientos) and len(db.movimientos) == 2
     assert client.get("/compras/por-ubicar").json()["total"] == 0
 
@@ -165,6 +180,40 @@ def test_ubicar_mas_de_lo_pendiente_da_422_y_no_escribe(client, db):
     assert r.status_code == 422 and db.tarjetas == []
     assert client.post("/compras/1/ubicar", json={"warehouse_id": "A-1", "cantidad": 0}).status_code == 422
     assert client.post("/compras/1/ubicar", json={"warehouse_id": "   ", "cantidad": 1}).status_code == 422
+
+
+def test_ubicar_convierte_piezas_a_cajas_y_exige_multiplo_exacto(client, db):
+    r = client.post("/compras/1/ubicar", json={"warehouse_id": "A-1", "cantidad": 7})
+    assert r.status_code == 422 and "múltiplo de 5" in r.json()["detail"]
+    assert db.tarjetas == [] and db.compras[1]["cantidad_ubicada"] == 0
+    r = client.post("/compras/1/ubicar", json={"warehouse_id": "A-1", "cantidad": 10})
+    assert r.status_code == 200 and r.json()["cajas"] == 2
+    assert db.tarjetas == [("BOLECO38", "A-1", 0, 2)]
+    assert db.compras[1]["cantidad_ubicada"] == 10  # la compra sigue contando piezas
+
+
+def test_ubicar_en_celda_con_tarjeta_existente_suma_y_no_duplica(client, db):
+    db.existentes[("BOLECO38", "a-1")] = {"id": 7, "cantidad": 3, "cama": 4}
+    # Distinta capitalización/espacios de la misma celda.
+    r = client.post("/compras/1/ubicar", json={"warehouse_id": " A-1 ", "cantidad": 10, "cama": 9})
+    assert r.status_code == 200
+    assert r.json()["tarjeta_nueva"] is False and r.json()["tarjeta_id"] == 7
+    assert db.tarjetas == []                       # ningún INSERT
+    assert db.actualizadas == [(2, 7)]
+    assert db.existentes[("BOLECO38", "a-1")]["cantidad"] == 5
+    assert db.existentes[("BOLECO38", "a-1")]["cama"] == 4  # se conserva la cama
+
+
+def test_ubicar_en_oficina_no_convierte(client, db):
+    r = client.post("/compras/1/ubicar", json={"warehouse_id": "Oficina", "cantidad": 7})
+    assert r.status_code == 200 and r.json()["cajas"] == 7 and r.json()["multiplo"] == 1
+    assert db.tarjetas == [("BOLECO38", "Oficina", 0, 7)]
+
+
+def test_piezas_a_cajas():
+    assert logica.piezas_a_cajas(30, 10) == (3, None)
+    assert logica.piezas_a_cajas(7, 1) == (7, None)
+    assert logica.piezas_a_cajas(7, 5)[0] is None
 
 
 def test_ubicar_compra_ya_ubicada_da_409_e_inexistente_404(client, db):

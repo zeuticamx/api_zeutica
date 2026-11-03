@@ -21,6 +21,18 @@ def validar_cantidad(cantidad: int, total: int, ubicada: int) -> str | None:
     return None
 
 
+def piezas_a_cajas(piezas: int, multiplo: int) -> tuple[int | None, str | None]:
+    """Convierte piezas de la compra a cajas de la tarjeta: (cajas, None) o (None, error).
+
+    Las tarjetas guardan cajas; la compra se captura en piezas. Debe ser múltiplo exacto
+    (misma política que «empaquetar» en el traspaso).
+    """
+    multiplo = int(multiplo or 1)
+    if multiplo > 1 and piezas % multiplo != 0:
+        return None, f"Las piezas deben ser múltiplo de {multiplo} (piezas por caja de este SKU)"
+    return piezas // multiplo, None
+
+
 def queda_ubicada(total: int, ubicada: int, cantidad: int) -> bool:
     """True si al repartir `cantidad` más ya no queda nada pendiente."""
     return pendiente(total, int(ubicada or 0) + cantidad) == 0

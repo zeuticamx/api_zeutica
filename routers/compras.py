@@ -317,10 +317,30 @@ async def ubicar_compra(compra_id: int, datos: UbicarCompraModel, usuario: str =
         if not almacen:
             raise HTTPException(status_code=422, detail="Indica la ubicación")
 
+        # La compra va en piezas; las tarjetas en cajas (Oficina ×1), igual que el traspaso.
+        from routers.productos import multiplo_ubicacion
+        mult = multiplo_ubicacion(compra["sku"], almacen)
+        cajas, error = ubic.piezas_a_cajas(datos.cantidad, mult)
+        if error:
+            raise HTTPException(status_code=422, detail=error)
+
         completa = ubic.queda_ubicada(compra["stock_bodega"], compra["cantidad_ubicada"], datos.cantidad)
+        # Si ya hay tarjeta de este SKU en la celda se suma; si no, se crea.
         cursor.execute(
-            "INSERT INTO stock_ubicacion (sku, warehouse_id, cama, cantidad) VALUES (%s, %s, %s, %s)",
-            (compra["sku"], almacen, datos.cama, datos.cantidad))
+            "SELECT id, cantidad FROM stock_ubicacion WHERE sku = %s "
+            "AND LOWER(TRIM(warehouse_id)) = LOWER(TRIM(%s)) ORDER BY id LIMIT 1 FOR UPDATE",
+            (compra["sku"], almacen))
+        tarjeta = cursor.fetchone()
+        if tarjeta:
+            tarjeta_id = tarjeta["id"]
+            cursor.execute(
+                "UPDATE stock_ubicacion SET cantidad = COALESCE(cantidad, 0) + %s WHERE id = %s",
+                (cajas, tarjeta_id))
+        else:
+            cursor.execute(
+                "INSERT INTO stock_ubicacion (sku, warehouse_id, cama, cantidad) VALUES (%s, %s, %s, %s)",
+                (compra["sku"], almacen, datos.cama, cajas))
+            tarjeta_id = getattr(cursor, "lastrowid", None)
         cursor.execute(
             "UPDATE compras SET cantidad_ubicada = cantidad_ubicada + %s, ubicada = %s, "
             "fecha_ubicada = IF(%s = 1, NOW(), fecha_ubicada), ubicada_por = IF(%s = 1, %s, ubicada_por) WHERE id = %s",
@@ -329,7 +349,10 @@ async def ubicar_compra(compra_id: int, datos: UbicarCompraModel, usuario: str =
 
         try:
             mov_reg.registrar_movimiento(
-                usuario, f"Ubicó {datos.cantidad} de '{compra['sku']}' (compra #{compra_id}) en '{almacen}'", "Compras")
+                usuario,
+                f"Ubicó {datos.cantidad} pzas ({cajas} cajas ×{mult}) de '{compra['sku']}' (compra #{compra_id}) "
+                f"{'sumadas a la tarjeta de' if tarjeta else 'en nueva tarjeta de'} '{almacen}'",
+                "Compras")
         except Exception as err:
             print(f"Compra ubicada, pero falló la bitácora: {err}")
 
@@ -339,6 +362,10 @@ async def ubicar_compra(compra_id: int, datos: UbicarCompraModel, usuario: str =
             "sku": compra["sku"],
             "warehouse_id": almacen,
             "cantidad": datos.cantidad,
+            "cajas": cajas,
+            "multiplo": mult,
+            "tarjeta_id": tarjeta_id,
+            "tarjeta_nueva": not tarjeta,
             "pendiente": ubic.pendiente(compra["stock_bodega"], compra["cantidad_ubicada"] + datos.cantidad),
             "ubicada": completa,
         }
