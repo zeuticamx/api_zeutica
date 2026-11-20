@@ -28,4 +28,14 @@ def test_main_pasa_timezone_a_todos_los_triggers():
     sin_tz = [ln for ln in src.splitlines()
               if "CronTrigger(hour=int(" in ln and "timezone=" not in ln]
     assert sin_tz == [], sin_tz
-    assert src.count("timezone=TZ_CDMX") >= 7
+    # Stock MeLi (como reorden y Zentor) arma su trigger en meli_stock.crear_trigger, con CDMX adentro.
+    assert src.count("timezone=TZ_CDMX") >= 6
+
+
+def test_trigger_stock_meli_dispara_en_cdmx_aunque_ref_sea_utc():
+    from jobs import meli_stock
+    antes_utc = datetime(2026, 10, 8, 10, 0, tzinfo=ZoneInfo("UTC"))   # 04:00 CDMX
+    nxt = meli_stock.crear_trigger("20:00").get_next_fire_time(None, antes_utc)
+    en_cdmx = nxt.astimezone(CDMX)
+    assert (en_cdmx.hour, en_cdmx.minute) == (20, 0)
+    assert nxt.astimezone(ZoneInfo("UTC")).hour == 2   # 20:00 CDMX = 02:00 UTC del día siguiente

@@ -108,14 +108,18 @@ async def meli_stock_run(datos: MeliStockRunIn, usuario: str = Depends(usuario_a
 async def meli_stock_status(usuario: str = Depends(usuario_autenticado)):
     """Último run + configuración (permiso general)."""
     from jobs import meli_stock
-    return {
-        "ultimo": meli_stock.LAST_RUN,
-        "config": {
-            "enabled": os.getenv("MELI_STOCK_ENABLED", "1") == "1",
-            "dry_run_default": os.getenv("MELI_STOCK_DRY_RUN", "0") == "1",
-            "hora": os.getenv("MELI_STOCK_HORA", "20:00"),
-        },
-    }
+    # Fuente de verdad: la BD (página «Stock MeLi»). Las variables de entorno solo siembran
+    # la primera vez; MELI_STOCK_ENABLED=0 sigue siendo el apagado maestro del scheduler.
+    try:
+        cfg = meli_stock.cargar_config()
+        config = {"enabled": cfg["habilitado"] and os.getenv("MELI_STOCK_ENABLED", "1") == "1",
+                  "dry_run_default": cfg["dry_run"], "hora": cfg["hora"]}
+    except Exception as err:
+        print(f"Stock MeLi status: no se leyó la configuración: {err}")
+        config = {"enabled": os.getenv("MELI_STOCK_ENABLED", "1") == "1",
+                  "dry_run_default": os.getenv("MELI_STOCK_DRY_RUN", "0") == "1",
+                  "hora": os.getenv("MELI_STOCK_HORA", "20:00")}
+    return {"ultimo": meli_stock.LAST_RUN, "config": config}
 
 
 class CleanestRunIn(BaseModel):

@@ -62,7 +62,7 @@ def test_decidir_respeta_ignorar_y_sin_match():
             {"id": "MLM1", "title": "Prod", "available_quantity": 0, "variations": [], "buying_mode": "",
              }]
     db = {"MLM1": {"sku": "ABC", "stock_bodega": 100}}
-    ups, sin = job.decidir_actualizaciones(dets, db)
+    ups, sin = job.decidir_actualizaciones(dets, db, ignorar={"MLM2505625865"})
     assert [u["item_id"] for u in ups] == ["MLM1"]
     assert ups[0]["nuevo"] == 15
     dets2 = [{"id": "MLM2", "title": "Y", "available_quantity": 1, "variations": [], "buying_mode": ""}]

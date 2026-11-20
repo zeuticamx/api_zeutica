@@ -18,7 +18,7 @@ from slowapi.errors import RateLimitExceeded
 from permisos import usuario_autenticado, asegurar_columna_token_expira, token_horas, es_gerencia
 from routers import cotizacionesBack, productos, ventas, clientes, traspaso, gastos, compras, cleanest, cuentas_pendientes,\
       abonos, estadisticas, inventario, empleados, notificaciones, cuentas_pagar, consulta_registros, pendientes, proveedores, genera_cotizacion, sofi_conversaciones, embarques, sofi_notificaciones, whatsapp_plantillas, skydropx
-from routers import crm, comisiones, prospectos, jobs, meli_webhook, meli_promos, anaqueles, reorden, landed_cost, mercado_ads, competencia
+from routers import crm, comisiones, prospectos, jobs, meli_webhook, meli_promos, anaqueles, reorden, landed_cost, mercado_ads, competencia, meli_stock_config
 import mysql.connector
 import skydropx_envios
 from fastapi.middleware.cors import CORSMiddleware
@@ -206,18 +206,6 @@ async def lifespan(app: FastAPI):
             except Exception as e:
                 print(f"❌ No se pudo programar el job MeLi: {e}")
             try:
-                from jobs import meli_stock
-                meli_stock.asegurar_tabla_publicaciones()
-                if os.getenv("MELI_STOCK_ENABLED", "1") == "1":
-                    sh = os.getenv("MELI_STOCK_HORA", "20:00")
-                    shh, smm = (sh.split(":") + ["0"])[:2]
-                    scheduler.add_job(_ejecucion.ejecutar, CronTrigger(hour=int(shh), minute=int(smm), timezone=TZ_CDMX),
-                                      kwargs={"modulo": meli_stock, "motivo": "scheduler"}, id="meli_stock", replace_existing=True,
-                                      misfire_grace_time=600, coalesce=True, max_instances=1)
-                    print(f"⏰ Job stock MeLi programado a las {int(shh):02d}:{int(smm):02d} America/Mexico_City.")
-            except Exception as e:
-                print(f"❌ No se pudo programar el job stock MeLi: {e}")
-            try:
                 from jobs import cleanest_recordatorios
                 cleanest_recordatorios.asegurar_tabla_avisos()
                 if os.getenv("CLEANEST_JOB_ENABLED", "1") == "1":
@@ -310,6 +298,40 @@ async def lifespan(app: FastAPI):
         except Exception as e:
             print(f"❌ No se pudo programar el job Amazon: {e}")
 
+    # Stock MeLi: NO depende de AMAZON_JOB_ENABLED. Las tablas (publicaciones y configuración editable
+    # desde la página «Stock MeLi») se crean siempre; el job se programa con MELI_STOCK_ENABLED=1
+    # (apagado maestro de despliegue) y, dentro, el interruptor de la página decide si corre cada día.
+    try:
+        from jobs import meli_stock
+        meli_stock.asegurar_tabla_publicaciones()
+        meli_stock.crear_tablas_config()
+    except Exception as e:
+        print(f"❌ No se pudieron crear las tablas de stock MeLi: {e}")
+    if os.getenv("MELI_STOCK_ENABLED", "1") == "1":
+        try:
+            from apscheduler.schedulers.asyncio import AsyncIOScheduler
+            from zoneinfo import ZoneInfo
+            from jobs import meli_stock, _ejecucion
+
+            scheduler = app.state.amazon_scheduler
+            if scheduler is None:  # Amazon apagado: se crea el scheduler solo para este job.
+                scheduler = AsyncIOScheduler(timezone=ZoneInfo("America/Mexico_City"))
+                scheduler.start()
+                app.state.amazon_scheduler = scheduler
+            try:
+                hora = meli_stock.cargar_config()["hora"]
+            except Exception as e:
+                hora = meli_stock.hora_por_defecto()
+                print(f"⚠️ Stock MeLi: no se leyó la hora de la BD, se usa {hora}: {e}")
+            scheduler.add_job(_ejecucion.ejecutar, meli_stock.crear_trigger(hora),
+                              kwargs={"modulo": meli_stock, "motivo": "scheduler"}, id="meli_stock", replace_existing=True,
+                              misfire_grace_time=600, coalesce=True, max_instances=1)
+            print(f"⏰ Job stock MeLi programado a las {hora} America/Mexico_City.")
+        except ImportError:
+            print("⚠️ apscheduler no instalado: job stock MeLi solo manual (pip install apscheduler).")
+        except Exception as e:
+            print(f"❌ No se pudo programar el job stock MeLi: {e}")
+
     yield  # Aquí corre la aplicación normal
 
     # Apagar scheduler + pool al cerrar la API
@@ -391,6 +413,7 @@ app.include_router(anaqueles.router, dependencies=[Depends(obtener_usuario_actua
 app.include_router(reorden.router, dependencies=[Depends(obtener_usuario_actual)])
 app.include_router(mercado_ads.router, dependencies=[Depends(obtener_usuario_actual)])
 app.include_router(competencia.router, dependencies=[Depends(obtener_usuario_actual)])
+app.include_router(meli_stock_config.router, dependencies=[Depends(obtener_usuario_actual)])
 app.include_router(landed_cost.router, dependencies=[Depends(obtener_usuario_actual)])
 # Sin obtener_usuario_actual a proposito: el WebSocket valida el token por query
 # param y el POST de escalacion valida X-API-Key (n8n no tiene sesion de usuario).
