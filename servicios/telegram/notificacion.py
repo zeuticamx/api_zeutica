@@ -9,9 +9,9 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_GROUP_ID")
 
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
 
-async def send_telegram_alert(message: str, parse_mode: str = "HTML"):
+async def send_telegram_alert(message: str, parse_mode: str = "HTML", chat_id: str | None = None):
     payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
+        "chat_id": chat_id or TELEGRAM_CHAT_ID,
         "text": message,
         "parse_mode": parse_mode
     }

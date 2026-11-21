@@ -50,6 +50,7 @@ class FakeCursor:
         self.db = db
         self._resultado = []
         self.rowcount = 0
+        self.lastrowid = None
 
     def execute(self, query, params=None):
         q = " ".join(query.split())
@@ -58,9 +59,36 @@ class FakeCursor:
         self._resultado, self.rowcount = [], 0
         if "FROM compras WHERE COALESCE(ubicada, 0) = 0" in q:
             self._resultado = [dict(c) for c in db.compras.values() if not c["ubicada"]]
-        elif q.startswith("SELECT id, sku, stock_bodega, cantidad_ubicada, ubicada FROM compras"):
+        elif q.startswith("SELECT id, sku, stock_bodega, cantidad_ubicada, cantidad_venta_directa, ubicada, sin_ubicacion FROM compras"):
             c = db.compras.get(params[0])
             self._resultado = [dict(c)] if c else []
+        elif q.startswith("SELECT id, nombre FROM clientes"):
+            n = db.clientes.get(params[0])
+            self._resultado = [{"id": params[0], "nombre": n}] if n else []
+        elif q.startswith("INSERT INTO compras_venta_directa"):
+            compra_id, sku, cantidad, cliente_id, cliente, referencia, nota, usuario, fecha = params
+            rid = len(db.registros) + 1
+            db.registros[rid] = {"id": rid, "compra_id": compra_id, "sku": sku, "cantidad": cantidad,
+                                 "cliente_id": cliente_id, "cliente": cliente, "referencia": referencia,
+                                 "nota": nota, "usuario": usuario, "anulada": 0}
+            self.lastrowid = rid
+        elif q.startswith("UPDATE compras SET cantidad_venta_directa = cantidad_venta_directa +"):
+            cantidad, completa, _, _, _, cid = params
+            c = db.compras[cid]
+            c["cantidad_venta_directa"] += cantidad
+            c["ubicada"] = completa
+        elif q.startswith("SELECT id, compra_id, sku, cantidad, cliente, anulada FROM compras_venta_directa"):
+            r = db.registros.get(params[0])
+            self._resultado = [dict(r)] if r else []
+        elif q.startswith("UPDATE compras_venta_directa SET anulada = 1"):
+            db.registros[params[2]]["anulada"] = 1
+        elif q.startswith("UPDATE compras SET cantidad_venta_directa = GREATEST"):
+            cantidad, cid = params
+            c = db.compras[cid]
+            c["cantidad_venta_directa"] = max(c["cantidad_venta_directa"] - cantidad, 0)
+            c["ubicada"] = 0
+        elif "FROM compras_venta_directa" in q and q.startswith("SELECT"):
+            self._resultado = [dict(r) for r in db.registros.values() if not r["anulada"]]
         elif q.startswith("SELECT id, sku, ubicada FROM compras"):
             c = db.compras.get(params[0])
             self._resultado = [dict(c)] if c else []
@@ -107,10 +135,14 @@ class FakeDB:
     def __init__(self):
         self.compras = {
             1: {"id": 1, "sku": "BOLECO38", "nombre": "Bolsa", "cantidad": 10, "stock_bodega": 10,
-                "cantidad_ubicada": 0, "ubicada": 0, "num_factura": "F1", "proveedor": "P", "fecha_registro": "2026-10-20"},
+                "cantidad_ubicada": 0, "cantidad_venta_directa": 0, "ubicada": 0, "sin_ubicacion": 0,
+                "num_factura": "F1", "proveedor": "P", "fecha_registro": "2026-10-20"},
             2: {"id": 2, "sku": "GEL", "nombre": "Gel", "cantidad": 5, "stock_bodega": 5,
-                "cantidad_ubicada": 5, "ubicada": 1, "num_factura": "F1", "proveedor": "P", "fecha_registro": "2026-10-20"},
+                "cantidad_ubicada": 5, "cantidad_venta_directa": 0, "ubicada": 1, "sin_ubicacion": 0,
+                "num_factura": "F1", "proveedor": "P", "fecha_registro": "2026-10-20"},
         }
+        self.clientes = {7: "Cliente Uno"}   # catálogo de clientes activos: id -> nombre
+        self.registros = {}                  # compras_venta_directa: id -> fila
         self.tarjetas = []
         self.existentes = {}   # tarjetas ya en stock_ubicacion: (sku, celda en minúsculas) -> fila
         self.actualizadas = []
@@ -228,6 +260,95 @@ def test_sin_ubicacion_saca_la_compra_sin_crear_tarjetas(client, db):
     assert db.compras[1]["ubicada"] == 1 and db.compras[1]["sin_ubicacion"] == 1 and db.tarjetas == []
     assert client.post("/compras/1/sin-ubicacion").status_code == 409
     assert client.post("/compras/99/sin-ubicacion").status_code == 404
+
+
+# ---------- Venta directa ----------
+
+def test_logica_pendiente_descuenta_la_venta_directa():
+    assert logica.pendiente(10, 4, 3) == 3
+    assert logica.pendiente(10, 4, 8) == 0
+    assert "excede" in logica.validar_cantidad(5, 10, 4, 3)
+    assert logica.validar_cantidad(3, 10, 4, 3) is None
+    assert logica.queda_ubicada(10, 4, 3, 3) is True
+    assert logica.queda_ubicada(10, 4, 2, 3) is False
+
+
+def test_agrupar_incluye_venta_directa_en_el_pendiente():
+    filas = [{"id": 1, "sku": "A", "nombre": "a", "cantidad": 10, "cantidad_ubicada": 4,
+              "cantidad_venta_directa": 3, "num_factura": "F1", "proveedor": "P", "fecha_registro": "x"}]
+    item = logica.agrupar_por_factura(filas)[0]["items"][0]
+    assert item["pendiente"] == 3 and item["cantidad_venta_directa"] == 3
+
+
+def test_venta_directa_total_cierra_la_compra_sin_tarjetas(client, db):
+    r = client.post("/compras/1/venta-directa", json={"cantidad": 10, "cliente_id": 7, "referencia": " PO-1 ", "nota": ""})
+    assert r.status_code == 200 and r.json()["ubicada"] is True and r.json()["pendiente"] == 0
+    assert db.compras[1]["ubicada"] == 1 and db.compras[1]["cantidad_venta_directa"] == 10
+    assert db.compras[1]["cantidad_ubicada"] == 0 and db.tarjetas == []
+    reg = db.registros[1]
+    assert reg["cliente_id"] == 7 and reg["cliente"] == "Cliente Uno" and reg["usuario"] == "ana"
+    assert reg["referencia"] == "PO-1" and reg["nota"] is None
+    assert db.movimientos and db.movimientos[-1][0] == "ana"
+    assert client.get("/compras/por-ubicar").json()["total"] == 0
+
+
+def test_venta_directa_parcial_mas_ubicar_cierra_al_completar(client, db):
+    r = client.post("/compras/1/venta-directa", json={"cantidad": 5, "cliente_id": 7})
+    assert r.status_code == 200 and r.json()["ubicada"] is False and r.json()["pendiente"] == 5
+    item = client.get("/compras/por-ubicar").json()["facturas"][0]["items"][0]
+    assert item["pendiente"] == 5 and item["cantidad_venta_directa"] == 5
+    # Lo demás se ubica: debe contar la venta directa para cerrar.
+    r = client.post("/compras/1/ubicar", json={"warehouse_id": "A-1", "cantidad": 5})
+    assert r.status_code == 200 and r.json()["ubicada"] is True
+    assert db.compras[1]["ubicada"] == 1
+    # Ubicar de más (considerando la venta directa) da 422.
+    db.compras[1].update(ubicada=0, cantidad_ubicada=0)
+    assert client.post("/compras/1/ubicar", json={"warehouse_id": "A-2", "cantidad": 10}).status_code == 422
+
+
+def test_venta_directa_validaciones(client, db):
+    assert client.post("/compras/1/venta-directa", json={"cantidad": 11, "cliente_id": 7}).status_code == 422
+    assert client.post("/compras/1/venta-directa", json={"cantidad": 0, "cliente_id": 7}).status_code == 422
+    assert client.post("/compras/1/venta-directa", json={"cantidad": 1}).status_code == 422          # cliente obligatorio
+    assert client.post("/compras/1/venta-directa", json={"cantidad": 1, "cliente_id": 99}).status_code == 422  # fuera del catálogo
+    assert client.post("/compras/2/venta-directa", json={"cantidad": 1, "cliente_id": 7}).status_code == 409
+    assert client.post("/compras/99/venta-directa", json={"cantidad": 1, "cliente_id": 7}).status_code == 404
+    assert db.registros == {} and db.compras[1]["cantidad_venta_directa"] == 0
+
+
+def test_venta_directa_no_se_aplica_a_una_compra_sin_ubicacion(client, db):
+    client.post("/compras/1/sin-ubicacion")
+    assert client.post("/compras/1/venta-directa", json={"cantidad": 1, "cliente_id": 7}).status_code == 409
+
+
+def test_anular_venta_directa_solo_gerencia_y_reabre_la_compra(client, db, monkeypatch):
+    client.post("/compras/1/venta-directa", json={"cantidad": 10, "cliente_id": 7})
+    assert db.compras[1]["ubicada"] == 1
+    # «ana» no es gerencia.
+    assert client.delete("/compras/venta-directa/1").status_code == 403
+    assert db.registros[1]["anulada"] == 0
+    client.app.dependency_overrides[compras.requerir_gerencia] = lambda: "gerente"
+    r = client.delete("/compras/venta-directa/1")
+    assert r.status_code == 200
+    assert db.registros[1]["anulada"] == 1
+    assert db.compras[1]["ubicada"] == 0 and db.compras[1]["cantidad_venta_directa"] == 0
+    assert client.get("/compras/por-ubicar").json()["total"] == 1
+    assert client.delete("/compras/venta-directa/1").status_code == 409   # ya anulada
+    assert client.delete("/compras/venta-directa/99").status_code == 404
+
+
+def test_anular_da_409_si_la_compra_se_cerro_como_sin_ubicacion(client, db):
+    client.post("/compras/1/venta-directa", json={"cantidad": 4, "cliente_id": 7})
+    client.post("/compras/1/sin-ubicacion")
+    client.app.dependency_overrides[compras.requerir_gerencia] = lambda: "gerente"
+    assert client.delete("/compras/venta-directa/1").status_code == 409
+    assert db.registros[1]["anulada"] == 0
+
+
+def test_listado_de_ventas_directas_omite_las_anuladas(client, db):
+    client.post("/compras/1/venta-directa", json={"cantidad": 2, "cliente_id": 7})
+    r = client.get("/compras/venta-directa")
+    assert r.status_code == 200 and [x["id"] for x in r.json()["registros"]] == [1]
 
 
 def test_migracion_marca_lo_anterior_como_ubicado_solo_si_crea_la_columna(db):

@@ -15,6 +15,19 @@ import pendientes_tiempo_logica as tiempo
 router =APIRouter(tags=["/pendientes"],responses={404: {"Mensaje":"No encontrado"}})
 load_dotenv()
 
+# Los avisos de Telegram de las tareas de estos usuarios van al grupo Y además al chat personal
+# indicado en el .env (ID_TELEGRAM_DEVELOPER). Sin la variable, solo al grupo.
+USUARIOS_AVISO_PERSONAL = ("fparra",)
+
+
+def _aviso_pendiente(usuario: Optional[str], message: str):
+    """Programa el aviso al grupo; si la tarea es de `fparra`, también a su chat personal."""
+    asyncio.create_task(send_telegram_alert(message))
+    if str(usuario or "").strip().lower() in USUARIOS_AVISO_PERSONAL:
+        chat_id = (os.getenv("ID_TELEGRAM_DEVELOPER") or "").strip()
+        if chat_id:
+            asyncio.create_task(send_telegram_alert(message, chat_id=chat_id))
+
 # Configuración de la conexión
 def get_db_connection():
     return mysql.connector.connect(
@@ -115,9 +128,9 @@ async def agregar_pendiente(registro: registro):
             f"• <b>Observaciones:</b> {html.escape(registro.observaciones or '')}\n"
             f"• <b>Fecha Promesa:</b> {html.escape(str(registro.fecha_promesa))}"
         )
-        asyncio.create_task(send_telegram_alert(message))
+        _aviso_pendiente(registro.usuario, message)
 
-        return {"mensaje": "Registro agregado exitosamente."}        
+        return {"mensaje": "Registro agregado exitosamente."}
 
     except mysql.connector.Error as err:
         print(f"Error DB agregar registro: {err}")
@@ -163,7 +176,7 @@ async def actualizar_pendiente(id_pendiente: int, registro: registro):
             f"• <b>Observaciones:</b> {html.escape(registro.observaciones or '')}\n"
             f"• <b>Fecha Promesa:</b> {html.escape(str(registro.fecha_promesa))}"
         )
-        asyncio.create_task(send_telegram_alert(message))
+        _aviso_pendiente(registro.usuario, message)
 
         return {"mensaje": "Pendiente actualizado exitosamente."}
 
@@ -188,6 +201,11 @@ async def eliminar_pendiente(id_pendiente: int, usuario: str = Depends(requerir_
     """
 
     try:
+        # Dueño de la tarea, para decidir a qué chat va el aviso (después del DELETE ya no existe).
+        cursor.execute("SELECT usuario FROM pendientes WHERE id = %s", (id_pendiente,))
+        fila = cursor.fetchone()
+        dueno = fila["usuario"] if fila else None
+
         cursor.execute(query, (id_pendiente,))
         conn.commit()
 
@@ -198,7 +216,7 @@ async def eliminar_pendiente(id_pendiente: int, usuario: str = Depends(requerir_
             f"🗑️ <b>Pendiente Eliminado</b>\n\n"
             f"• <b>ID:</b> {html.escape(str(id_pendiente))}\n"
         )
-        asyncio.create_task(send_telegram_alert(message))
+        _aviso_pendiente(dueno, message)
 
         return {"mensaje": "Pendiente eliminado exitosamente."}
 
@@ -239,7 +257,7 @@ async def tomar_pendiente(act: pendientes):
             f"• <b>Fecha Promesa:</b> {html.escape(str(act.fecha_promesa))}"
         )
         
-        asyncio.create_task(send_telegram_alert(message))
+        _aviso_pendiente(act.usuario, message)
 
         return {"mensaje": "Pendiente tomado exitosamente."}
 
@@ -265,7 +283,7 @@ async def terminar_pendiente(act: pendientes):
             f"• <b>Observaciones:</b> {html.escape(act.observaciones or '')}\n"
             f"• <b>Fecha Promesa:</b> {html.escape(str(act.fecha_promesa))}"
         )
-        asyncio.create_task(send_telegram_alert(message))
+        _aviso_pendiente(act.usuario, message)
 
         return {"mensaje": "Pendiente terminado exitosamente."}
 

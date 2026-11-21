@@ -1,10 +1,13 @@
 import mysql.connector, os, mov_reg, html, asyncio
 from pydantic import BaseModel, Field
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from typing import List
 from dotenv import load_dotenv
 from servicios.telegram.notificacion import send_telegram_alert
 from errores_db import detalle_error_db
+from permisos import usuario_autenticado
+from pendientes_tiempo_logica import ahora_mx
+import traspaso_reversion_logica as rev
 
 router =APIRouter(tags=["/traspasos"],responses={404: {"Mensaje":"No encontrado"}})
 load_dotenv()
@@ -26,6 +29,41 @@ class LoteTraspaso(BaseModel):
     usuario: str = Field(min_length=1)
     movimientos: List[traspaso] = Field(min_length=1)
     #almacen: str
+
+
+class RevertirModel(BaseModel):
+    motivo: str | None = Field(default=None, max_length=500)
+
+
+# Registro de reversiones: una fila por traspaso revertido (UNIQUE evita revertir dos veces).
+SQL_TABLA_REVERSIONES = """
+    CREATE TABLE IF NOT EXISTS traspasos_reversiones (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        stock_actual_id INT NOT NULL,
+        sku VARCHAR(100) NOT NULL,
+        cantidad INT NOT NULL,
+        almacen VARCHAR(150) NULL,
+        usuario_original VARCHAR(100) NULL,
+        fecha_original DATETIME NULL,
+        usuario VARCHAR(100) NOT NULL,
+        fecha DATETIME NOT NULL,
+        motivo VARCHAR(500) NULL,
+        UNIQUE KEY uq_trev_stock_actual (stock_actual_id),
+        INDEX idx_trev_fecha (fecha)
+    )
+"""
+
+
+def crear_tabla_reversiones():
+    """Crea traspasos_reversiones si falta (se llama en el lifespan)."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(SQL_TABLA_REVERSIONES)
+        conn.commit()
+    finally:
+        cursor.close()
+        conn.close()
 
 
 def _validar_lote(lote: LoteTraspaso):
@@ -158,7 +196,11 @@ async def consulta_traspasos():
     connection = get_db_connection()
     cursor = connection.cursor(dictionary=True)
 
-    sql = ("SELECT sku, cantidad, almacen, fecha_registro FROM stock_actual ORDER BY fecha_registro DESC LIMIT 100")
+    # `ahora` es el reloj de la BD (el mismo que escribe fecha_registro): no se mezcla con la hora de Python.
+    sql = ("SELECT s.id, s.sku, s.cantidad, s.almacen, s.usuario, s.fecha_registro, "
+           "(r.id IS NOT NULL) AS revertido, NOW() AS ahora "
+           "FROM stock_actual s LEFT JOIN traspasos_reversiones r ON r.stock_actual_id = s.id "
+           "ORDER BY s.fecha_registro DESC, s.id DESC LIMIT 100")
 
     try:
         cursor.execute(sql)
@@ -166,9 +208,17 @@ async def consulta_traspasos():
 
         if not tras:
             raise HTTPException(status_code=404, detail="No se han encontrado registro de traspasos")
-        
-        return tras
-    
+
+        dias = rev.dias_reversion()
+        salida = []
+        for t in tras:
+            ahora = t.pop("ahora", None)
+            t["revertido"] = bool(t.get("revertido"))
+            t["revertible"] = rev.es_revertible(t.get("almacen"), t.get("cantidad"), t.get("fecha_registro"),
+                                                ahora, t["revertido"], dias)
+            salida.append(t)
+        return salida
+
     except mysql.connector.Error as err:
         raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
     
@@ -268,3 +318,130 @@ async def traspaso_multiple_clean(lote: LoteTraspaso):
     finally:
         cursor.close()
         connection.close()
+
+# ---- Reversión de traspasos (Traspaso FULL = baja, y Clean) ----
+
+@router.post("/traspasos/{traspaso_id}/revertir")
+async def revertir_traspaso(traspaso_id: int, datos: RevertirModel | None = None,
+                            usuario: str = Depends(usuario_autenticado)):
+    """Revierte un traspaso (una fila de stock_actual): devuelve las piezas a bodega.
+
+    Cualquier sesión puede hacerlo; el usuario sale del token. Solo `BAJA` y `CLEAN`, dentro de
+    TRASPASO_REVERSION_DIAS (15) según el reloj de la BD; fuera de plazo, ya revertido o no
+    revertible → 409. No se borra nada: queda el registro en traspasos_reversiones y una fila
+    compensatoria (REV-BAJA / REV-CLEAN) en stock_actual. Una sola transacción con la fila del
+    movimiento y la del producto bloqueadas.
+    """
+    motivo = ((datos.motivo if datos else None) or "").strip() or None
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(
+            "SELECT id, sku, cantidad, almacen, usuario, fecha_registro, NOW() AS ahora "
+            "FROM stock_actual WHERE id = %s FOR UPDATE", (traspaso_id,))
+        mov = cursor.fetchone()
+        if not mov:
+            raise HTTPException(status_code=404, detail="Traspaso no encontrado")
+
+        plan = rev.plan_reversion(mov["almacen"], mov["cantidad"])
+        if plan is None:
+            raise HTTPException(status_code=409, detail=(
+                "Este movimiento no se puede revertir (solo bajas a FULL y traspasos a Clean; "
+                "las reversiones no se revierten)"))
+        dias = rev.dias_reversion()
+        if not rev.dentro_de_plazo(mov["fecha_registro"], mov["ahora"], dias):
+            raise HTTPException(status_code=409, detail=f"Solo se pueden revertir traspasos de los últimos {dias} días")
+
+        cursor.execute("SELECT id FROM traspasos_reversiones WHERE stock_actual_id = %s", (traspaso_id,))
+        if cursor.fetchone():
+            raise HTTPException(status_code=409, detail="Este traspaso ya fue revertido")
+
+        cursor.execute("SELECT stock_bodega, stock_clean, eliminado FROM productos WHERE sku = %s FOR UPDATE",
+                       (mov["sku"],))
+        prod = cursor.fetchone()
+        if not prod:
+            raise HTTPException(status_code=404, detail=f"El SKU {mov['sku']} no existe")
+        if prod["eliminado"]:
+            raise HTTPException(status_code=409, detail=f"El SKU {mov['sku']} está eliminado; pide a gerencia que lo restaure antes de revertir")
+
+        if plan["restar_clean"]:
+            cursor.execute(
+                "UPDATE productos SET stock_bodega = COALESCE(stock_bodega, 0) + %s, "
+                "stock_clean = COALESCE(stock_clean, 0) - %s WHERE sku = %s AND COALESCE(stock_clean, 0) >= %s",
+                (plan["sumar_bodega"], plan["restar_clean"], mov["sku"], plan["restar_clean"]))
+            if cursor.rowcount == 0:
+                raise HTTPException(status_code=409, detail=(
+                    f"No se puede revertir: Clean ya no tiene {plan['piezas']} piezas de {mov['sku']} "
+                    f"(disponible: {prod['stock_clean'] or 0})"))
+        else:
+            cursor.execute(
+                "UPDATE productos SET stock_bodega = COALESCE(stock_bodega, 0) + %s WHERE sku = %s",
+                (plan["sumar_bodega"], mov["sku"]))
+
+        try:
+            cursor.execute(
+                "INSERT INTO traspasos_reversiones "
+                "(stock_actual_id, sku, cantidad, almacen, usuario_original, fecha_original, usuario, fecha, motivo) "
+                "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                (traspaso_id, mov["sku"], plan["piezas"], plan["tipo"], mov["usuario"], mov["fecha_registro"],
+                 usuario, ahora_mx(), motivo))
+        except mysql.connector.Error as err:
+            if getattr(err, "errno", None) == 1062:   # UNIQUE: otra reversión ganó la carrera
+                raise HTTPException(status_code=409, detail="Este traspaso ya fue revertido")
+            raise
+        _insert_stock_actual(cursor, mov["sku"], plan["cantidad_rev"], usuario, plan["almacen_rev"])
+        conn.commit()
+
+        destino = "Clean" if plan["tipo"] == "CLEAN" else "FULL (baja)"
+        try:
+            mov_reg.registrar_movimiento(
+                usuario,
+                f"Revirtió traspaso #{traspaso_id} a {destino}: {mov['sku']} x{plan['piezas']} "
+                f"(hecho por {mov['usuario'] or 'desconocido'})" + (f". Motivo: {motivo}" if motivo else ""),
+                "Traspasos")
+        except Exception as err:
+            print(f"Traspaso revertido, pero falló la bitácora: {err}")
+
+        mensaje = (
+            f"↩️ <b>Reversión de Traspaso</b>\n\n"
+            f"• <b>Usuario:</b> {html.escape(usuario)}\n"
+            f"• <b>Traspaso:</b> #{traspaso_id} a {destino}\n"
+            f"• <b>SKU:</b> {html.escape(str(mov['sku']))}, Cantidad: {plan['piezas']}\n"
+            + (f"• <b>Motivo:</b> {html.escape(motivo)}\n" if motivo else ""))
+        asyncio.create_task(send_telegram_alert(mensaje))
+
+        return {"mensaje": "Traspaso revertido", "id": traspaso_id, "sku": mov["sku"],
+                "cantidad": plan["piezas"], "tipo": plan["tipo"]}
+    except HTTPException:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    except mysql.connector.Error as err:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.get("/traspasos/reversiones")
+async def traspasos_reversiones():
+    """Registro de reversiones (las 200 más recientes): quién revirtió, cuándo y qué traspaso era."""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(
+            "SELECT id, stock_actual_id, sku, cantidad, almacen, usuario_original, fecha_original, "
+            "usuario, fecha, motivo FROM traspasos_reversiones ORDER BY fecha DESC, id DESC LIMIT 200")
+        filas = cursor.fetchall()
+        return {"total": len(filas), "registros": filas}
+    except mysql.connector.Error as err:
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
+    finally:
+        cursor.close()
+        conn.close()

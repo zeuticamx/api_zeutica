@@ -5,7 +5,8 @@ import os, html, asyncio
 import mysql.connector
 import mov_reg
 import compras_ubicacion_logica as ubic
-from permisos import usuario_autenticado
+from permisos import usuario_autenticado, requerir_gerencia
+from pendientes_tiempo_logica import ahora_mx
 from servicios.telegram.notificacion import send_telegram_alert
 from errores_db import detalle_error_db
 
@@ -27,7 +28,30 @@ COLUMNAS_UBICACION = {
     "sin_ubicacion": "TINYINT(1) NOT NULL DEFAULT 0",
     "fecha_ubicada": "DATETIME NULL",
     "ubicada_por": "VARCHAR(100) NULL",
+    # Piezas enviadas a venta directa (sin pasar por bodega); el detalle vive en compras_venta_directa.
+    "cantidad_venta_directa": "INT NOT NULL DEFAULT 0",
 }
+
+# Una fila por cada envío de piezas de una compra a venta directa (anulable por gerencia, no se borra).
+SQL_TABLA_VENTA_DIRECTA = """
+    CREATE TABLE IF NOT EXISTS compras_venta_directa (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        compra_id INT NOT NULL,
+        sku VARCHAR(100) NOT NULL,
+        cantidad INT NOT NULL,
+        cliente_id INT NOT NULL,
+        cliente VARCHAR(255) NOT NULL,
+        referencia VARCHAR(255) NULL,
+        nota VARCHAR(500) NULL,
+        usuario VARCHAR(100) NOT NULL,
+        fecha DATETIME NOT NULL,
+        anulada TINYINT(1) NOT NULL DEFAULT 0,
+        anulada_por VARCHAR(100) NULL,
+        fecha_anulada DATETIME NULL,
+        INDEX idx_cvd_compra (compra_id),
+        INDEX idx_cvd_fecha (fecha)
+    )
+"""
 
 
 def asegurar_columnas_ubicacion() -> dict:
@@ -50,6 +74,7 @@ def asegurar_columnas_ubicacion() -> dict:
         if "ubicada" in reporte["columnas_agregadas"]:
             cursor.execute("UPDATE compras SET ubicada = 1, cantidad_ubicada = stock_bodega, sin_ubicacion = 0")
             reporte["backfill"] = cursor.rowcount
+        cursor.execute(SQL_TABLA_VENTA_DIRECTA)
         conn.commit()
         return reporte
     finally:
@@ -61,6 +86,13 @@ class UbicarCompraModel(BaseModel):
     warehouse_id: str = Field(min_length=1)
     cantidad: int = Field(gt=0)
     cama: int = Field(default=0, ge=0)
+
+
+class VentaDirectaModel(BaseModel):
+    cantidad: int = Field(gt=0)                      # piezas
+    cliente_id: int = Field(gt=0)                    # del catálogo de clientes activos
+    referencia: str | None = Field(default=None, max_length=255)
+    nota: str | None = Field(default=None, max_length=500)
 
 
 class compraPromedio(BaseModel):
@@ -268,6 +300,12 @@ async def obtener_compras():
 
 # ---- Compras por ubicar ----
 
+# Lectura con candado de la compra: la comparten ubicar, venta directa y anular.
+SQL_COMPRA_BLOQUEADA = (
+    "SELECT id, sku, stock_bodega, cantidad_ubicada, cantidad_venta_directa, ubicada, sin_ubicacion "
+    "FROM compras WHERE id = %s FOR UPDATE"
+)
+
 @router.get("/compras/por-ubicar")
 async def compras_por_ubicar():
     """Compras que aún no tienen todas sus piezas repartidas en tarjetas, agrupadas por factura."""
@@ -275,7 +313,7 @@ async def compras_por_ubicar():
     cursor = conn.cursor(dictionary=True)
     try:
         cursor.execute("""
-            SELECT id, sku, nombre, stock_bodega AS cantidad, cantidad_ubicada,
+            SELECT id, sku, nombre, stock_bodega AS cantidad, cantidad_ubicada, cantidad_venta_directa,
                    num_factura, proveedor, fecha_registro
             FROM compras WHERE COALESCE(ubicada, 0) = 0
             ORDER BY fecha_registro DESC, id DESC
@@ -301,15 +339,15 @@ async def ubicar_compra(compra_id: int, datos: UbicarCompraModel, usuario: str =
     cursor = conn.cursor(dictionary=True)
     try:
         cursor.execute(
-            "SELECT id, sku, stock_bodega, cantidad_ubicada, ubicada FROM compras WHERE id = %s FOR UPDATE",
-            (compra_id,))
+            SQL_COMPRA_BLOQUEADA, (compra_id,))
         compra = cursor.fetchone()
         if not compra:
             raise HTTPException(status_code=404, detail="Compra no encontrada")
         if compra["ubicada"]:
             raise HTTPException(status_code=409, detail="Esta compra ya está ubicada")
 
-        error = ubic.validar_cantidad(datos.cantidad, compra["stock_bodega"], compra["cantidad_ubicada"])
+        vd = compra["cantidad_venta_directa"]
+        error = ubic.validar_cantidad(datos.cantidad, compra["stock_bodega"], compra["cantidad_ubicada"], vd)
         if error:
             raise HTTPException(status_code=422, detail=error)
 
@@ -324,7 +362,7 @@ async def ubicar_compra(compra_id: int, datos: UbicarCompraModel, usuario: str =
         if error:
             raise HTTPException(status_code=422, detail=error)
 
-        completa = ubic.queda_ubicada(compra["stock_bodega"], compra["cantidad_ubicada"], datos.cantidad)
+        completa = ubic.queda_ubicada(compra["stock_bodega"], compra["cantidad_ubicada"], datos.cantidad, vd)
         # Si ya hay tarjeta de este SKU en la celda se suma; si no, se crea.
         cursor.execute(
             "SELECT id, cantidad FROM stock_ubicacion WHERE sku = %s "
@@ -366,7 +404,7 @@ async def ubicar_compra(compra_id: int, datos: UbicarCompraModel, usuario: str =
             "multiplo": mult,
             "tarjeta_id": tarjeta_id,
             "tarjeta_nueva": not tarjeta,
-            "pendiente": ubic.pendiente(compra["stock_bodega"], compra["cantidad_ubicada"] + datos.cantidad),
+            "pendiente": ubic.pendiente(compra["stock_bodega"], compra["cantidad_ubicada"] + datos.cantidad, vd),
             "ubicada": completa,
         }
     except mysql.connector.Error as err:
@@ -402,6 +440,155 @@ async def compra_sin_ubicacion(compra_id: int, usuario: str = Depends(usuario_au
             print(f"Compra marcada, pero falló la bitácora: {err}")
 
         return {"mensaje": "Compra marcada sin ubicación", "id": compra_id}
+    except mysql.connector.Error as err:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
+    finally:
+        cursor.close()
+        conn.close()
+
+
+# ---- Venta directa (mercancía comprada para mandarse directo a un cliente, sin tarjeta de ubicación) ----
+
+def _texto_o_none(valor: str | None) -> str | None:
+    valor = (valor or "").strip()
+    return valor or None
+
+
+@router.post("/compras/{compra_id}/venta-directa")
+async def compra_venta_directa(compra_id: int, datos: VentaDirectaModel,
+                               usuario: str = Depends(usuario_autenticado)):
+    """Envía `cantidad` piezas de la compra a venta directa a un cliente del catálogo.
+
+    No crea tarjeta en stock_ubicacion ni toca `productos` (decidido: la venta al cliente se
+    registra normalmente y descuenta el stock). Deja un registro en compras_venta_directa y suma
+    `cantidad_venta_directa`; la compra queda resuelta cuando ubicada + venta directa = comprado.
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(SQL_COMPRA_BLOQUEADA, (compra_id,))
+        compra = cursor.fetchone()
+        if not compra:
+            raise HTTPException(status_code=404, detail="Compra no encontrada")
+        if compra["ubicada"]:
+            raise HTTPException(status_code=409, detail="Esta compra ya está resuelta (ubicada, sin ubicación o en venta directa)")
+
+        vd = compra["cantidad_venta_directa"]
+        error = ubic.validar_cantidad(datos.cantidad, compra["stock_bodega"], compra["cantidad_ubicada"], vd)
+        if error:
+            raise HTTPException(status_code=422, detail=error)
+
+        cursor.execute("SELECT id, nombre FROM clientes WHERE id = %s AND eliminado = 0", (datos.cliente_id,))
+        cliente = cursor.fetchone()
+        if not cliente:
+            raise HTTPException(status_code=422, detail="El cliente no existe en el catálogo (o está eliminado)")
+
+        completa = ubic.queda_ubicada(compra["stock_bodega"], compra["cantidad_ubicada"], datos.cantidad, vd)
+        cursor.execute(
+            "INSERT INTO compras_venta_directa "
+            "(compra_id, sku, cantidad, cliente_id, cliente, referencia, nota, usuario, fecha) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (compra_id, compra["sku"], datos.cantidad, cliente["id"], cliente["nombre"],
+             _texto_o_none(datos.referencia), _texto_o_none(datos.nota), usuario, ahora_mx()))
+        registro_id = getattr(cursor, "lastrowid", None)
+        cursor.execute(
+            "UPDATE compras SET cantidad_venta_directa = cantidad_venta_directa + %s, ubicada = %s, "
+            "fecha_ubicada = IF(%s = 1, NOW(), fecha_ubicada), ubicada_por = IF(%s = 1, %s, ubicada_por) WHERE id = %s",
+            (datos.cantidad, int(completa), int(completa), int(completa), usuario, compra_id))
+        conn.commit()
+
+        try:
+            mov_reg.registrar_movimiento(
+                usuario,
+                f"Envió a venta directa {datos.cantidad} pzas de '{compra['sku']}' (compra #{compra_id}) "
+                f"al cliente '{cliente['nombre']}'",
+                "Compras")
+        except Exception as err:
+            print(f"Venta directa registrada, pero falló la bitácora: {err}")
+
+        return {
+            "mensaje": "Enviado a venta directa",
+            "id": compra_id,
+            "registro_id": registro_id,
+            "sku": compra["sku"],
+            "cantidad": datos.cantidad,
+            "cliente": cliente["nombre"],
+            "pendiente": ubic.pendiente(compra["stock_bodega"], compra["cantidad_ubicada"], vd + datos.cantidad),
+            "ubicada": completa,
+        }
+    except mysql.connector.Error as err:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.get("/compras/venta-directa")
+async def compras_venta_directa():
+    """Últimos envíos a venta directa vigentes (no anulados), del más reciente al más antiguo."""
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(
+            "SELECT id, compra_id, sku, cantidad, cliente_id, cliente, referencia, nota, usuario, fecha "
+            "FROM compras_venta_directa WHERE anulada = 0 ORDER BY fecha DESC, id DESC LIMIT 200")
+        filas = cursor.fetchall()
+        return {"total": len(filas), "registros": filas}
+    except mysql.connector.Error as err:
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))
+    finally:
+        cursor.close()
+        conn.close()
+
+
+@router.delete("/compras/venta-directa/{registro_id}")
+async def anular_venta_directa(registro_id: int, usuario: str = Depends(requerir_gerencia)):
+    """Anula un envío a venta directa (solo gerencia): el registro se conserva marcado como anulado
+    y las piezas vuelven a estar pendientes de la compra, que reaparece en «por ubicar».
+
+    409 si ya estaba anulado o si la compra se cerró como «sin ubicación» (reabrirla haría
+    reaparecer piezas que alguien declaró sin ubicación).
+    """
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    try:
+        cursor.execute(
+            "SELECT id, compra_id, sku, cantidad, cliente, anulada FROM compras_venta_directa "
+            "WHERE id = %s FOR UPDATE", (registro_id,))
+        registro = cursor.fetchone()
+        if not registro:
+            raise HTTPException(status_code=404, detail="Registro de venta directa no encontrado")
+        if registro["anulada"]:
+            raise HTTPException(status_code=409, detail="Este envío a venta directa ya estaba anulado")
+
+        cursor.execute(SQL_COMPRA_BLOQUEADA, (registro["compra_id"],))
+        compra = cursor.fetchone()
+        if compra and compra["sin_ubicacion"]:
+            raise HTTPException(status_code=409,
+                                detail="La compra se cerró como «sin ubicación»; no se puede anular este envío")
+
+        cursor.execute(
+            "UPDATE compras_venta_directa SET anulada = 1, anulada_por = %s, fecha_anulada = %s WHERE id = %s",
+            (usuario, ahora_mx(), registro_id))
+        if compra:
+            cursor.execute(
+                "UPDATE compras SET cantidad_venta_directa = GREATEST(cantidad_venta_directa - %s, 0), "
+                "ubicada = 0, fecha_ubicada = NULL, ubicada_por = NULL WHERE id = %s",
+                (registro["cantidad"], registro["compra_id"]))
+        conn.commit()
+
+        try:
+            mov_reg.registrar_movimiento(
+                usuario,
+                f"Anuló la venta directa #{registro_id}: {registro['cantidad']} pzas de '{registro['sku']}' "
+                f"(compra #{registro['compra_id']}) para '{registro['cliente']}'",
+                "Compras")
+        except Exception as err:
+            print(f"Venta directa anulada, pero falló la bitácora: {err}")
+
+        return {"mensaje": "Venta directa anulada", "id": registro_id, "compra_id": registro["compra_id"]}
     except mysql.connector.Error as err:
         conn.rollback()
         raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error de base de datos"))

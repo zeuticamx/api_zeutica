@@ -132,6 +132,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"❌ No se pudieron asegurar las columnas de ubicación de compras: {e}")
 
+    # Registro de reversiones de traspasos (Traspaso FULL / Clean).
+    try:
+        traspaso.crear_tabla_reversiones()
+    except Exception as e:
+        print(f"❌ No se pudo crear la tabla de reversiones de traspasos: {e}")
+
     # Borrado lógico de SKUs (productos.eliminado, fecha_eliminado, eliminado_por).
     try:
         from routers.productos import asegurar_columnas_eliminado
