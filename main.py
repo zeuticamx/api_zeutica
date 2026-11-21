@@ -69,6 +69,13 @@ async def lifespan(app: FastAPI):
     # Tablas de envios Skydropx: guardan el estatus que manda el webhook.
     skydropx_envios.crear_tablas_skydropx()
 
+    # Cronómetro de pendientes (inicio_atencion, fin_atencion, intercambiado…). Las consultas de la cola
+    # ya leen estas columnas: si falla, avisar fuerte.
+    try:
+        pendientes.asegurar_columnas_tiempos()
+    except Exception as e:
+        print(f"❌ No se pudieron asegurar las columnas de tiempos de pendientes: {e}")
+
     # Columnas del borrado lógico de gastos (eliminado, eliminado_por, fecha_eliminado)
     try:
         gastos.asegurar_columnas_eliminado()

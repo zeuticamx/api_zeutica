@@ -10,6 +10,7 @@ import mov_reg
 from permisos import requerir_gerencia, usuario_autenticado, es_gerencia
 from errores_db import detalle_error_db
 from servicios.telegram.notificacion import send_telegram_alert
+import pendientes_tiempo_logica as tiempo
 
 router =APIRouter(tags=["/pendientes"],responses={404: {"Mensaje":"No encontrado"}})
 load_dotenv()
@@ -22,6 +23,32 @@ def get_db_connection():
         password=os.getenv("DB_PASSWORD"),
         database=os.getenv("DB_NAME")
     )
+
+
+# Cronómetro de tareas (solo usuarios de pendientes_tiempo_logica.USUARIOS_CRONOMETRO) y revisión de gerencia.
+COLUMNAS_TIEMPO = {
+    "inicio_atencion": "DATETIME NULL",
+    "fin_atencion": "DATETIME NULL",
+    "intercambiado": "TINYINT(1) NOT NULL DEFAULT 0",
+    "intercambiado_por": "VARCHAR(100) NULL",
+    "fecha_intercambiado": "DATETIME NULL",
+}
+
+
+def asegurar_columnas_tiempos():
+    """Agrega a `pendientes` las columnas del cronómetro si faltan (se llama en el lifespan)."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'pendientes'")
+        existentes = {str(fila[0]).lower() for fila in cursor.fetchall()}
+        for columna, definicion in COLUMNAS_TIEMPO.items():
+            if columna not in existentes:
+                cursor.execute(f"ALTER TABLE pendientes ADD COLUMN {columna} {definicion}")
+        conn.commit()
+    finally:
+        cursor.close()
+        conn.close()
 
 @router.get("/pendientes-registro")
 async def pendientes(estado: str):
@@ -39,8 +66,9 @@ async def pendientes(estado: str):
 
     try:
         cursor.execute(query, (estado,))
-        res = cursor.fetchall()        
-        return res
+        res = cursor.fetchall()
+        # Las columnas del cronómetro se ven en la sección «Tiempos»; no ensucian las tablas del registro.
+        return [{k: v for k, v in fila.items() if k not in COLUMNAS_TIEMPO} for fila in res]
 
     except mysql.connector.Error as err:
         print(f"Error DB pendientes: {err}")
@@ -115,7 +143,13 @@ async def actualizar_pendiente(id_pendiente: int, registro: registro):
 
     try:
         cursor.execute(query, (registro.usuario, registro.actividad, registro.prioridad, registro.estado, registro.observaciones, registro.fecha_promesa, id_pendiente))
-        conn.commit()        
+        # Cierre por esta vía (Monitor Gerencia): si la tarea tenía cronómetro abierto, se sella el fin.
+        if str(registro.estado or "").strip().lower() in ("terminado", "completado"):
+            cursor.execute(
+                "UPDATE pendientes SET fin_atencion = %s WHERE id = %s AND inicio_atencion IS NOT NULL AND fin_atencion IS NULL",
+                (tiempo.ahora_mx(), id_pendiente),
+            )
+        conn.commit()
 
         mov_reg.registrar_movimiento(registro.usuario, "actualizar", f"Actividad: {registro.actividad}, Prioridad: {registro.prioridad}, Estado: {registro.estado}, Observaciones: {registro.observaciones}, Fecha Promesa: {registro.fecha_promesa}")
 
@@ -252,7 +286,7 @@ async def terminar_pendiente(act: pendientes):
 #   terminar= -> 'terminado'; si tiene recurrencia, clona la siguiente instancia (oculta hasta su fecha)
 PRIORIDADES = ("alta", "media", "baja")
 RECURRENCIAS = ("diaria", "semanal", "quincenal", "mensual")
-_CAMPOS = "id, fecha, usuario, actividad, prioridad, estado, observaciones, fecha_promesa, recurrencia, fecha_visible, plantilla_id"
+_CAMPOS = "id, fecha, usuario, actividad, prioridad, estado, observaciones, fecha_promesa, recurrencia, fecha_visible, plantilla_id, inicio_atencion, fin_atencion"
 _VISIBLE = "(fecha_visible IS NULL OR fecha_visible <= CURDATE())"
 
 
@@ -279,7 +313,7 @@ def _iso(valor):
 
 def pendiente_json(fila: dict) -> dict:
     """Fila de MySQL -> el JSON que consume el panel (mismos nombres que api_java)."""
-    return {
+    json = {
         "id": fila["id"],
         "fecha": _iso(fila.get("fecha")),
         "usuario": fila.get("usuario"),
@@ -293,6 +327,12 @@ def pendiente_json(fila: dict) -> dict:
         "fechaVisible": _iso(fila.get("fecha_visible")),
         "plantillaId": fila.get("plantilla_id"),
     }
+    # Solo las tareas cronometradas que siguen abiertas traen el tiempo corrido (calculado aquí, en hora
+    # de México: el navegador solo suma desde que recibe la respuesta).
+    inicio = fila.get("inicio_atencion")
+    if isinstance(inicio, datetime) and fila.get("fin_atencion") is None:
+        json["segundosTranscurridos"] = tiempo.duracion_segundos(inicio, None, tiempo.ahora_mx())
+    return json
 
 
 def clave_orden(p: dict):
@@ -434,6 +474,84 @@ async def cola_estadisticas(usuario: Optional[str] = None, actual: str = Depends
     return resp
 
 
+def _no_auto_revision(usuario: str):
+    if tiempo.se_cronometra(usuario):
+        raise HTTPException(status_code=403, detail="No puedes revisar tus propios tiempos")
+
+
+@router.get("/pendientes/tiempos")
+async def tiempos(incluir_intercambiadas: bool = False, actual: str = Depends(requerir_gerencia)):
+    """Tiempos de las tareas cronometradas (solo gerencia). El KPI suma las TERMINADAS sin intercambiar
+    (siempre, aunque `incluir_intercambiadas` las muestre en la tabla); las abiertas se cuentan aparte.
+    Un usuario cronometrado (fparra también está en USUARIOS_GERENCIA) no revisa sus propios tiempos: 403."""
+    _no_auto_revision(actual)
+    usuarios = list(tiempo.USUARIOS_CRONOMETRO)
+    marcas = ", ".join(["%s"] * len(usuarios))
+    conn, cursor = _conexion()
+    try:
+        cursor.execute(
+            "SELECT id, usuario, actividad, prioridad, estado, inicio_atencion, fin_atencion, intercambiado,"
+            " intercambiado_por, fecha_intercambiado FROM pendientes"
+            f" WHERE LOWER(usuario) IN ({marcas}) AND inicio_atencion IS NOT NULL ORDER BY inicio_atencion DESC",
+            tuple(usuarios),
+        )
+        ahora = tiempo.ahora_mx()
+        todas = [tiempo.tarea_tiempo_json(f, ahora) for f in cursor.fetchall()]
+        visibles = todas if incluir_intercambiadas else [t for t in todas if not t["intercambiado"]]
+        return {"tareas": visibles, "kpi": tiempo.resumen_kpi(todas), "usuarios": usuarios,
+                "ahora": ahora.strftime(tiempo.FORMATO)}
+    except mysql.connector.Error as err:
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error al consultar los tiempos"))
+    finally:
+        cursor.close()
+        conn.close()
+
+
+class IntercambioCambio(BaseModel):
+    valor: bool = True  # False = quitar la marca
+
+
+@router.post("/pendientes/{id_pendiente}/intercambiar")
+async def intercambiar(id_pendiente: int, datos: Optional[IntercambioCambio] = None, usuario: str = Depends(requerir_gerencia)):
+    """Gerencia marca como «Intercambiada» (revisada) una tarea cronometrada ya terminada, o quita la marca.
+    404 si no existe o no es una tarea cronometrada; 409 si sigue abierta o ya estaba en ese estado."""
+    _no_auto_revision(usuario)
+    valor = True if datos is None else datos.valor
+    conn, cursor = _conexion()
+    try:
+        cursor.execute(
+            "SELECT id, usuario, actividad, inicio_atencion, fin_atencion, intercambiado FROM pendientes WHERE id = %s FOR UPDATE",
+            (id_pendiente,),
+        )
+        fila = cursor.fetchone()
+        if not fila or not tiempo.se_cronometra(fila["usuario"]) or fila.get("inicio_atencion") is None:
+            conn.rollback()
+            raise HTTPException(status_code=404, detail="No encontrado")
+        if fila.get("fin_atencion") is None:
+            conn.rollback()
+            raise HTTPException(status_code=409, detail="La tarea sigue en curso")
+        if bool(fila.get("intercambiado")) == valor:
+            conn.rollback()
+            raise HTTPException(status_code=409, detail="La tarea ya estaba " + ("intercambiada" if valor else "sin intercambiar"))
+        cursor.execute(
+            "UPDATE pendientes SET intercambiado = %s, intercambiado_por = %s, fecha_intercambiado = %s WHERE id = %s",
+            (1 if valor else 0, usuario if valor else None, tiempo.ahora_mx() if valor else None, id_pendiente),
+        )
+        conn.commit()
+    except mysql.connector.Error as err:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error al marcar la tarea"))
+    finally:
+        cursor.close()
+        conn.close()
+    try:
+        mov_reg.registrar_movimiento(
+            usuario, "intercambiar" if valor else "desintercambiar", f"Pendiente {id_pendiente}: {fila.get('actividad')}")
+    except Exception as err:  # ya quedó guardado; la bitácora es secundaria
+        print(f"Pendiente #{id_pendiente} marcado, pero falló la bitácora: {err}")
+    return {"id": id_pendiente, "intercambiado": valor}
+
+
 @router.get("/pendientes/{id_pendiente}")
 async def cola_detalle(id_pendiente: int, actual: str = Depends(usuario_autenticado)):
     """Una tarea por id, en cualquier estado. Quien no es gerencia solo ve las suyas (404 si no)."""
@@ -527,9 +645,23 @@ def _atender(cursor, conn, id_pendiente: int, actual: str) -> dict:
     if not fila or not _mismo_usuario(fila["usuario"], actual) or _estado(fila) != "pendiente" or not fila["visible"]:
         conn.rollback()
         raise HTTPException(status_code=404, detail="No encontrado en cola")
+    cronometrada = tiempo.se_cronometra(actual)
+    if cronometrada:
+        # Con cronómetro solo puede haber UNA tarea abierta (si no, los tiempos se traslapan).
+        cursor.execute(
+            "SELECT COUNT(*) AS n FROM pendientes WHERE LOWER(usuario) = LOWER(%s) AND LOWER(estado) = 'en proceso' AND id <> %s",
+            (actual, id_pendiente),
+        )
+        if int((cursor.fetchone() or {}).get("n") or 0) > 0:
+            conn.rollback()
+            raise HTTPException(status_code=409, detail="Termina tu tarea en proceso antes de tomar otra")
     cursor.execute("UPDATE pendientes SET estado = 'en proceso' WHERE id = %s", (id_pendiente,))
+    inicio = None
+    if cronometrada:
+        inicio = tiempo.ahora_mx()
+        cursor.execute("UPDATE pendientes SET inicio_atencion = %s, fin_atencion = NULL WHERE id = %s", (inicio, id_pendiente))
     conn.commit()
-    return pendiente_json(dict(fila, estado="en proceso"))
+    return pendiente_json(dict(fila, estado="en proceso", **({"inicio_atencion": inicio, "fin_atencion": None} if inicio else {})))
 
 
 @router.post("/pendientes/atender")
@@ -580,6 +712,8 @@ async def cola_terminar(id_pendiente: int, actual: str = Depends(usuario_autenti
             conn.rollback()
             return {"terminado": True, "id": id_pendiente}
         cursor.execute("UPDATE pendientes SET estado = 'terminado' WHERE id = %s", (id_pendiente,))
+        if tiempo.se_cronometra(fila["usuario"]) and fila.get("inicio_atencion") is not None:
+            cursor.execute("UPDATE pendientes SET fin_atencion = %s WHERE id = %s AND fin_atencion IS NULL", (tiempo.ahora_mx(), id_pendiente))
         nueva_id = None
         if fila.get("recurrencia"):
             ancla = fila.get("fecha_promesa") or fila.get("fecha") or date.today()
