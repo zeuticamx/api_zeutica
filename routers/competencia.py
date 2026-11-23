@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field
 import competencia_logica as cl
 import competencia_service as svc
 from errores_db import detalle_error_db
-from permisos import es_gerencia, usuario_autenticado
+from permisos import es_gerencia, puede_ver_todo, usuario_autenticado
 
 router = APIRouter(tags=["/competencia"], responses={404: {"Mensaje": "No encontrado"}})
 
@@ -337,7 +337,7 @@ async def cupo(usuario: str = Depends(usuario_autenticado)):
 async def historial(usuario_filtro: Optional[str] = None, limite: int = 50, usuario: str = Depends(usuario_autenticado)):
     """Análisis anteriores: cada quien ve los suyos; gerencia ve todos (y puede filtrar por usuario)."""
     limite = max(1, min(limite, 200))
-    if es_gerencia(usuario):
+    if puede_ver_todo(usuario):
         objetivo = (usuario_filtro or "").strip() or None
     else:
         if usuario_filtro and usuario_filtro.strip().lower() != usuario.lower():
@@ -352,7 +352,7 @@ async def detalle(id_analisis: int, usuario: str = Depends(usuario_autenticado))
     fila = leer_analisis(id_analisis)
     if not fila:
         raise HTTPException(status_code=404, detail="Análisis no encontrado")
-    if fila["usuario"].lower() != usuario.lower() and not es_gerencia(usuario):
+    if fila["usuario"].lower() != usuario.lower() and not puede_ver_todo(usuario):
         raise HTTPException(status_code=403, detail="Ese análisis es de otra persona")
     return _fila_publica(fila, True)
 

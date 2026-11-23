@@ -244,10 +244,15 @@ def test_asegurar_columnas_es_idempotente(db):
 # ---------- permisos ----------
 
 def test_es_gerencia(monkeypatch):
-    monkeypatch.delenv("USUARIOS_GERENCIA", raising=False)
+    monkeypatch.setenv("USUARIOS_GERENCIA", "gerencia,fparra")
     assert permisos.es_gerencia("gerencia") and permisos.es_gerencia(" FParra ")
     assert not permisos.es_gerencia("ventas")
     assert not permisos.es_gerencia(None) and not permisos.es_gerencia("")
+
+
+def test_sin_variable_nadie_es_gerencia(monkeypatch):
+    monkeypatch.delenv("USUARIOS_GERENCIA", raising=False)
+    assert not permisos.es_gerencia("gerencia")
 
 
 def test_usuarios_gerencia_configurables_por_entorno(monkeypatch):

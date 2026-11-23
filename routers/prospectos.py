@@ -17,7 +17,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
 
 import mov_reg
-from permisos import es_gerencia, usuario_autenticado
+from permisos import es_gerencia, puede_ver_todo, usuario_autenticado
 from servicios.telegram.notificacion import send_telegram_alert
 from errores_db import detalle_error_db
 
@@ -87,10 +87,13 @@ def _fila(cursor, prospecto_id: int):
     return cursor.fetchone()
 
 
-def _autorizado(cursor, prospecto_id: int, usuario: str):
+def _autorizado(cursor, prospecto_id: int, usuario: str, lectura: bool = False):
+    """lectura=True (solo la ficha, GET): developer también ve prospectos ajenos; editar sigue siendo del dueño o gerencia."""
     fila = _fila(cursor, prospecto_id)
     if not fila:
         raise HTTPException(status_code=404, detail="Prospecto no encontrado")
+    if lectura and puede_ver_todo(usuario):
+        return fila
     if not es_gerencia(usuario) and str(fila.get("vendedor") or "").strip().lower() != str(usuario).strip().lower():
         raise HTTPException(status_code=403, detail="Este prospecto pertenece a otro vendedor")
     return fila
@@ -186,7 +189,7 @@ async def listar_prospectos(
         like = f"%{q.strip()}%"
         where.append("(nombre LIKE %s OR empresa LIKE %s OR contacto LIKE %s OR email LIKE %s OR CAST(telefono AS CHAR) LIKE %s)")
         params += [like] * 5
-    if es_gerencia(usuario):
+    if puede_ver_todo(usuario):
         if vendedor:
             where.append("vendedor = %s")
             params.append(vendedor)
@@ -217,7 +220,7 @@ async def ficha_prospecto(prospecto_id: int, usuario: str = Depends(usuario_aute
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
     try:
-        fila = _autorizado(cursor, prospecto_id, usuario)
+        fila = _autorizado(cursor, prospecto_id, usuario, lectura=True)
         cursor.execute(
             """SELECT id, vendedor, tipo, fecha, resultado, notas, proxima_accion, proxima_fecha
                FROM prospectos_seguimientos WHERE prospecto_id = %s AND eliminado = 0

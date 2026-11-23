@@ -15,10 +15,10 @@ from fastapi import FastAPI, HTTPException, Depends, status, Request
 from fastapi.responses import JSONResponse
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
-from permisos import usuario_autenticado, asegurar_columna_token_expira, token_horas, es_gerencia
+from permisos import usuario_autenticado, asegurar_columna_token_expira, asegurar_columna_nivel, nivel_usuario, token_horas, es_gerencia
 from routers import cotizacionesBack, productos, ventas, clientes, traspaso, gastos, compras, cleanest, cuentas_pendientes,\
       abonos, estadisticas, inventario, empleados, notificaciones, cuentas_pagar, consulta_registros, pendientes, proveedores, genera_cotizacion, sofi_conversaciones, embarques, sofi_notificaciones, whatsapp_plantillas, skydropx
-from routers import crm, comisiones, prospectos, jobs, meli_webhook, meli_promos, anaqueles, reorden, landed_cost, mercado_ads, competencia, meli_stock_config
+from routers import crm, comisiones, prospectos, jobs, meli_webhook, meli_promos, anaqueles, reorden, landed_cost, mercado_ads, competencia, meli_stock_config, usuarios
 import mysql.connector
 import skydropx_envios
 from fastapi.middleware.cors import CORSMiddleware
@@ -62,6 +62,12 @@ async def lifespan(app: FastAPI):
         asegurar_columna_token_expira()
     except Exception as e:
         print(f"❌ No se pudo asegurar usuarios.token_expira (las sesiones no validarán): {e}")
+
+    # Nivel de usuario (usuarios.nivel). Si falla, todos se comportan como «ventas» (gerencia sale del .env).
+    try:
+        asegurar_columna_nivel()
+    except Exception as e:
+        print(f"❌ No se pudo asegurar usuarios.nivel (developer no se reconocerá): {e}")
 
     # Crea tablas del modulo de embarques si no existen (MySQL, sin FK)
     embarques.crear_tablas_embarques()
@@ -407,6 +413,8 @@ app.include_router(abonos.router, dependencies=[Depends(obtener_usuario_actual)]
 app.include_router(estadisticas.router, dependencies=[Depends(obtener_usuario_actual)])
 app.include_router(inventario.router, dependencies=[Depends(obtener_usuario_actual)])
 app.include_router(empleados.router, dependencies=[Depends(obtener_usuario_actual)])
+# Alta de cuentas y niveles: el router valida sesión/gerencia por endpoint.
+app.include_router(usuarios.router, dependencies=[Depends(obtener_usuario_actual)])
 app.include_router(notificaciones.router, dependencies=[Depends(obtener_usuario_actual)])
 app.include_router(cuentas_pagar.router, dependencies=[Depends(obtener_usuario_actual)])
 app.include_router(consulta_registros.router, dependencies=[Depends(obtener_usuario_actual)])
@@ -552,7 +560,8 @@ async def login(request: Request, datos: LoginSchema):
             "access_token": nuevo_token,
             "token_type": "bearer",
             "expira_en_horas": token_horas(),
-            "id_usuario": resultado['id']
+            "id_usuario": resultado['id'],
+            "nivel": nivel_usuario(usuario)
         }
 
     except mysql.connector.Error as err:

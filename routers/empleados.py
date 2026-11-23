@@ -126,6 +126,8 @@ async def actualizar_empleado(request: Request):
 
     except mysql.connector.Error as err:
         # Si mandan un usuario que no existe, la clave foránea saltará aquí (Error 1452)
+        if err.errno == 1452:
+            raise HTTPException(status_code=400, detail=f"El usuario «{datos.usuario}» no existe en el sistema.")
         raise HTTPException(status_code=400, detail=detalle_error_db(err, "Error al actualizar la base de datos"))
 
     finally:
@@ -154,6 +156,15 @@ async def crear_empleado(datos: EmpleadoBase):
     )
 
     try:
+        # La FK exige que la cuenta ya exista en `usuarios`: se valida antes
+        # para dar un mensaje claro en vez del error 1452 de MySQL.
+        cursor.execute("SELECT 1 FROM usuarios WHERE nombre_usuario = %s", (datos.usuario,))
+        if cursor.fetchone() is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"El usuario «{datos.usuario}» no existe en el sistema. Crea primero la cuenta de acceso y luego liga al empleado.",
+            )
+
         cursor.execute(query, vals)
         conn.commit()
         # Guardo el id generado para regresárselo al cliente
@@ -161,7 +172,9 @@ async def crear_empleado(datos: EmpleadoBase):
         return {"status": "success", "message": "Empleado creado", "id": nuevo_id}
 
     except mysql.connector.Error as err:
-        # Error 1452 = FK fail (usuario no existe), 1062 = CURP/NSS duplicado
+        # Error 1452 = FK fail (carrera: el usuario desapareció), 1062 = CURP/NSS duplicado
+        if err.errno == 1452:
+            raise HTTPException(status_code=400, detail=f"El usuario «{datos.usuario}» no existe en el sistema.")
         raise HTTPException(status_code=400, detail=detalle_error_db(err, "Error al insertar empleado"))
 
     finally:

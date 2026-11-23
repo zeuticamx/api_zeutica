@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 from datetime import date, datetime, timedelta
 from dateutil.relativedelta import relativedelta
 import mov_reg
-from permisos import requerir_gerencia, usuario_autenticado, es_gerencia
+from permisos import requerir_gerencia, usuario_autenticado, es_gerencia, puede_ver_todo
 from errores_db import detalle_error_db
 from servicios.telegram.notificacion import send_telegram_alert
 import pendientes_tiempo_logica as tiempo
@@ -374,7 +374,7 @@ def _alcance(usuario_token: str, usuario_param: Optional[str]) -> Optional[str]:
     """Usuario cuyas tareas se consultan; None = todas (solo gerencia). Quien no es gerencia
     solo puede consultar las suyas, aunque mande otro ?usuario=."""
     pedido = (usuario_param or "").strip()
-    if es_gerencia(usuario_token):
+    if puede_ver_todo(usuario_token):  # lectura: gerencia y developer
         return pedido or None
     if pedido and not _mismo_usuario(pedido, usuario_token):
         raise HTTPException(status_code=403, detail="Solo puedes ver tus propios pendientes")
@@ -577,7 +577,7 @@ async def cola_detalle(id_pendiente: int, actual: str = Depends(usuario_autentic
     try:
         cursor.execute(f"SELECT {_CAMPOS} FROM pendientes WHERE id = %s", (id_pendiente,))
         fila = cursor.fetchone()
-        if not fila or not (es_gerencia(actual) or _mismo_usuario(fila["usuario"], actual)):
+        if not fila or not (puede_ver_todo(actual) or _mismo_usuario(fila["usuario"], actual)):
             raise HTTPException(status_code=404, detail="No encontrado")
         return pendiente_json(fila)
     except mysql.connector.Error as err:

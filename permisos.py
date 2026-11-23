@@ -1,15 +1,23 @@
 import os
 import mysql.connector
 from dotenv import load_dotenv
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
 load_dotenv()
 
-# Usuarios con nivel gerencia. Mismo criterio que GERENCIA_USERS en el panel
-# (shell.jsx); si se agrega uno, hay que agregarlo en ambos lados.
-# Se puede sobreescribir con la variable de entorno USUARIOS_GERENCIA ("a,b,c").
-_POR_DEFECTO = "gerencia,fparra"
+# Niveles de usuario:
+#   gerencia  -> lo definen los usuarios de la variable de entorno USUARIOS_GERENCIA ("a,b,c"); no hay
+#                lista en el código. Sin la variable, nadie es gerencia.
+#   developer -> ve todo (también las pantallas y GET exclusivos de gerencia) pero no cambia nada
+#                exclusivo de gerencia (cualquier método que no sea de lectura da 403).
+#   ventas    -> usuario normal (el que ya existía antes de los niveles).
+# developer y ventas se guardan en usuarios.nivel y los elige gerencia al crear la cuenta.
+NIVEL_GERENCIA = "gerencia"
+NIVEL_DEVELOPER = "developer"
+NIVEL_VENTAS = "ventas"
+NIVELES_ASIGNABLES = (NIVEL_VENTAS, NIVEL_DEVELOPER)
+METODOS_LECTURA = ("GET", "HEAD", "OPTIONS")
 
 security = HTTPBearer()
 
@@ -26,12 +34,43 @@ def token_horas() -> int:
 
 
 def usuarios_gerencia() -> set:
-    crudo = os.getenv("USUARIOS_GERENCIA") or _POR_DEFECTO
+    crudo = os.getenv("USUARIOS_GERENCIA") or ""
     return {u.strip().lower() for u in crudo.split(",") if u.strip()}
 
 
 def es_gerencia(usuario) -> bool:
     return bool(usuario) and str(usuario).strip().lower() in usuarios_gerencia()
+
+
+def nivel_usuario(usuario) -> str:
+    """Nivel efectivo: gerencia (por entorno), si no el guardado en usuarios.nivel; ventas si no hay dato
+    o la consulta falla (el nivel más bajo: fallar cerrado)."""
+    if es_gerencia(usuario):
+        return NIVEL_GERENCIA
+    if not usuario:
+        return NIVEL_VENTAS
+    conn = cursor = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute("SELECT nivel FROM usuarios WHERE nombre_usuario = %s", (usuario,))
+        fila = cursor.fetchone()
+        nivel = str(fila[0]).strip().lower() if fila and fila[0] else NIVEL_VENTAS
+        return nivel if nivel in NIVELES_ASIGNABLES else NIVEL_VENTAS
+    except Exception as err:
+        print(f"Error leyendo nivel de {usuario}: {err}")
+        return NIVEL_VENTAS
+    finally:
+        if cursor:
+            cursor.close()
+        if conn:
+            conn.close()
+
+
+def puede_ver_todo(usuario) -> bool:
+    """Lectura de los datos de todo el equipo (listas «solo lo mío»): gerencia o developer.
+    SOLO para decidir qué se LEE; los permisos de escritura siguen por es_gerencia."""
+    return es_gerencia(usuario) or nivel_usuario(usuario) == NIVEL_DEVELOPER
 
 
 def get_db_connection():
@@ -55,6 +94,23 @@ def asegurar_columna_token_expira():
         )
         if (cursor.fetchone() or [0])[0] == 0:
             cursor.execute("ALTER TABLE usuarios ADD COLUMN token_expira DATETIME NULL")
+            conn.commit()
+    finally:
+        cursor.close()
+        conn.close()
+
+
+def asegurar_columna_nivel():
+    """Agrega usuarios.nivel ('ventas' por defecto, así los usuarios actuales quedan como ventas)."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "SELECT COUNT(*) FROM information_schema.COLUMNS"
+            " WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'usuarios' AND COLUMN_NAME = 'nivel'"
+        )
+        if (cursor.fetchone() or [0])[0] == 0:
+            cursor.execute("ALTER TABLE usuarios ADD COLUMN nivel VARCHAR(20) NOT NULL DEFAULT 'ventas'")
             conn.commit()
     finally:
         cursor.close()
@@ -86,9 +142,12 @@ def usuario_autenticado(credentials: HTTPAuthorizationCredentials = Depends(secu
         conn.close()
 
 
-def requerir_gerencia(usuario: str = Depends(usuario_autenticado)) -> str:
+def requerir_gerencia(request: Request, usuario: str = Depends(usuario_autenticado)) -> str:
     """Dependencia para endpoints exclusivos de gerencia: 403 si el token no es de gerencia.
+    Excepción: un developer puede LEER (GET/HEAD/OPTIONS), nunca cambiar.
     El usuario sale del token, nunca de un parámetro que mande el cliente."""
-    if not es_gerencia(usuario):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Se requiere nivel de gerencia para esta acción")
-    return usuario
+    if es_gerencia(usuario):
+        return usuario
+    if request.method in METODOS_LECTURA and nivel_usuario(usuario) == NIVEL_DEVELOPER:
+        return usuario
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Se requiere nivel de gerencia para esta acción")

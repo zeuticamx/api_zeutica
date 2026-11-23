@@ -23,7 +23,7 @@ from pydantic import BaseModel, Field, field_validator
 import crm_exportacion
 import crm_metricas
 import mov_reg
-from permisos import es_gerencia, requerir_gerencia, usuario_autenticado
+from permisos import es_gerencia, puede_ver_todo, requerir_gerencia, usuario_autenticado
 from servicios.telegram.notificacion import send_telegram_alert
 from errores_db import detalle_error_db
 
@@ -270,11 +270,12 @@ def _fila_cliente(cursor, cliente_id: int):
     return cursor.fetchone()
 
 
-def _cliente_autorizado(cursor, cliente_id: int, usuario: str):
+def _cliente_autorizado(cursor, cliente_id: int, usuario: str, lectura: bool = False):
+    """lectura=True (solo GET): developer también ve clientes de otros; escribir sigue siendo del dueño o gerencia."""
     fila = _fila_cliente(cursor, cliente_id)
     if not fila:
         raise HTTPException(status_code=404, detail="Cliente no encontrado")
-    if not puede_gestionar(usuario, vendedor_efectivo(fila)):
+    if not (puede_gestionar(usuario, vendedor_efectivo(fila)) or (lectura and puede_ver_todo(usuario))):
         raise HTTPException(status_code=403, detail="Este cliente pertenece a la cartera de otro vendedor")
     return fila
 
@@ -422,7 +423,7 @@ async def crm_clientes(
     if etapa:
         where.append("cc.etapa = %s")
         params.append(etapa)
-    if es_gerencia(usuario):
+    if puede_ver_todo(usuario):
         if vendedor:
             where.append(f"{_DUENO_SQL} = %s")
             params.append(vendedor)
@@ -466,7 +467,7 @@ async def crm_cliente_ficha(cliente_id: int, usuario: str = Depends(usuario_aute
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
     try:
-        fila = _cliente_autorizado(cursor, cliente_id, usuario)
+        fila = _cliente_autorizado(cursor, cliente_id, usuario, lectura=True)
         cursor.execute(
             """SELECT id, vendedor, tipo, fecha, resultado, notas, proxima_accion, proxima_fecha, seguimiento_cerrado
                FROM crm_interacciones WHERE cliente_id = %s AND eliminado = 0
@@ -643,14 +644,14 @@ async def crm_bitacora(
     cursor = conn.cursor(dictionary=True)
     try:
         if cliente_id is not None:
-            _cliente_autorizado(cursor, cliente_id, usuario)
+            _cliente_autorizado(cursor, cliente_id, usuario, lectura=True)
             where.append("i.cliente_id = %s")
             params.append(cliente_id)
-        elif not es_gerencia(usuario):
+        elif not puede_ver_todo(usuario):
             where.append("i.vendedor = %s")
             params.append(usuario)
 
-        if vendedor and es_gerencia(usuario):
+        if vendedor and puede_ver_todo(usuario):
             frag, vals = _en("i.vendedor", vendedor)
             where.append(frag)
             params += vals
@@ -830,7 +831,7 @@ async def crm_seguimientos(vendedor: Optional[str] = None, usuario: str = Depend
     dueno = "COALESCE(cc.vendedor, i.vendedor)"
     where = ["i.eliminado = 0", "i.seguimiento_cerrado = 0", "i.proxima_fecha IS NOT NULL", "i.proxima_fecha <= %s"]
     params = [hoy + timedelta(days=DIAS_PROXIMOS)]
-    if not es_gerencia(usuario):
+    if not puede_ver_todo(usuario):
         where.append(f"{dueno} = %s")
         params.append(usuario)
     elif vendedor:
@@ -921,7 +922,7 @@ async def crm_agenda(
     try:
         where = ["e.eliminado = 0", "e.inicio >= %s", "e.inicio < %s"]
         params: list = [ini_dt, fin_dt]
-        if not es_gerencia(usuario):
+        if not puede_ver_todo(usuario):
             where.append("e.vendedor = %s")
             params.append(usuario)
         elif vendedor:
@@ -949,7 +950,7 @@ async def crm_agenda(
             w_seg = ["i.eliminado = 0", "i.seguimiento_cerrado = 0",
                      "i.proxima_fecha IS NOT NULL", "i.proxima_fecha >= %s", "i.proxima_fecha <= %s"]
             p_seg: list = [desde, hasta]
-            if not es_gerencia(usuario):
+            if not puede_ver_todo(usuario):
                 w_seg.append(f"{dueno} = %s")
                 p_seg.append(usuario)
             elif vendedor:

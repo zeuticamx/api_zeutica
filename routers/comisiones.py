@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 import comisiones_calc as calc
 import mov_reg
-from permisos import es_gerencia, requerir_gerencia, usuario_autenticado
+from permisos import es_gerencia, puede_ver_todo, requerir_gerencia, usuario_autenticado
 from routers import crm
 from errores_db import detalle_error_db
 
@@ -245,7 +245,7 @@ class MatrizVendedor(BaseModel):
 @router.get("/comisiones/config")
 async def comisiones_config(vendedor: Optional[str] = None, usuario: str = Depends(usuario_autenticado)):
     """Matriz de porcentajes. Gerencia: todas (o de un vendedor). Vendedor: solo la suya."""
-    if not es_gerencia(usuario):
+    if not puede_ver_todo(usuario):
         vendedor = usuario
     where, params = "", []
     if vendedor:
@@ -308,7 +308,7 @@ async def comisiones_reporte(
 ):
     """Ventas cerradas con desglose por SKU, base sin IVA y comisión. Un vendedor solo ve las suyas."""
     desde, hasta = crm.validar_rango(desde, hasta)
-    if not es_gerencia(usuario):
+    if not puede_ver_todo(usuario):
         vendedor = usuario
     where, params = ["cv.fecha_venta >= %s", "cv.fecha_venta <= %s"], [desde, hasta]
     if vendedor:
