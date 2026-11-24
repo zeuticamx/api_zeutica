@@ -64,8 +64,8 @@ def cargar_reorden() -> dict:
 # ---------- Orquestador ----------
 
 async def run_job(dry_run: bool | None = None, motivo: str = "manual", telegram: bool = True) -> dict:
-    import mov_reg
-    import reorden_logica as rl
+    from servicios import mov_reg
+    from servicios import reorden_logica as rl
     from servicios.telegram.notificacion import send_telegram_alert
     resumen = {"motivo": motivo, "inicio": datetime.now(CDMX).isoformat()}
     try:

@@ -17,11 +17,11 @@ from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-import comisiones_calc as calc
-import mov_reg
-from permisos import es_gerencia, puede_ver_todo, requerir_gerencia, usuario_autenticado
+from servicios import comisiones_calc as calc
+from servicios import mov_reg
+from servicios.permisos import es_gerencia, puede_ver_todo, requerir_gerencia, usuario_autenticado
 from routers import crm
-from errores_db import detalle_error_db
+from servicios.errores_db import detalle_error_db
 
 router = APIRouter(tags=["/comisiones"], responses={404: {"Mensaje": "No encontrado"}})
 load_dotenv()

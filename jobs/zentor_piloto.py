@@ -54,9 +54,9 @@ def build_mensaje(pausados: list, omitidos: list, fallidos: list, dry_run: bool 
 # ---------- Orquestador ----------
 
 async def run_job(dry_run: bool | None = None, motivo: str = "manual", telegram: bool = True) -> dict:
-    import mov_reg
-    import zentor_logica as zl
-    import zentor_service
+    from servicios import mov_reg
+    from servicios import zentor_logica as zl
+    from servicios import zentor_service
     from routers import mercado_ads
     from servicios.telegram.notificacion import send_telegram_alert
     resumen = {"motivo": motivo, "inicio": datetime.now(CDMX).isoformat()}

@@ -9,10 +9,10 @@ from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, field_validator
 
-import mov_reg
-from permisos import requerir_gerencia
+from servicios import mov_reg
+from servicios.permisos import requerir_gerencia
 from routers import landed_cost
-from banxico_service import BanxicoServiceError, obtener_tipo_cambio_dia, obtener_tipo_cambio_fecha_especifica
+from servicios.banxico_service import BanxicoServiceError, obtener_tipo_cambio_dia, obtener_tipo_cambio_fecha_especifica
 
 router = APIRouter(tags=["/embarques"], responses={404: {"Mensaje": "No encontrado"}})
 load_dotenv()

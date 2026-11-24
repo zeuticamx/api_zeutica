@@ -5,7 +5,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import main
-import permisos
+from servicios import permisos
 
 
 def _hash(plano):

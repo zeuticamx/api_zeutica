@@ -4,7 +4,7 @@ from datetime import date, datetime
 
 import openpyxl
 
-import crm_exportacion as ex
+from servicios import crm_exportacion as ex
 
 RESULTADOS = {"contesto": "Contestó"}
 

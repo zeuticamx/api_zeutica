@@ -1,13 +1,14 @@
-import mysql.connector, os, mov_reg, html, asyncio
+import mysql.connector, os, html, asyncio
+from servicios import mov_reg
 from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends, HTTPException
 from typing import List
 from dotenv import load_dotenv
 from servicios.telegram.notificacion import send_telegram_alert
-from errores_db import detalle_error_db
-from permisos import usuario_autenticado
-from pendientes_tiempo_logica import ahora_mx
-import traspaso_reversion_logica as rev
+from servicios.errores_db import detalle_error_db
+from servicios.permisos import usuario_autenticado
+from servicios.pendientes_tiempo_logica import ahora_mx
+from servicios import traspaso_reversion_logica as rev
 
 router =APIRouter(tags=["/traspasos"],responses={404: {"Mensaje":"No encontrado"}})
 load_dotenv()

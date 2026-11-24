@@ -5,7 +5,7 @@ from datetime import date, timedelta
 import os
 from dotenv import load_dotenv
 from servicios.telegram.notificacion import send_telegram_alert
-from errores_db import detalle_error_db
+from servicios.errores_db import detalle_error_db
 
 router = APIRouter(tags=["/cuentas-pagar"], responses={404: {"Mensaje": "No encontrado"}})
 load_dotenv()

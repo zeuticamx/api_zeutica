@@ -100,7 +100,7 @@ def cargar_ventas_por_facturar() -> list:
 # ---------- Orquestador ----------
 
 async def run_job(dry_run: bool | None = None, motivo: str = "manual", telegram: bool = True) -> dict:
-    import mov_reg
+    from servicios import mov_reg
     from servicios.telegram.notificacion import send_telegram_alert
     resumen = {"motivo": motivo, "inicio": datetime.now(CDMX).isoformat()}
     try:
@@ -112,7 +112,7 @@ async def run_job(dry_run: bool | None = None, motivo: str = "manual", telegram:
                 if telegram:
                     await send_telegram_alert(chunk)
             try:
-                import notificaciones_service
+                from servicios import notificaciones_service
                 await notificaciones_service.crear_y_notificar_todos(
                     "Ventas por facturar",
                     f"{len(filas)} venta(s) requieren factura y aún no se relaciona.", "warn")

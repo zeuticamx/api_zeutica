@@ -1,5 +1,5 @@
 # Asegura que la raiz de api_zeutica1 este en sys.path para poder
-# importar "routers.embarques", "mov_reg" y "banxico_service" sin
+# importar "routers.embarques", "servicios.mov_reg" y "servicios.banxico_service" sin
 # depender de como se invoque pytest (pytest vs python -m pytest).
 import os
 import sys

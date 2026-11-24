@@ -1,4 +1,5 @@
-import mysql.connector, os, mov_reg, html, asyncio
+import mysql.connector, os, html, asyncio
+from servicios import mov_reg
 from datetime import date, timedelta
 from typing import List, Optional
 from fastapi import APIRouter, Depends, HTTPException
@@ -7,8 +8,8 @@ from pydantic import BaseModel, Field, field_validator
 from dotenv import load_dotenv
 from servicios.telegram.notificacion import send_telegram_alert
 from routers import comisiones
-from errores_db import detalle_error_db
-from permisos import usuario_autenticado
+from servicios.errores_db import detalle_error_db
+from servicios.permisos import usuario_autenticado
 
 router =APIRouter(tags=["/ventas"],responses={404: {"Mensaje":"No encontrado"}})
 load_dotenv() # Carga de credenciales .env
@@ -285,7 +286,7 @@ async def registrar_venta(venta: VentaSchema):
         print(f"Venta {venta.id_venta} registrada, pero falló la bitácora: {err}")
 
     try:
-        import notificaciones_service
+        from servicios import notificaciones_service
         await notificaciones_service.crear_y_notificar_todos(
             f"Venta {venta.id_venta} registrada",
             f"{venta.sku} ×{venta.stock_bodega} (${total_operacion:,.2f}) por {venta.usuario}.",
@@ -456,7 +457,7 @@ async def registrar_venta_completa(venta: VentaCompletaSchema):
             print(f"Venta {venta.id_venta} registrada, pero falló la bitácora de '{item.sku}': {err}")
 
     try:
-        import notificaciones_service
+        from servicios import notificaciones_service
         await notificaciones_service.crear_y_notificar_todos(
             f"Venta {venta.id_venta} registrada",
             f"{len(venta.items)} partida(s), ${total_operacion:,.2f} por {venta.usuario}.",

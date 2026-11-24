@@ -7,8 +7,8 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import HTTPException
 
-import skydropx_envios
-import skydropx_service
+from servicios import skydropx_envios
+from servicios import skydropx_service
 from routers import skydropx as router
 
 # ---------------------------------------------------------------------------

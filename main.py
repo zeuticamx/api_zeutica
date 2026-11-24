@@ -15,12 +15,12 @@ from fastapi import FastAPI, HTTPException, Depends, status, Request
 from fastapi.responses import JSONResponse
 from slowapi import Limiter
 from slowapi.errors import RateLimitExceeded
-from permisos import usuario_autenticado, asegurar_columna_token_expira, asegurar_columna_nivel, nivel_usuario, token_horas, es_gerencia
+from servicios.permisos import usuario_autenticado, asegurar_columna_token_expira, asegurar_columna_nivel, nivel_usuario, token_horas, es_gerencia
 from routers import cotizacionesBack, productos, ventas, clientes, traspaso, gastos, compras, cleanest, cuentas_pendientes,\
       abonos, estadisticas, inventario, empleados, notificaciones, cuentas_pagar, consulta_registros, pendientes, proveedores, genera_cotizacion, sofi_conversaciones, embarques, sofi_notificaciones, whatsapp_plantillas, skydropx
 from routers import crm, comisiones, prospectos, jobs, meli_webhook, meli_promos, anaqueles, reorden, landed_cost, mercado_ads, competencia, meli_stock_config, usuarios
 import mysql.connector
-import skydropx_envios
+from servicios import skydropx_envios
 from fastapi.middleware.cors import CORSMiddleware
 import os, secrets
 from dotenv import load_dotenv
@@ -97,6 +97,7 @@ async def lifespan(app: FastAPI):
     # Tablas del CRM (cartera, interacciones, historial de etapas)
     try:
         crm.crear_tablas_crm()
+        crm.asegurar_columnas_edicion()
     except Exception as e:
         print(f"❌ No se pudieron crear las tablas del CRM: {e}")
 
@@ -153,7 +154,7 @@ async def lifespan(app: FastAPI):
 
     # Cancelación de cotizaciones (cancelada, fecha_cancelada, cancelada_por, motivo_cancelacion).
     try:
-        import cotizacion_cancelacion
+        from servicios import cotizacion_cancelacion
         cotizacion_cancelacion.asegurar_columnas_cancelacion()
     except Exception as e:
         print(f"❌ No se pudieron asegurar las columnas de cancelación de cotizaciones: {e}")

@@ -5,13 +5,14 @@
 # planear_disposicion() es ESPEJO de planearDisposicion() en
 # panel_gerencia/src/anaqueles-logica.js: si cambia una regla, cambia en los dos.
 import os
-import mysql.connector, mov_reg
+import mysql.connector
+from servicios import mov_reg
 from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 from typing import Optional
-from permisos import usuario_autenticado
-from errores_db import detalle_error_db
+from servicios.permisos import usuario_autenticado
+from servicios.errores_db import detalle_error_db
 
 router = APIRouter(tags=["/anaqueles"], responses={404: {"Mensaje": "No encontrado"}})
 

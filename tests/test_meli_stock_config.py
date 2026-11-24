@@ -5,9 +5,9 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import mov_reg
+from servicios import mov_reg
 from jobs import meli_stock as job
-from permisos import usuario_autenticado
+from servicios.permisos import usuario_autenticado
 from routers import meli_stock_config as router_cfg
 
 

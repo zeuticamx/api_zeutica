@@ -2,11 +2,11 @@
 # La logica de Graph vive en whatsapp_service.py; aqui solo va el contrato HTTP.
 from typing import List, Optional
 
-import mov_reg
-import whatsapp_service
+from servicios import mov_reg
+from servicios import whatsapp_service
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
-from whatsapp_service import WhatsAppServiceError
+from servicios.whatsapp_service import WhatsAppServiceError
 
 router = APIRouter(tags=["whatsapp-plantillas"], responses={404: {"Mensaje": "No encontrado"}})
 

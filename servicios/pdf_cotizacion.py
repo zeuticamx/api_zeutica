@@ -25,7 +25,7 @@ GRIS = (230, 230, 230)      # gris claro para la fila TOTAL
 NEGRO = (0, 0, 0)
 BLANCO = (255, 255, 255)
 
-LOGO_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+LOGO_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                          "imagenes", "logo.png")
 
 EMPRESA_DOMICILIO = "Domicilio: Blvd De los Charros 1629 Belenes Norte Cp 45145, Zapopan, Jalisco."

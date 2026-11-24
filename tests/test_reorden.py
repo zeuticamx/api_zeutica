@@ -9,9 +9,9 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import reorden_logica as rl
+from servicios import reorden_logica as rl
 from jobs import reorden_compras as job
-from permisos import usuario_autenticado
+from servicios.permisos import usuario_autenticado
 from routers import reorden
 
 CDMX = ZoneInfo("America/Mexico_City")
@@ -195,7 +195,7 @@ class FakeDB:
 def db(monkeypatch):
     base = FakeDB()
     monkeypatch.setattr(reorden, "get_db_connection", lambda: base)
-    import mov_reg
+    from servicios import mov_reg
     monkeypatch.setattr(mov_reg, "registrar_movimiento", lambda *a, **k: None)
     return base
 
@@ -286,7 +286,7 @@ def test_trigger_semanal_lunes_9_cdmx():
 
 @pytest.fixture
 def avisos(monkeypatch):
-    import mov_reg
+    from servicios import mov_reg
     from routers import sofi_notificaciones
     from servicios.telegram import notificacion
     tg, ws = AsyncMock(), AsyncMock()

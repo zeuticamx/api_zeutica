@@ -485,7 +485,7 @@ def aplicar_ventas(agrupadas: list, dry_run: bool) -> dict:
 
 async def run_job(dry_run: bool | None = None, motivo: str = "manual", telegram: bool = True) -> dict:
     """Ejecuta el ciclo completo. Nunca truena sin dejar rastro en LAST_RUN."""
-    import mov_reg
+    from servicios import mov_reg
     from servicios.telegram.notificacion import send_telegram_alert
     dry = _dry_run_default() if dry_run is None else dry_run
     resumen = {"motivo": motivo, "dry_run": dry, "inicio": datetime.now(CDMX).isoformat()}
@@ -519,7 +519,7 @@ async def run_job(dry_run: bool | None = None, motivo: str = "manual", telegram:
             # Sin DRY_RUN el aviso refleja cambios reales; en simulación no se notifica.
             if not dry:
                 try:
-                    import notificaciones_service
+                    from servicios import notificaciones_service
                     await notificaciones_service.crear_y_notificar_todos(
                         "Ventas Amazon procesadas",
                         f"{stats['nuevas']} nuevas, {stats['descontadas']} descontadas, "

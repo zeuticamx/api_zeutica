@@ -6,7 +6,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import permisos
+from servicios import permisos
 from routers import prospectos
 
 

@@ -7,12 +7,13 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-import os, mov_reg
+import os
+from servicios import mov_reg
 from dotenv import load_dotenv
 from typing import Optional
 from servicios.telegram.notificacion import send_telegram_alert
-from permisos import usuario_autenticado, requerir_gerencia, es_gerencia
-from errores_db import detalle_error_db
+from servicios.permisos import usuario_autenticado, requerir_gerencia, es_gerencia
+from servicios.errores_db import detalle_error_db
 
 router =APIRouter(tags=["/productos"],responses={404: {"Mensaje":"No encontrado"}})
 

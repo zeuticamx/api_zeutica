@@ -11,14 +11,15 @@ from datetime import date
 from decimal import Decimal
 from typing import List, Optional
 
-import mysql.connector, mov_reg
+import mysql.connector
+from servicios import mov_reg
 from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-import landed_cost_logica as lc
-from errores_db import detalle_error_db
-from permisos import requerir_gerencia
+from servicios import landed_cost_logica as lc
+from servicios.errores_db import detalle_error_db
+from servicios.permisos import requerir_gerencia
 
 router = APIRouter(tags=["/landed-cost"], responses={404: {"Mensaje": "No encontrado"}})
 

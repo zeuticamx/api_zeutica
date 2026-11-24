@@ -24,7 +24,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-_SCHEMA_PATH = os.path.join(os.path.dirname(__file__), "sql", "skydropx_schema.sql")
+_SCHEMA_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "sql", "skydropx_schema.sql")
 
 
 def get_db_connection():

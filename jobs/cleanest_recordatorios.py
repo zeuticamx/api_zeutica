@@ -166,7 +166,7 @@ def marcar_avisadas(ordenes: list, hoy: date):
 # ---------- Orquestador ----------
 
 async def run_job(dry_run: bool | None = None, motivo: str = "manual", telegram: bool = True) -> dict:
-    import mov_reg
+    from servicios import mov_reg
     from servicios.telegram.notificacion import send_telegram_alert
     hoy = datetime.now(CDMX).date()
     resumen = {"motivo": motivo, "inicio": datetime.now(CDMX).isoformat()}
@@ -183,7 +183,7 @@ async def run_job(dry_run: bool | None = None, motivo: str = "manual", telegram:
                     await send_telegram_alert(chunk)
             marcar_avisadas(incluir, hoy)
             try:
-                import notificaciones_service
+                from servicios import notificaciones_service
                 await notificaciones_service.crear_y_notificar_todos(
                     "Órdenes Cleanest próximas a vencer",
                     f"{len(vencidas)} vencidas y {len(incluir)} próximas a vencer.",

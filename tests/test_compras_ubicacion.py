@@ -5,8 +5,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import compras_ubicacion_logica as logica
-from permisos import usuario_autenticado
+from servicios import compras_ubicacion_logica as logica
+from servicios.permisos import usuario_autenticado
 from routers import compras
 
 

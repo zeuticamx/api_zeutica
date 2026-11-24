@@ -5,7 +5,7 @@ import os
 from dotenv import load_dotenv
 import pandas as pd
 from sklearn.ensemble import RandomForestRegressor
-from errores_db import detalle_error_db
+from servicios.errores_db import detalle_error_db
 
 router =APIRouter(tags=["/estadisticas"],responses={404: {"Mensaje":"No encontrado"}})
 load_dotenv()

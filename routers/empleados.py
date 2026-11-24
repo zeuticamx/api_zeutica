@@ -4,7 +4,7 @@ from fastapi import APIRouter, HTTPException, Request
 from typing import Optional
 import os
 from dotenv import load_dotenv
-from errores_db import detalle_error_db
+from servicios.errores_db import detalle_error_db
 
 router =APIRouter(tags=["/empleados"],responses={404: {"Mensaje":"No encontrado"}})
 load_dotenv()

@@ -15,7 +15,7 @@ from typing import List, Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
-import notificaciones_service
+from servicios import notificaciones_service
 
 router = APIRouter(tags=["/creditos"], responses={404: {"Mensaje": "No encontrado"}})
 

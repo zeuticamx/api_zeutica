@@ -13,7 +13,7 @@ from typing import Optional
 
 import httpx
 
-import competencia_logica as cl
+from servicios import competencia_logica as cl
 
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 ANTHROPIC_VERSION = "2023-06-01"

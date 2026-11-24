@@ -3,12 +3,12 @@ from pydantic import BaseModel, Field
 from typing import List
 import os, html, asyncio
 import mysql.connector
-import mov_reg
-import compras_ubicacion_logica as ubic
-from permisos import usuario_autenticado, requerir_gerencia
-from pendientes_tiempo_logica import ahora_mx
+from servicios import mov_reg
+from servicios import compras_ubicacion_logica as ubic
+from servicios.permisos import usuario_autenticado, requerir_gerencia
+from servicios.pendientes_tiempo_logica import ahora_mx
 from servicios.telegram.notificacion import send_telegram_alert
-from errores_db import detalle_error_db
+from servicios.errores_db import detalle_error_db
 
 router = APIRouter(tags=["/compras"],responses={404: {"Mensaje":"No encontrado"}})
 

@@ -10,9 +10,9 @@ import mysql.connector
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
-import mov_reg
-from errores_db import detalle_error_db
-from permisos import (
+from servicios import mov_reg
+from servicios.errores_db import detalle_error_db
+from servicios.permisos import (
     get_db_connection, requerir_gerencia, usuario_autenticado, nivel_usuario,
     es_gerencia, NIVELES_ASIGNABLES, NIVEL_VENTAS, NIVEL_GERENCIA,
 )

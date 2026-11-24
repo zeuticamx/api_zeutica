@@ -8,8 +8,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import comisiones_calc as calc
-import permisos
+from servicios import comisiones_calc as calc
+from servicios import permisos
 from routers import comisiones, crm
 
 D = Decimal

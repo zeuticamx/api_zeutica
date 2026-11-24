@@ -2,7 +2,7 @@
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from permisos import usuario_autenticado
+from servicios.permisos import usuario_autenticado
 from routers import inventario
 from routers import productos
 

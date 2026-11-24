@@ -8,7 +8,7 @@ import openpyxl
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-import crm_metricas
+from servicios import crm_metricas
 
 ETIQUETAS_TIPO = {"llamada": "Llamada", "correo": "Correo", "whatsapp": "WhatsApp", "reunion": "Reunión"}
 

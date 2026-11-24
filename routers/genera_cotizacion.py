@@ -6,11 +6,11 @@ from fastapi.responses import Response
 import os
 from dotenv import load_dotenv
 from typing import Optional, List
-import mov_reg
-from cotizacion_service import generar_nuevo_codigo, guardar_cotizacion_db
-from pdf_cotizacion import generar_pdf_cotizacion
+from servicios import mov_reg
+from servicios.cotizacion_service import generar_nuevo_codigo, guardar_cotizacion_db
+from servicios.pdf_cotizacion import generar_pdf_cotizacion
 from servicios.telegram.notificacion import send_telegram_alert
-from errores_db import detalle_error_db
+from servicios.errores_db import detalle_error_db
 
 # Obtiene la ruta del directorio padre (la raíz)
 #sys.path.append(os.path.abspath(os.path.join(os.path.dirname(mov_reg.__file__), '..')))

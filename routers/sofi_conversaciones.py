@@ -1,6 +1,6 @@
 from fastapi import APIRouter, HTTPException, status, Request, Depends
 import asyncpg
-from errores_db import detalle_error_db
+from servicios.errores_db import detalle_error_db
 
 router = APIRouter(tags=["sofi-conversaciones"], responses={404: {"Mensaje": "No encontrado"}})
 

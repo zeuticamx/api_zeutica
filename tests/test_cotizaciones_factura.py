@@ -65,7 +65,7 @@ def test_vincular_factura_avisa_solo_con_factura(monkeypatch):
     monkeypatch.setattr(cotizacionesBack, "get_db_connection", lambda: base)
     monkeypatch.setattr(cotizacionesBack, "send_telegram_alert", tg)
     monkeypatch.setattr(cotizacionesBack.mov_reg, "registrar_movimiento", lambda *a, **k: None)
-    import notificaciones_service
+    from servicios import notificaciones_service
     monkeypatch.setattr(notificaciones_service, "crear_y_notificar_todos", notif)
 
     with _app() as client:
@@ -89,7 +89,7 @@ def _ventas_actualizadas(monkeypatch, vinculos, facturas_previas=None):
     monkeypatch.setattr(cotizacionesBack, "get_db_connection", lambda: base)
     monkeypatch.setattr(cotizacionesBack, "send_telegram_alert", AsyncMock())
     monkeypatch.setattr(cotizacionesBack.mov_reg, "registrar_movimiento", lambda *a, **k: None)
-    import notificaciones_service
+    from servicios import notificaciones_service
     monkeypatch.setattr(notificaciones_service, "crear_y_notificar_todos", AsyncMock())
     with _app() as client:
         r = client.post("/relacionFactura", json=vinculos)

@@ -15,7 +15,7 @@ import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
 
-import skydropx_service
+from servicios import skydropx_service
 from routers import skydropx as router
 
 # El fixture autouse sustituye reservar_envio en el modulo; las pruebas del candado usan el real.
@@ -275,7 +275,7 @@ async def test_crear_envio_el_mensaje_del_tope_dice_el_maximo(monkeypatch):
 
 def _conexion_falsa(monkeypatch, respuestas, ejecutadas, bloqueo=1):
     """Conexion falsa para reservar_envio: devuelve `respuestas` en orden a cada fetchone()."""
-    import skydropx_envios
+    from servicios import skydropx_envios
 
     cola = [(bloqueo,), *respuestas]
 
@@ -303,7 +303,7 @@ def _conexion_falsa(monkeypatch, respuestas, ejecutadas, bloqueo=1):
 
 
 def test_reservar_envio_cede_el_siguiente_numero_y_suelta_el_candado(monkeypatch):
-    import skydropx_envios
+    from servicios import skydropx_envios
 
     ejecutadas = []
     conn = _conexion_falsa(monkeypatch, [(2,), (4,)], ejecutadas)  # 2 activos, el mayor es el 4
@@ -317,7 +317,7 @@ def test_reservar_envio_cede_el_siguiente_numero_y_suelta_el_candado(monkeypatch
 
 
 def test_reservar_envio_con_diez_activos_lanza_limite_y_suelta_el_candado(monkeypatch):
-    import skydropx_envios
+    from servicios import skydropx_envios
 
     ejecutadas = []
     conn = _conexion_falsa(monkeypatch, [(10,)], ejecutadas)
@@ -330,7 +330,7 @@ def test_reservar_envio_con_diez_activos_lanza_limite_y_suelta_el_candado(monkey
 
 
 def test_reservar_envio_cuenta_solo_activos_y_numera_sobre_todos(monkeypatch):
-    import skydropx_envios
+    from servicios import skydropx_envios
 
     ejecutadas = []
     _conexion_falsa(monkeypatch, [(1,), (7,)], ejecutadas)
@@ -344,7 +344,7 @@ def test_reservar_envio_cuenta_solo_activos_y_numera_sobre_todos(monkeypatch):
 
 
 def test_reservar_envio_con_candado_ocupado_lanza_compra_en_curso(monkeypatch):
-    import skydropx_envios
+    from servicios import skydropx_envios
 
     ejecutadas = []
     conn = _conexion_falsa(monkeypatch, [], ejecutadas, bloqueo=0)
@@ -357,7 +357,7 @@ def test_reservar_envio_con_candado_ocupado_lanza_compra_en_curso(monkeypatch):
 
 
 def test_reservar_envio_sin_codigo_no_toca_la_bd(monkeypatch):
-    import skydropx_envios
+    from servicios import skydropx_envios
 
     def no_debe_conectar():
         raise AssertionError("sin codigo no hay a que limitar")
@@ -483,7 +483,7 @@ async def test_refrescar_envios_tolera_error_de_skydropx(monkeypatch):
 
 
 def test_completar_guias_solo_llena_huecos_y_no_toca_la_cotizacion(monkeypatch):
-    import skydropx_envios
+    from servicios import skydropx_envios
 
     ejecutadas = []
 

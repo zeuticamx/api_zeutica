@@ -11,10 +11,10 @@ from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
-import mov_reg
-from errores_db import detalle_error_db
+from servicios import mov_reg
+from servicios.errores_db import detalle_error_db
 from jobs import meli_stock
-from permisos import usuario_autenticado
+from servicios.permisos import usuario_autenticado
 
 router = APIRouter(tags=["/meli-stock"], responses={404: {"Mensaje": "No encontrado"}})
 

@@ -7,8 +7,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import traspaso_reversion_logica as logica
-from permisos import usuario_autenticado
+from servicios import traspaso_reversion_logica as logica
+from servicios.permisos import usuario_autenticado
 from routers import traspaso
 
 AHORA = datetime(2026, 11, 22, 12, 0, 0)

@@ -169,7 +169,7 @@ async def _sincronizar_con_cooldown(motivo: str):
 
 
 async def _procesar(topic: str | None, rid: str | None, firma_ok: bool):
-    import notificaciones_service
+    from servicios import notificaciones_service
     from jobs import meli_ventas
     if not topic or not rid:
         print("Webhook MeLi: evento sin topic/id, se ignora")

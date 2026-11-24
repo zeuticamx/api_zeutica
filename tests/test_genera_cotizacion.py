@@ -9,7 +9,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import pdf_cotizacion
+from servicios import pdf_cotizacion
 from routers import genera_cotizacion
 
 

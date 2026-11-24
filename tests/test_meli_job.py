@@ -91,7 +91,7 @@ def test_procesar_cancelacion_marca_estatus_y_regresa_stock(monkeypatch):
             pass
 
     monkeypatch.setattr(job, "get_db_connection", lambda: DB())
-    import mov_reg
+    from servicios import mov_reg
     monkeypatch.setattr(mov_reg, "registrar_movimiento", lambda *a, **k: None)
     r = job.procesar_cancelacion("777", "test")
     assert r == {"order_id": "777", "regresadas": 1, "piezas": 2}

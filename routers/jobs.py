@@ -14,7 +14,7 @@ from pydantic import BaseModel, Field
 from typing import Optional
 from zoneinfo import ZoneInfo
 
-from permisos import usuario_autenticado, requerir_gerencia
+from servicios.permisos import usuario_autenticado, requerir_gerencia
 
 router = APIRouter(tags=["/jobs"], responses={404: {"Mensaje": "No encontrado"}})
 

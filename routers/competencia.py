@@ -14,15 +14,16 @@ from datetime import datetime, timedelta
 from typing import Literal, Optional
 from zoneinfo import ZoneInfo
 
-import mysql.connector, mov_reg
+import mysql.connector
+from servicios import mov_reg
 from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
-import competencia_logica as cl
-import competencia_service as svc
-from errores_db import detalle_error_db
-from permisos import es_gerencia, puede_ver_todo, usuario_autenticado
+from servicios import competencia_logica as cl
+from servicios import competencia_service as svc
+from servicios.errores_db import detalle_error_db
+from servicios.permisos import es_gerencia, puede_ver_todo, usuario_autenticado
 
 router = APIRouter(tags=["/competencia"], responses={404: {"Mensaje": "No encontrado"}})
 

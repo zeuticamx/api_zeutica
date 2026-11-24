@@ -3,7 +3,7 @@ import pytest
 from fastapi import HTTPException
 from starlette.requests import Request
 
-import permisos
+from servicios import permisos
 from routers import usuarios
 
 

@@ -22,7 +22,7 @@ pytest -v
 ## Módulo Comisiones (`/comisiones`)
 
 Router: [`routers/comisiones.py`](routers/comisiones.py) · Cálculo puro:
-[`comisiones_calc.py`](comisiones_calc.py) · Esquema:
+[`comisiones_calc.py`](servicios/comisiones_calc.py) · Esquema:
 [`sql/comisiones_schema.sql`](sql/comisiones_schema.sql) (se crea solo en el lifespan).
 
 - **Fórmula** por partida: `(precio con IVA × cantidad ÷ 1.16) × porcentaje ÷ 100`, en `Decimal`,
@@ -63,7 +63,7 @@ sistema y no se toca al desmarcar una etapa.
 ### Costeo de importación (Landed Cost)
 
 Router: [`routers/landed_cost.py`](routers/landed_cost.py) · lógica pura:
-[`landed_cost_logica.py`](landed_cost_logica.py) · pruebas:
+[`landed_cost_logica.py`](servicios/landed_cost_logica.py) · pruebas:
 [`tests/test_landed_cost.py`](tests/test_landed_cost.py). Reproduce la plantilla
 «PRECIOS PRODUCTOS FELIPE FER.xlsx» (`Tabla6102`). **Todo es solo gerencia.**
 
@@ -101,7 +101,7 @@ Router: [`routers/landed_cost.py`](routers/landed_cost.py) · lógica pura:
 
 El tipo de cambio se obtiene de la serie **SF43718** (FIX USD/MXN) del
 Sistema de Información Económica de Banxico, vía
-[`banxico_service.py`](banxico_service.py). Hay dos consultas distintas,
+[`banxico_service.py`](servicios/banxico_service.py). Hay dos consultas distintas,
 cada una con su propia caché para no golpear la API en cada request:
 
 - `obtener_tipo_cambio_dia()` — tipo de cambio de hoy, cache diaria en

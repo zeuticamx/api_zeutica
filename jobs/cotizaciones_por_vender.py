@@ -66,7 +66,7 @@ def cargar_cotizaciones_por_vender() -> list:
 # ---------- Orquestador ----------
 
 async def run_job(dry_run: bool | None = None, motivo: str = "manual", telegram: bool = True) -> dict:
-    import mov_reg
+    from servicios import mov_reg
     from servicios.telegram.notificacion import send_telegram_alert
     resumen = {"motivo": motivo, "inicio": datetime.now(CDMX).isoformat()}
     try:
@@ -77,7 +77,7 @@ async def run_job(dry_run: bool | None = None, motivo: str = "manual", telegram:
                 if telegram:
                     await send_telegram_alert(chunk)
             try:
-                import notificaciones_service
+                from servicios import notificaciones_service
                 await notificaciones_service.crear_y_notificar_todos(
                     "Cotizaciones por vender",
                     f"{len(filas)} cotizaciones con factura y sin venta registrada.", "warn")

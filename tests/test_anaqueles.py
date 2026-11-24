@@ -4,7 +4,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from permisos import usuario_autenticado
+from servicios.permisos import usuario_autenticado
 from routers import anaqueles, productos
 
 
@@ -438,7 +438,7 @@ def test_mover_no_falla_si_la_bitacora_truena_despues_del_commit(client, db, mon
 
 
 def test_registrar_edicion_crea_la_tabla_antes_de_insertar(monkeypatch):
-    import mov_reg
+    from servicios import mov_reg
     consultas = []
 
     class Cur:

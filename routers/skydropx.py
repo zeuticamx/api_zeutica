@@ -9,15 +9,15 @@ from typing import Any, Dict, List, Literal, Optional
 
 import asyncio
 
-import cotizacion_cancelacion
-import mov_reg
-import notificaciones_service
-import skydropx_envios
-import skydropx_service
+from servicios import cotizacion_cancelacion
+from servicios import mov_reg
+from servicios import notificaciones_service
+from servicios import skydropx_envios
+from servicios import skydropx_service
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
-from permisos import requerir_gerencia
+from servicios.permisos import requerir_gerencia
 from pydantic import BaseModel, ConfigDict, Field
-from skydropx_service import SkydropxServiceError
+from servicios.skydropx_service import SkydropxServiceError
 
 router = APIRouter(tags=["skydropx-envios"], responses={404: {"Mensaje": "No encontrado"}})
 

@@ -9,10 +9,10 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import zentor_logica as zl
-import zentor_service
+from servicios import zentor_logica as zl
+from servicios import zentor_service
 from jobs import zentor_piloto as job
-from permisos import usuario_autenticado
+from servicios.permisos import usuario_autenticado
 from routers import mercado_ads
 
 CDMX = ZoneInfo("America/Mexico_City")
@@ -244,7 +244,7 @@ class FakeDB:
 def db(monkeypatch):
     base = FakeDB()
     monkeypatch.setattr(mercado_ads, "get_db_connection", lambda: base)
-    import mov_reg
+    from servicios import mov_reg
     bitacora = []
     monkeypatch.setattr(mov_reg, "registrar_movimiento", lambda *a, **k: bitacora.append(a))
     base.bitacora = bitacora
@@ -440,7 +440,7 @@ def test_evaluar_solo_gerencia_y_con_motor_en_pausa_409(db, ads):
 
 @pytest.fixture
 def avisos(monkeypatch):
-    import mov_reg
+    from servicios import mov_reg
     from routers import sofi_notificaciones
     from servicios.telegram import notificacion
     tg, ws = AsyncMock(), AsyncMock()

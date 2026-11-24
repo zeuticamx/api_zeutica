@@ -159,7 +159,7 @@ async def _detalles(client: httpx.AsyncClient, token: str, ids: list) -> list:
 # ---------- Orquestador ----------
 
 async def run_job(dry_run: bool | None = None, motivo: str = "manual", telegram: bool = True) -> dict:
-    import mov_reg
+    from servicios import mov_reg
     from servicios.telegram.notificacion import send_telegram_alert
     dry = (os.getenv("MELI_FULL_DRY_RUN", "0") == "1") if dry_run is None else dry_run
     ids, umbral = config()
@@ -190,7 +190,7 @@ async def run_job(dry_run: bool | None = None, motivo: str = "manual", telegram:
                     if telegram:
                         await send_telegram_alert(chunk)
                 try:
-                    import notificaciones_service
+                    from servicios import notificaciones_service
                     await notificaciones_service.crear_y_notificar_todos(
                         "Stock bajo Full",
                         f"{len(alertas)} publicaciones Full bajo el umbral ({umbral})."

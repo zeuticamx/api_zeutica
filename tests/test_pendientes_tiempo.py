@@ -7,8 +7,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import pendientes_tiempo_logica as t
-from permisos import requerir_gerencia, usuario_autenticado
+from servicios import pendientes_tiempo_logica as t
+from servicios.permisos import requerir_gerencia, usuario_autenticado
 from routers import pendientes
 
 T0 = datetime(2026, 11, 20, 18, 0, 0)
@@ -135,7 +135,7 @@ def montar(monkeypatch, filas, usuario):
     app = FastAPI()
     app.include_router(pendientes.router)
     app.dependency_overrides[usuario_autenticado] = lambda: usuario
-    from permisos import es_gerencia
+    from servicios.permisos import es_gerencia
     if es_gerencia(usuario):
         app.dependency_overrides[requerir_gerencia] = lambda: usuario
     return db, TestClient(app)

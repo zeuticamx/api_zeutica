@@ -43,7 +43,7 @@ from fastapi import (APIRouter, Depends, Header, HTTPException, Query,
 from pydantic import BaseModel
 from typing import Dict, List, Optional
 
-import notificaciones_service
+from servicios import notificaciones_service
 
 router = APIRouter(tags=["sofi-notificaciones"], responses={404: {"Mensaje": "No encontrado"}})
 load_dotenv()

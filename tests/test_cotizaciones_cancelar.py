@@ -4,8 +4,8 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
-import cotizacion_cancelacion as cc
-from permisos import usuario_autenticado
+from servicios import cotizacion_cancelacion as cc
+from servicios.permisos import usuario_autenticado
 from routers import cotizacionesBack
 
 

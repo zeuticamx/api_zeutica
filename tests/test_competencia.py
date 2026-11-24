@@ -9,9 +9,9 @@ import pytest
 from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 
-import competencia_logica as cl
-import competencia_service as svc
-from permisos import usuario_autenticado
+from servicios import competencia_logica as cl
+from servicios import competencia_service as svc
+from servicios.permisos import usuario_autenticado
 from routers import competencia
 
 D = Decimal

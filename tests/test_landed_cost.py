@@ -8,9 +8,9 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import landed_cost_logica as lc
-import mov_reg
-from permisos import usuario_autenticado
+from servicios import landed_cost_logica as lc
+from servicios import mov_reg
+from servicios.permisos import usuario_autenticado
 from routers import embarques, landed_cost
 from routers.embarques import EtapaTipo, EtapaUpdate
 

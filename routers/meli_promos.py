@@ -1,7 +1,7 @@
 # Promociones MeLi para la página del panel (permiso general).
 from fastapi import APIRouter, Depends, HTTPException
 
-from permisos import usuario_autenticado
+from servicios.permisos import usuario_autenticado
 
 router = APIRouter(tags=["/meli-promos"])
 

@@ -9,8 +9,8 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-import crm_metricas
-import permisos
+from servicios import crm_metricas
+from servicios import permisos
 from routers import crm
 
 AHORA = datetime(2026, 10, 1, 12, 0, 0)
@@ -62,7 +62,7 @@ class FakeCursor:
         elif q.startswith("INSERT INTO crm_etapas_historial"):
             db.historial.append(params)
             self.rowcount = 1
-        elif q.startswith("UPDATE crm_interacciones SET seguimiento_cerrado = 1 WHERE cliente_id"):
+        elif q.startswith("UPDATE crm_interacciones SET seguimiento_cerrado = 1, version = version + 1 WHERE cliente_id"):
             self.rowcount = db.abiertos.get(params[0], 0)
         elif q.startswith("INSERT INTO crm_interacciones"):
             self.lastrowid = 501
@@ -72,6 +72,7 @@ class FakeCursor:
             self._resultado = [{
                 "id": params[0], "vendedor": i["vendedor"],
                 "dueno": i.get("dueno", i["vendedor"]), "cliente": i.get("cliente", "Cliente X"),
+                "version": i.get("version", 1), "editado_por": i.get("editado_por"),
             }] if i else []
         elif q.startswith("UPDATE crm_interacciones SET eliminado = 1"):
             self.rowcount = 1 if params[0] in db.interacciones else 0
@@ -86,6 +87,9 @@ class FakeCursor:
                     if marca in q:
                         self._resultado = [dict(f) for f in filas]
                         break
+        elif q.startswith("UPDATE crm_interacciones SET"):
+            db.interacciones_update.append((q, params))
+            self.rowcount = db.filas_update
         elif q.startswith("INSERT INTO crm_eventos"):
             db.eventos_insert.append(params)
             self.lastrowid = 701
@@ -94,7 +98,7 @@ class FakeCursor:
             self.rowcount = 1 if db.evento else 0
         elif q.startswith("UPDATE crm_eventos SET"):
             db.eventos_update.append((q, params))
-            self.rowcount = 1
+            self.rowcount = db.filas_update
         else:
             for marca, filas in db.respuestas:
                 if marca in q:
@@ -133,6 +137,8 @@ class FakeDB:
         self.evento = None            # fila única para SELECT e.id (autorización)
         self.eventos_insert = []      # params de INSERT INTO crm_eventos
         self.eventos_update = []      # (sql, params) de UPDATE crm_eventos
+        self.interacciones_update = []  # (sql, params) de UPDATE crm_interacciones SET (edición)
+        self.filas_update = 1         # rowcount de esos UPDATE; 0 simula que la versión ya cambió
         self.historial = []
         self.respuestas = []    # (fragmento de SQL, filas) para consultas de lectura
         self.ejecutados = []
@@ -285,12 +291,15 @@ def test_gerencia_registra_en_cualquier_cliente_sin_quitar_al_dueno(client, db):
     assert db.consultas("INSERT INTO crm_interacciones")[0][1][1] == "gerencia"
 
 
-def test_bitacora_de_vendedor_se_limita_a_lo_suyo_aunque_pida_otro(client, db):
-    r = client.get("/crm/interacciones", params={"vendedor": "luis"}, headers=ANA)
-    assert r.status_code == 200
+def test_bitacora_es_de_lectura_abierta_y_vendedor_solo_filtra(client, db):
+    # sin ?vendedor= cualquier sesión ve la del equipo (no se limita a lo suyo)
+    assert client.get("/crm/interacciones", headers=ANA).status_code == 200
     q, p = db.consultas("SELECT COUNT(*)")[0]
-    assert "i.vendedor = %s" in q and "i.vendedor IN" not in q
-    assert "ana" in p and "luis" not in p
+    assert "i.vendedor" not in q
+    # con ?vendedor= solo filtra
+    client.get("/crm/interacciones", params={"vendedor": "luis"}, headers=ANA)
+    q, p = db.consultas("SELECT COUNT(*)")[-1]
+    assert "i.vendedor IN (%s)" in q and "luis" in p and "ana" not in p
 
 
 def test_bitacora_de_gerencia_filtra_por_varios_vendedores_y_tipos(client, db):
@@ -323,41 +332,45 @@ def test_buscador_de_gerencia_ve_todo_o_filtra_por_vendedor(client, db):
     assert db.ejecutados[-1][1] == ("luis", 20)
 
 
-def test_seguimientos_de_vendedor_son_los_suyos_y_gerencia_ve_todos(client, db):
-    assert client.get("/crm/seguimientos", params={"vendedor": "luis"}, headers=ANA).status_code == 200
-    q, p = db.ejecutados[-1]
-    assert p == (date(2026, 10, 8), "ana")
-    assert client.get("/crm/seguimientos", headers=GER).status_code == 200
-    assert db.ejecutados[-1][1] == (date(2026, 10, 8),)
+def test_seguimientos_los_ve_todo_el_equipo_y_vendedor_solo_filtra(client, db):
+    assert client.get("/crm/seguimientos", headers=ANA).status_code == 200
+    assert db.ejecutados[-1][1] == (date(2026, 10, 8),)  # sin filtro de dueño
+    client.get("/crm/seguimientos", params={"vendedor": "luis"}, headers=ANA)
+    assert db.ejecutados[-1][1] == (date(2026, 10, 8), "luis")
     client.get("/crm/seguimientos", params={"vendedor": "luis"}, headers=GER)
     assert db.ejecutados[-1][1] == (date(2026, 10, 8), "luis")
 
 
+def test_seguimientos_devuelve_version_y_quien_edito(client, db):
+    client.get("/crm/seguimientos", headers=ANA)
+    q, _ = db.consultas("SELECT i.id, i.cliente_id")[-1]
+    assert "i.version" in q and "i.editado_por" in q and "i.fecha_editado" in q
+
+
 @pytest.mark.parametrize("ruta", ["/crm/metricas/resumen", "/crm/metricas/embudo", "/crm/vendedores"])
-def test_metricas_solo_gerencia(client, db, ruta):
-    assert client.get(ruta, headers=ANA).status_code == 403
+def test_metricas_y_vendedores_son_de_lectura_abierta(client, db, ruta):
+    assert client.get(ruta, headers=ANA).status_code == 200
     assert client.get(ruta, headers=GER).status_code == 200
+    assert client.get(ruta).status_code in (401, 403)  # sin sesión no
 
 
-def test_eliminar_interaccion_autor_dueno_o_gerencia(client, db):
-    # ajeno (ni autor ni dueño actual del cliente): 403 y no escribe
+def test_asignar_vendedor_y_exportar_siguen_siendo_de_gerencia(client, db):
+    assert client.put("/crm/clientes/4/vendedor", json={"vendedor": "ana"}, headers=ANA).status_code == 403
+    assert client.get("/crm/interacciones/exportar", headers=ANA).status_code == 403
+
+
+def test_eliminar_interaccion_solo_autor_o_gerencia(client, db):
+    # ajeno (no es el autor): 403 y no escribe, aunque sea el dueño actual del cliente
     assert client.delete("/crm/interacciones/11", headers=ANA).status_code == 403
+    assert client.delete("/crm/interacciones/12", headers=ANA).status_code == 403  # ana es dueña, luis autor
     assert db.consultas("UPDATE") == []
-    # la autora puede borrar lo suyo
+    # el autor puede borrar lo suyo
     r = client.delete("/crm/interacciones/10", headers=ANA)
     assert r.status_code == 200 and r.json()["eliminado"] is True
+    assert client.delete("/crm/interacciones/12", headers=LUIS).status_code == 200
     # gerencia borra cualquiera; inexistente da 404
     assert client.delete("/crm/interacciones/11", headers=GER).status_code == 200
     assert client.delete("/crm/interacciones/999", headers=GER).status_code == 404
-
-
-def test_dueno_actual_edita_y_borra_aunque_no_sea_el_autor(client, db):
-    # 12 la escribió luis, pero el cliente ya es de ana
-    assert client.patch("/crm/interacciones/12", json={"notas": "x"}, headers=ANA).status_code == 200
-    assert client.delete("/crm/interacciones/12", headers=ANA).status_code == 200
-    # el autor conserva el acceso; quien no es autor ni dueño no lo tiene
-    assert client.patch("/crm/interacciones/12", json={"notas": "y"}, headers=LUIS).status_code == 200
-    assert client.patch("/crm/interacciones/10", json={"notas": "y"}, headers=LUIS).status_code == 403
 
 
 def test_eliminar_interaccion_queda_en_mov_reg(client, db):
@@ -365,24 +378,74 @@ def test_eliminar_interaccion_queda_en_mov_reg(client, db):
     assert any("ana" == m[0] and "10" in m[1] and m[2] == "CRM" for m in db.movimientos)
 
 
-def test_editar_interaccion_autor_o_gerencia(client, db):
-    assert client.patch("/crm/interacciones/11", json={"notas": "x"}, headers=ANA).status_code == 403
-    r = client.patch("/crm/interacciones/10", json={"seguimiento_cerrado": True, "notas": " ok "}, headers=ANA)
-    assert r.status_code == 200
-    q, p = db.consultas("UPDATE crm_interacciones SET")[0]
-    assert q == "UPDATE crm_interacciones SET notas = %s, seguimiento_cerrado = %s WHERE id = %s"
-    assert p == ("ok", 1, 10)
+def test_cualquier_sesion_edita_una_interaccion_ajena_y_queda_el_rastro(client, db):
+    # 11 es de luis; ana no es autora ni dueña, aun así aplica el cambio
+    r = client.patch("/crm/interacciones/11", json={"notas": " x "}, headers=ANA)
+    assert r.status_code == 200 and r.json()["version"] == 2
+    q, p = db.interacciones_update[0]
+    assert q == ("UPDATE crm_interacciones SET notas = %s, version = version + 1, editado_por = %s, "
+                 "fecha_editado = %s WHERE id = %s AND eliminado = 0")
+    assert p == ("x", "ana", AHORA, 11)
+    # mov_reg dice de quién era y quién lo hizo
+    (m,) = [m for m in db.movimientos if "11" in m[1]]
+    assert m[0] == "ana" and "luis" in m[1] and m[2] == "CRM"
+
+
+def test_editar_lo_propio_o_siendo_gerencia_no_marca_actividad_ajena(client, db):
+    client.patch("/crm/interacciones/10", json={"seguimiento_cerrado": True, "notas": " ok "}, headers=ANA)
+    q, p = db.interacciones_update[0]
+    assert q.startswith("UPDATE crm_interacciones SET notas = %s, seguimiento_cerrado = %s, version = version + 1")
+    assert p[:2] == ("ok", 1)
+    assert "actividad de" not in db.movimientos[0][1]
+    assert db.alertas == []
+    # gerencia: sigue pudiendo, queda el rastro pero sin aviso a Telegram
     assert client.patch("/crm/interacciones/11", json={"notas": "y"}, headers=GER).status_code == 200
+    assert "actividad de luis" in db.movimientos[-1][1] and db.alertas == []
     assert client.patch("/crm/interacciones/999", json={"notas": "y"}, headers=GER).status_code == 404
+
+
+def test_developer_no_aplica_cambios_en_actividades_ajenas(client, db, monkeypatch):
+    monkeypatch.setattr(crm, "nivel_usuario", lambda u: "developer" if u == "ana" else "ventas")
+    assert client.patch("/crm/interacciones/11", json={"notas": "x"}, headers=ANA).status_code == 403
+    assert db.interacciones_update == [] and db.movimientos == []
+    # lo suyo sí
+    assert client.patch("/crm/interacciones/10", json={"notas": "x"}, headers=ANA).status_code == 200
+
+
+def test_editar_con_version_vieja_da_409_y_no_registra(client, db):
+    db.filas_update = 0  # el UPDATE ... AND version = %s no encontró fila: alguien la cambió antes
+    r = client.patch("/crm/interacciones/11", json={"notas": "x", "version": 3}, headers=ANA)
+    assert r.status_code == 409 and "Recarga" in r.json()["detail"]
+    q, p = db.interacciones_update[0]
+    assert q.endswith("AND version = %s") and p[-1] == 3
+    assert db.commits == 0 and db.rollbacks == 1 and db.movimientos == [] and db.alertas == []
+
+
+def test_editar_con_version_vigente_sube_la_version(client, db):
+    db.interacciones[11]["version"] = 4
+    r = client.patch("/crm/interacciones/11", json={"notas": "x", "version": 4}, headers=ANA)
+    assert r.status_code == 200 and r.json()["version"] == 5
+
+
+def test_solo_la_version_no_cuenta_como_cambio(client, db):
+    assert client.patch("/crm/interacciones/10", json={"version": 1}, headers=ANA).status_code == 422
+    assert db.interacciones_update == []
+
+
+def test_cambio_ajeno_avisa_a_telegram_solo_la_primera_vez_de_cada_persona(client, db):
+    client.patch("/crm/interacciones/11", json={"notas": "x"}, headers=ANA)
+    (msg,) = db.alertas
+    assert "Cambio sobre seguimiento ajeno" in msg and "luis" in msg and "ana" in msg
+    db.interacciones[11]["editado_por"] = "ana"  # ya era quien lo tocó por última vez
+    client.patch("/crm/interacciones/11", json={"notas": "y"}, headers=ANA)
+    assert len(db.alertas) == 1
+    client.patch("/crm/interacciones/10", json={"notas": "z"}, headers=ANA)  # lo suyo: sin aviso
+    assert len(db.alertas) == 1
 
 
 def test_editar_interaccion_queda_en_mov_reg(client, db):
     client.patch("/crm/interacciones/10", json={"notas": "z"}, headers=ANA)
     assert any(m[0] == "ana" and "10" in m[1] and m[2] == "CRM" for m in db.movimientos)
-    # un 403 no registra nada
-    db.movimientos.clear()
-    client.patch("/crm/interacciones/11", json={"notas": "z"}, headers=ANA)
-    assert db.movimientos == []
 
 
 def test_editar_proxima_fecha_pasada_da_422_y_no_escribe(client, db):
@@ -421,7 +484,7 @@ def test_nueva_interaccion_cierra_seguimientos_abiertos_antes_de_insertar(client
     r = client.post("/crm/interacciones", json={"cliente_id": 3, "tipo": "llamada"}, headers=ANA)
     assert r.json()["seguimientos_cerrados"] == 2
     orden = [q.split(" WHERE")[0] for q, _ in db.ejecutados if q.startswith(("UPDATE crm_interacciones", "INSERT INTO crm_interacciones"))]
-    assert orden == ["UPDATE crm_interacciones SET seguimiento_cerrado = 1", "INSERT INTO crm_interacciones (cliente_id, vendedor, tipo, fecha, resultado, notas, proxima_accion, proxima_fecha) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"]
+    assert orden == ["UPDATE crm_interacciones SET seguimiento_cerrado = 1, version = version + 1", "INSERT INTO crm_interacciones (cliente_id, vendedor, tipo, fecha, resultado, notas, proxima_accion, proxima_fecha) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)"]
 
 
 def test_cambio_de_etapa_en_la_misma_captura(client, db):
@@ -686,7 +749,7 @@ def test_crear_evento_invalido_no_escribe(client, db, payload):
     assert db.eventos_insert == [] and db.commits == 0 and db.alertas == []
 
 
-def test_agenda_vendedor_limitada_a_lo_suyo(client, db):
+def test_agenda_es_de_lectura_abierta_y_vendedor_solo_filtra(client, db):
     db.respuestas += [
         ("FROM crm_eventos e", [{"id": 5, "titulo": "Tarea"}]),
         ("FROM crm_interacciones i", [{"seguimiento_id": 9}]),
@@ -695,9 +758,12 @@ def test_agenda_vendedor_limitada_a_lo_suyo(client, db):
     assert r.status_code == 200
     assert r.json()["eventos"] == [{"id": 5, "titulo": "Tarea"}]
     q_ev, p_ev = db.consultas("SELECT e.id")[0]
-    assert "e.vendedor = %s" in q_ev and p_ev[2] == "ana"
+    assert "e.vendedor = %s" not in q_ev and "e.version" in q_ev and "e.editado_por" in q_ev
     q_sg, p_sg = db.consultas("SELECT i.id AS seguimiento_id")[0]
-    assert "ana" in p_sg
+    assert "ana" not in p_sg and "i.version" in q_sg
+    client.get("/crm/agenda", params={"desde": "2026-10-01", "hasta": "2026-10-08", "vendedor": "luis"}, headers=ANA)
+    q_ev, p_ev = db.consultas("SELECT e.id")[-1]
+    assert "e.vendedor = %s" in q_ev and p_ev[2] == "luis"
 
 
 def test_agenda_gerencia_ve_todo_y_filtra_por_vendedor_y_tipo(client, db):
@@ -732,6 +798,79 @@ def test_eliminar_evento_interno_autor_si_ajeno_no(client, db):
     r = client.delete("/crm/eventos/5", headers=ANA)
     assert r.status_code == 200 and r.json()["eliminado"] is True
     assert client.delete("/crm/eventos/5", headers=GER).status_code == 200  # gerencia también puede
+
+
+def test_cualquier_sesion_edita_un_evento_ajeno_con_rastro_y_aviso(client, db):
+    db.evento = _evento_base()  # de ana
+    r = client.patch("/crm/eventos/5", json={"titulo": " Nuevo título "}, headers=LUIS)
+    assert r.status_code == 200 and r.json()["version"] == 2
+    q, p = db.eventos_update[0]
+    assert q == ("UPDATE crm_eventos SET titulo = %s, version = version + 1, editado_por = %s, "
+                 "fecha_editado = %s WHERE id = %s AND eliminado = 0")
+    assert p == ("Nuevo título", "luis", AHORA, 5)
+    assert any(m[0] == "luis" and "evento de ana" in m[1] for m in db.movimientos)
+    (aviso,) = db.alertas
+    assert "Cambio sobre evento ajeno" in aviso and "ana" in aviso and "luis" in aviso
+
+
+def test_evento_con_cliente_ajeno_ya_no_depende_de_la_cartera(client, db):
+    db.evento = _evento_base(cliente_id=3, vendedor="ana", cliente="Cliente Ana")
+    assert client.patch("/crm/eventos/5", json={"estado": "hecho"}, headers=LUIS).status_code == 200
+
+
+def test_editar_evento_con_version_vieja_da_409(client, db):
+    db.evento = _evento_base()
+    db.filas_update = 0
+    r = client.patch("/crm/eventos/5", json={"titulo": "Otro título", "version": 2}, headers=LUIS)
+    assert r.status_code == 409
+    assert db.commits == 0 and db.alertas == []
+
+
+def test_developer_no_edita_eventos_ajenos(client, db, monkeypatch):
+    monkeypatch.setattr(crm, "nivel_usuario", lambda u: "developer" if u == "luis" else "ventas")
+    db.evento = _evento_base()
+    assert client.patch("/crm/eventos/5", json={"titulo": "Otro título"}, headers=LUIS).status_code == 403
+    assert db.eventos_update == []
+
+
+def test_columnas_de_edicion_se_agregan_solo_si_faltan(monkeypatch):
+    class Cur:
+        def __init__(self):
+            self.sql = []
+            self._r = []
+
+        def execute(self, q, p=None):
+            self.sql.append(" ".join(q.split()))
+            if q.startswith("SELECT COLUMN_NAME"):
+                self._r = [("id",), ("version",)] if p[0] == "crm_interacciones" else [("id",)]
+
+        def fetchall(self):
+            return self._r
+
+        def close(self):
+            pass
+
+    class Conn:
+        def __init__(self):
+            self.cur = Cur()
+
+        def cursor(self):
+            return self.cur
+
+        def commit(self):
+            pass
+
+        def close(self):
+            pass
+
+    conn = Conn()
+    monkeypatch.setattr(crm, "get_db_connection", lambda: conn)
+    crm.asegurar_columnas_edicion()
+    alters = [q for q in conn.cur.sql if q.startswith("ALTER")]
+    assert "ALTER TABLE crm_interacciones ADD COLUMN editado_por VARCHAR(50) NULL" in alters
+    assert not any("crm_interacciones ADD COLUMN version" in q for q in alters)
+    assert "ALTER TABLE crm_eventos ADD COLUMN version INT NOT NULL DEFAULT 1" in alters
+    assert len(alters) == 5
 
 
 def test_cerrar_evento_alerta(client, db):

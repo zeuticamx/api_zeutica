@@ -16,10 +16,10 @@ from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
 
-import mov_reg
-from permisos import es_gerencia, puede_ver_todo, usuario_autenticado
+from servicios import mov_reg
+from servicios.permisos import es_gerencia, puede_ver_todo, usuario_autenticado
 from servicios.telegram.notificacion import send_telegram_alert
-from errores_db import detalle_error_db
+from servicios.errores_db import detalle_error_db
 
 router = APIRouter(tags=["/prospectos"], responses={404: {"Mensaje": "No encontrado"}})
 load_dotenv()

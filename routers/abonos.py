@@ -3,10 +3,10 @@ from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException
 import os
 from dotenv import load_dotenv
-import mov_reg
-import notificaciones_service
+from servicios import mov_reg
+from servicios import notificaciones_service
 from servicios.telegram.notificacion import send_telegram_alert
-from errores_db import detalle_error_db
+from servicios.errores_db import detalle_error_db
 
 # Obtiene la ruta del directorio padre (la raíz)
 #sys.path.append(os.path.abspath(os.path.join(os.path.dirname(mov_reg.__file__), '..')))

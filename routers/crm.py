@@ -3,8 +3,13 @@
 #
 # Permisos (el usuario SIEMPRE sale del token, nunca de un parámetro):
 #   - Gerencia (permisos.es_gerencia) ve y gestiona todo; solo ella reasigna
-#     cartera y consulta métricas. Editar/borrar una interacción: su autor, el
-#     dueño actual del cliente o gerencia.
+#     cartera y exporta la bitácora a Excel. Las métricas del dashboard y la lista de
+#     vendedores (solo lectura) las ve cualquier sesión.
+#   - Actividades diarias (seguimientos, bitácora y agenda): las VE cualquier sesión.
+#     Cualquier sesión de nivel ventas puede EDITAR/cerrar una actividad ajena sin
+#     quitarle el dueño: queda en mov_reg, en editado_por/fecha_editado y se avisa
+#     a Telegram. Developer solo edita lo suyo. Eliminar: autor o gerencia. El chequeo
+#     de versión (409) evita pisar lo que otra persona acaba de cambiar.
 #   - Vendedor: gestiona los clientes de su cartera. Dueño de un cliente =
 #     crm_cartera.vendedor; si el cliente aún no entra al CRM, su dueno
 #     provisional es clientes.usuario (quien lo dio de alta). Un cliente sin
@@ -20,12 +25,12 @@ from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field, field_validator
 
-import crm_exportacion
-import crm_metricas
-import mov_reg
-from permisos import es_gerencia, puede_ver_todo, requerir_gerencia, usuario_autenticado
+from servicios import crm_exportacion
+from servicios import crm_metricas
+from servicios import mov_reg
+from servicios.permisos import NIVEL_DEVELOPER, es_gerencia, nivel_usuario, puede_ver_todo, requerir_gerencia, usuario_autenticado
 from servicios.telegram.notificacion import send_telegram_alert
-from errores_db import detalle_error_db
+from servicios.errores_db import detalle_error_db
 
 router = APIRouter(tags=["/crm"], responses={404: {"Mensaje": "No encontrado"}})
 load_dotenv()
@@ -91,6 +96,34 @@ def crear_tablas_crm():
         conn.close()
 
 
+_COLUMNAS_EDICION = {
+    "version": "INT NOT NULL DEFAULT 1",
+    "editado_por": "VARCHAR(50) NULL",
+    "fecha_editado": "DATETIME NULL",
+}
+
+
+def asegurar_columnas_edicion():
+    """Agrega version / editado_por / fecha_editado a las tablas viejas (lifespan). Idempotente.
+    Si falla, las consultas que las leen rompen: el lifespan lo registra."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        for tabla in ("crm_interacciones", "crm_eventos"):
+            cursor.execute(
+                "SELECT COLUMN_NAME FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s",
+                (tabla,),
+            )
+            existentes = {str(f[0]).lower() for f in cursor.fetchall()}
+            for columna, definicion in _COLUMNAS_EDICION.items():
+                if columna not in existentes:
+                    cursor.execute(f"ALTER TABLE {tabla} ADD COLUMN {columna} {definicion}")
+        conn.commit()
+    finally:
+        cursor.close()
+        conn.close()
+
+
 # ---------- Schemas ----------
 
 def _texto_opcional(v):
@@ -139,6 +172,7 @@ class InteraccionEditar(BaseModel):
     proxima_accion: Optional[str] = Field(None, max_length=255)
     proxima_fecha: Optional[date] = None
     seguimiento_cerrado: Optional[bool] = None
+    version: Optional[int] = Field(None, ge=1)  # la que leyó el cliente; distinta → 409
 
     _limpiar = field_validator("notas", "proxima_accion")(_texto_opcional)
     _proxima = field_validator("proxima_fecha")(_validar_proxima_fecha)
@@ -213,6 +247,7 @@ class EventoEditar(BaseModel):
     fin: Optional[datetime] = None
     todo_dia: Optional[bool] = None
     estado: Optional[EstadoEvento] = None
+    version: Optional[int] = Field(None, ge=1)  # la que leyó el cliente; distinta → 409
 
     _limpiar = field_validator("titulo", "descripcion")(_texto_opcional)
 
@@ -239,6 +274,28 @@ def puede_gestionar(usuario: str, vendedor: Optional[str]) -> bool:
     if vendedor is None:  # cliente sin dueno: cualquiera lo puede tomar
         return True
     return vendedor.strip().lower() == str(usuario).strip().lower()
+
+
+def _yo(usuario) -> str:
+    return str(usuario or "").strip().lower()
+
+
+def clasificar_cambio(usuario: str, propietarios) -> bool:
+    """True si la actividad es ajena (no es del autor ni del dueño). Cualquier sesión puede aplicar cambios
+    sobre una ajena, salvo developer (solo lectura): 403. Gerencia puede siempre. No toca la BD salvo para
+    resolver el nivel de quien NO es propietario."""
+    propios = {_yo(p) for p in propietarios if p}
+    if _yo(usuario) in propios:
+        return False
+    if not es_gerencia(usuario) and nivel_usuario(usuario) == NIVEL_DEVELOPER:
+        raise HTTPException(status_code=403, detail="Developer solo puede consultar; no aplica cambios sobre actividades de otros")
+    return True
+
+
+def debe_avisar_cambio_ajeno(usuario: str, ajeno: bool, editado_previo) -> bool:
+    """Aviso a Telegram solo cuando una persona (no gerencia) interviene una actividad ajena y no era
+    ya quien la había tocado por última vez (evita un aviso por cada tecla)."""
+    return bool(ajeno) and not es_gerencia(usuario) and _yo(editado_previo) != _yo(usuario)
 
 
 def validar_rango(desde: Optional[date], hasta: Optional[date]):
@@ -550,8 +607,8 @@ async def crm_asignar_vendedor(cliente_id: int, datos: AsignacionVendedor, usuar
 
 
 @router.get("/crm/vendedores")
-async def crm_vendedores(usuario: str = Depends(requerir_gerencia)):
-    """Usuarios activos, para los filtros y la reasignación del panel de gerencia."""
+async def crm_vendedores(usuario: str = Depends(usuario_autenticado)):
+    """Usuarios activos, para los filtros del CRM (lectura abierta) y la reasignación de gerencia."""
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
     try:
@@ -584,7 +641,7 @@ async def crm_registrar_interaccion(datos: InteraccionNueva, usuario: str = Depe
         etapa_actual = _asegurar_cartera(cursor, fila, usuario)
 
         cursor.execute(
-            "UPDATE crm_interacciones SET seguimiento_cerrado = 1 WHERE cliente_id = %s AND seguimiento_cerrado = 0 AND eliminado = 0",
+            "UPDATE crm_interacciones SET seguimiento_cerrado = 1, version = version + 1 WHERE cliente_id = %s AND seguimiento_cerrado = 0 AND eliminado = 0",
             (datos.cliente_id,),
         )
         cerrados = cursor.rowcount
@@ -633,8 +690,8 @@ async def crm_bitacora(
 ):
     """
     Bitácora filtrable. Con cliente_id devuelve todo el historial de ese cliente
-    (si es de tu cartera). Sin cliente_id, un vendedor solo ve lo que él registró
-    aunque mande otro vendedor en el filtro.
+    (si es de tu cartera o eres gerencia/developer). Sin cliente_id trae la del equipo
+    (lectura abierta); ?vendedor= filtra.
     """
     desde, hasta = validar_rango(desde, hasta)
     where = ["i.eliminado = 0", "i.fecha >= %s", "i.fecha < %s"]
@@ -647,11 +704,8 @@ async def crm_bitacora(
             _cliente_autorizado(cursor, cliente_id, usuario, lectura=True)
             where.append("i.cliente_id = %s")
             params.append(cliente_id)
-        elif not puede_ver_todo(usuario):
-            where.append("i.vendedor = %s")
-            params.append(usuario)
 
-        if vendedor and puede_ver_todo(usuario):
+        if vendedor:  # la bitácora de todo el equipo es de lectura abierta; ?vendedor= solo filtra
             frag, vals = _en("i.vendedor", vendedor)
             where.append(frag)
             params += vals
@@ -665,7 +719,8 @@ async def crm_bitacora(
         total = (cursor.fetchone() or {}).get("total", 0)
         cursor.execute(
             f"""SELECT i.id, i.cliente_id, c.nombre AS cliente, i.vendedor, i.tipo, i.fecha, i.resultado,
-                       i.notas, i.proxima_accion, i.proxima_fecha, i.seguimiento_cerrado
+                       i.notas, i.proxima_accion, i.proxima_fecha, i.seguimiento_cerrado,
+                       i.version, i.editado_por, i.fecha_editado
                 FROM crm_interacciones i LEFT JOIN clientes c ON c.id = i.cliente_id
                 WHERE {filtro}
                 ORDER BY i.fecha DESC, i.id DESC LIMIT %s OFFSET %s""",
@@ -736,10 +791,12 @@ async def crm_exportar_bitacora(
     )
 
 
-def _interaccion_autorizada(cursor, interaccion_id: int, usuario: str, accion: str):
-    """404 si no existe; 403 si no es el autor, el dueño actual del cliente ni gerencia."""
+def _interaccion_autorizada(cursor, interaccion_id: int, usuario: str, accion: str, solo_autor: bool = False):
+    """404 si no existe. Editar (solo_autor=False): cualquier sesión, salvo developer sobre lo ajeno (403); la
+    fila trae `ajeno`. Eliminar (solo_autor=True): únicamente el autor o gerencia (403)."""
     cursor.execute(
-        """SELECT i.id, i.vendedor, COALESCE(cc.vendedor, i.vendedor) AS dueno, c.nombre AS cliente
+        """SELECT i.id, i.vendedor, COALESCE(cc.vendedor, i.vendedor) AS dueno, c.nombre AS cliente,
+                  i.version, i.editado_por
            FROM crm_interacciones i
            LEFT JOIN crm_cartera cc ON cc.cliente_id = i.cliente_id
            LEFT JOIN clientes c ON c.id = i.cliente_id
@@ -749,19 +806,21 @@ def _interaccion_autorizada(cursor, interaccion_id: int, usuario: str, accion: s
     fila = cursor.fetchone()
     if not fila:
         raise HTTPException(status_code=404, detail="Interacción no encontrada")
-    yo = str(usuario).strip().lower()
-    permitidos = {str(fila.get(k) or "").strip().lower() for k in ("vendedor", "dueno")}
-    if not es_gerencia(usuario) and yo not in permitidos:
-        raise HTTPException(
-            status_code=403,
-            detail=f"Solo el autor, el dueño del cliente o gerencia pueden {accion} esta interacción")
+    if solo_autor:
+        if not es_gerencia(usuario) and _yo(usuario) != _yo(fila.get("vendedor")):
+            raise HTTPException(status_code=403, detail=f"Solo el autor o gerencia pueden {accion} esta interacción")
+        fila["ajeno"] = _yo(usuario) != _yo(fila.get("vendedor"))
+    else:
+        fila["ajeno"] = clasificar_cambio(usuario, (fila.get("vendedor"), fila.get("dueno")))
     return fila
 
 
 @router.patch("/crm/interacciones/{interaccion_id}")
 async def crm_editar_interaccion(interaccion_id: int, datos: InteraccionEditar, usuario: str = Depends(usuario_autenticado)):
-    """Edita notas / resultado / próxima acción o marca el seguimiento como hecho. Autor, dueño actual del cliente o gerencia."""
-    campos = {k: getattr(datos, k) for k in datos.model_fields_set}
+    """Edita notas / resultado / próxima acción o marca el seguimiento como hecho. Cualquier sesión puede aplicar
+    cambios (también sobre las de otros: queda en mov_reg, en editado_por y se avisa); developer solo lo suyo.
+    Con `version` distinta a la actual → 409 (alguien la cambió antes)."""
+    campos = {k: getattr(datos, k) for k in datos.model_fields_set if k != "version"}
     if not campos:
         raise HTTPException(status_code=422, detail="No se envió ningún campo para actualizar")
 
@@ -773,14 +832,29 @@ async def crm_editar_interaccion(interaccion_id: int, datos: InteraccionEditar, 
         # Orden fijo de columnas: el nombre sale del schema, nunca del cliente.
         columnas = [c for c in ("resultado", "notas", "proxima_accion", "proxima_fecha", "seguimiento_cerrado") if c in campos]
         valores = [int(campos[c]) if c == "seguimiento_cerrado" else campos[c] for c in columnas]
-        cursor.execute(
-            f"UPDATE crm_interacciones SET {', '.join(f'{c} = %s' for c in columnas)} WHERE id = %s",
-            tuple(valores + [interaccion_id]),
-        )
+        sql = (f"UPDATE crm_interacciones SET {', '.join(f'{c} = %s' for c in columnas)}, "
+               "version = version + 1, editado_por = %s, fecha_editado = %s WHERE id = %s AND eliminado = 0")
+        params = valores + [usuario, ahora_mx(), interaccion_id]
+        if datos.version is not None:
+            sql += " AND version = %s"
+            params.append(datos.version)
+        cursor.execute(sql, tuple(params))
+        if datos.version is not None and cursor.rowcount == 0:
+            conn.rollback()
+            raise HTTPException(status_code=409, detail="Alguien modificó este seguimiento antes que tú. Recarga y vuelve a intentar")
         conn.commit()
+        sufijo = f" (actividad de {fila.get('dueno')})" if fila["ajeno"] else ""
         mov_reg.registrar_movimiento(
-            usuario, f"Editó la interacción CRM {interaccion_id} con {fila.get('cliente')} ({', '.join(columnas)})", "CRM")
-        return {"id": interaccion_id, "actualizados": columnas}
+            usuario, f"Editó la interacción CRM {interaccion_id} con {fila.get('cliente')} ({', '.join(columnas)}){sufijo}", "CRM")
+        if debe_avisar_cambio_ajeno(usuario, fila["ajeno"], fila.get("editado_por")):
+            _alertar(
+                "🔀 <b>CRM · Cambio sobre seguimiento ajeno</b>\n\n"
+                f"• <b>Interacción:</b> <code>{interaccion_id}</code>\n"
+                f"• <b>Cliente:</b> {_esc(fila.get('cliente'))}\n"
+                f"• <b>Dueño:</b> {_esc(fila.get('dueno'))}\n"
+                f"• <b>Cambió:</b> {_esc(usuario)}"
+            )
+        return {"id": interaccion_id, "actualizados": columnas, "version": int(fila.get("version") or 1) + 1}
     except mysql.connector.Error as err:
         _error_db(conn, err, "editar")
     finally:
@@ -791,13 +865,13 @@ async def crm_editar_interaccion(interaccion_id: int, datos: InteraccionEditar, 
 @router.delete("/crm/interacciones/{interaccion_id}")
 async def crm_eliminar_interaccion(interaccion_id: int, usuario: str = Depends(usuario_autenticado)):
     """
-    Borrado lógico: deja de contar en bitácora, seguimientos y métricas. Lo puede
-    hacer el autor, el dueño actual del cliente o gerencia. No revierte la etapa.
+    Borrado lógico: deja de contar en bitácora, seguimientos y métricas. Solo lo puede
+    hacer el autor o gerencia. No revierte la etapa.
     """
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
     try:
-        fila = _interaccion_autorizada(cursor, interaccion_id, usuario, "eliminar")
+        fila = _interaccion_autorizada(cursor, interaccion_id, usuario, "eliminar", solo_autor=True)
         cursor.execute("UPDATE crm_interacciones SET eliminado = 1 WHERE id = %s AND eliminado = 0", (interaccion_id,))
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail="Interacción no encontrada")
@@ -825,16 +899,13 @@ async def crm_seguimientos(vendedor: Optional[str] = None, usuario: str = Depend
     """
     Seguimientos abiertos (vencidos, de hoy y de los próximos 7 días). Se asignan
     al dueno actual del cliente, así una reasignación mueve también sus pendientes.
-    Vendedor: los suyos. Gerencia: todos o los de ?vendedor=.
+    Lectura abierta: los de todo el equipo; ?vendedor= filtra.
     """
     hoy = hoy_mx()
     dueno = "COALESCE(cc.vendedor, i.vendedor)"
     where = ["i.eliminado = 0", "i.seguimiento_cerrado = 0", "i.proxima_fecha IS NOT NULL", "i.proxima_fecha <= %s"]
     params = [hoy + timedelta(days=DIAS_PROXIMOS)]
-    if not puede_ver_todo(usuario):
-        where.append(f"{dueno} = %s")
-        params.append(usuario)
-    elif vendedor:
+    if vendedor:
         where.append(f"{dueno} = %s")
         params.append(vendedor)
 
@@ -844,7 +915,8 @@ async def crm_seguimientos(vendedor: Optional[str] = None, usuario: str = Depend
         cursor.execute(
             f"""SELECT i.id, i.cliente_id, c.nombre AS cliente, c.empresa, c.telefono, c.email,
                        {dueno} AS vendedor, i.vendedor AS autor, i.tipo, i.fecha, i.resultado, i.notas,
-                       i.proxima_accion, i.proxima_fecha, cc.etapa
+                       i.proxima_accion, i.proxima_fecha, cc.etapa,
+                       i.version, i.editado_por, i.fecha_editado
                 FROM crm_interacciones i
                 LEFT JOIN clientes c ON c.id = i.cliente_id
                 LEFT JOIN crm_cartera cc ON cc.cliente_id = i.cliente_id
@@ -864,13 +936,14 @@ async def crm_seguimientos(vendedor: Optional[str] = None, usuario: str = Depend
 
 # ---------- Agenda / Calendario ----------
 
-def _evento_autorizado(cursor, evento_id: int, usuario: str):
-    """Fila del evento si el usuario puede verla/editarla. Interna: autor o gerencia.
-    Con cliente: misma regla de cartera que las interacciones."""
+def _evento_autorizado(cursor, evento_id: int, usuario: str, solo_autor: bool = False):
+    """404 si no existe. Editar (solo_autor=False): cualquier sesión, salvo developer sobre lo ajeno (403);
+    ya no depende de la cartera del cliente. Eliminar (solo_autor=True): autor o gerencia (403).
+    La fila trae `ajeno`."""
     cursor.execute(
         """SELECT e.id, e.cliente_id, e.vendedor, e.tipo, e.titulo, e.descripcion,
                   e.inicio, e.fin, e.todo_dia, e.estado, e.origen_seguimiento_id,
-                  c.nombre AS cliente
+                  c.nombre AS cliente, e.version, e.editado_por
            FROM crm_eventos e LEFT JOIN clientes c ON c.id = e.cliente_id
            WHERE e.id = %s AND e.eliminado = 0""",
         (evento_id,),
@@ -878,10 +951,12 @@ def _evento_autorizado(cursor, evento_id: int, usuario: str):
     fila = cursor.fetchone()
     if not fila:
         raise HTTPException(status_code=404, detail="Evento no encontrado")
-    if fila.get("cliente_id"):
-        _cliente_autorizado(cursor, fila["cliente_id"], usuario)
-    elif not es_gerencia(usuario) and str(fila.get("vendedor") or "").strip().lower() != str(usuario).strip().lower():
-        raise HTTPException(status_code=403, detail="Solo el autor o gerencia pueden gestionar este evento")
+    if solo_autor:
+        if not es_gerencia(usuario) and _yo(usuario) != _yo(fila.get("vendedor")):
+            raise HTTPException(status_code=403, detail="Solo el autor o gerencia pueden eliminar este evento")
+        fila["ajeno"] = _yo(usuario) != _yo(fila.get("vendedor"))
+    else:
+        fila["ajeno"] = clasificar_cambio(usuario, (fila.get("vendedor"),))
     return fila
 
 
@@ -911,7 +986,7 @@ async def crm_agenda(
     """
     Feed del calendario: eventos con hora en [desde, hasta] + seguimientos
     abiertos (proxima_fecha en el rango) como bloques de todo el día.
-    Vendedor: solo lo suyo. Gerencia: todo o filtrado por ?vendedor=.
+    Lectura abierta: la agenda de todo el equipo; ?vendedor= filtra.
     """
     desde, hasta = validar_rango(desde, hasta)
     ini_dt = datetime(desde.year, desde.month, desde.day)
@@ -922,10 +997,7 @@ async def crm_agenda(
     try:
         where = ["e.eliminado = 0", "e.inicio >= %s", "e.inicio < %s"]
         params: list = [ini_dt, fin_dt]
-        if not puede_ver_todo(usuario):
-            where.append("e.vendedor = %s")
-            params.append(usuario)
-        elif vendedor:
+        if vendedor:
             where.append("e.vendedor = %s")
             params.append(vendedor)
         if tipo:
@@ -936,7 +1008,7 @@ async def crm_agenda(
         cursor.execute(
             f"""SELECT e.id, e.cliente_id, c.nombre AS cliente, e.vendedor, e.tipo,
                        e.titulo, e.descripcion, e.inicio, e.fin, e.todo_dia, e.estado,
-                       e.origen_seguimiento_id
+                       e.origen_seguimiento_id, e.version, e.editado_por, e.fecha_editado
                 FROM crm_eventos e LEFT JOIN clientes c ON c.id = e.cliente_id
                 WHERE {filtro}
                 ORDER BY e.inicio, e.id""",
@@ -950,17 +1022,14 @@ async def crm_agenda(
             w_seg = ["i.eliminado = 0", "i.seguimiento_cerrado = 0",
                      "i.proxima_fecha IS NOT NULL", "i.proxima_fecha >= %s", "i.proxima_fecha <= %s"]
             p_seg: list = [desde, hasta]
-            if not puede_ver_todo(usuario):
-                w_seg.append(f"{dueno} = %s")
-                p_seg.append(usuario)
-            elif vendedor:
+            if vendedor:
                 w_seg.append(f"{dueno} = %s")
                 p_seg.append(vendedor)
             cursor.execute(
                 f"""SELECT i.id AS seguimiento_id, i.cliente_id, c.nombre AS cliente,
                            {dueno} AS vendedor, i.tipo,
                            i.proxima_accion AS titulo, i.notas AS descripcion,
-                           i.proxima_fecha, cc.etapa
+                           i.proxima_fecha, cc.etapa, i.version, i.editado_por, i.fecha_editado
                     FROM crm_interacciones i
                     LEFT JOIN clientes c ON c.id = i.cliente_id
                     LEFT JOIN crm_cartera cc ON cc.cliente_id = i.cliente_id
@@ -1013,8 +1082,10 @@ async def crm_crear_evento(datos: EventoNuevo, usuario: str = Depends(usuario_au
 
 @router.patch("/crm/eventos/{evento_id}")
 async def crm_editar_evento(evento_id: int, datos: EventoEditar, usuario: str = Depends(usuario_autenticado)):
-    """Edita título/descripción/tipo/fechas o cambia estado. Mover = mandar inicio/fin nuevos."""
-    campos = {k: getattr(datos, k) for k in datos.model_fields_set}
+    """Edita título/descripción/tipo/fechas o cambia estado. Mover = mandar inicio/fin nuevos. Cualquier sesión
+    puede aplicar cambios a un evento ajeno (queda en mov_reg y editado_por; developer solo lo suyo). Con
+    `version` distinta a la actual → 409."""
+    campos = {k: getattr(datos, k) for k in datos.model_fields_set if k != "version"}
     if not campos:
         raise HTTPException(status_code=422, detail="No se envió ningún campo para actualizar")
     conn = get_db_connection()
@@ -1034,18 +1105,34 @@ async def crm_editar_evento(evento_id: int, datos: EventoEditar, usuario: str = 
             if c == "titulo" and isinstance(v, str):
                 v = v.strip()
             valores.append(v)
-        cursor.execute(
-            f"UPDATE crm_eventos SET {', '.join(f'{c} = %s' for c in columnas)} WHERE id = %s",
-            tuple(valores + [evento_id]),
-        )
+        sql = (f"UPDATE crm_eventos SET {', '.join(f'{c} = %s' for c in columnas)}, "
+               "version = version + 1, editado_por = %s, fecha_editado = %s WHERE id = %s AND eliminado = 0")
+        params = valores + [usuario, ahora_mx(), evento_id]
+        if datos.version is not None:
+            sql += " AND version = %s"
+            params.append(datos.version)
+        cursor.execute(sql, tuple(params))
+        if datos.version is not None and cursor.rowcount == 0:
+            conn.rollback()
+            raise HTTPException(status_code=409, detail="Alguien modificó este evento antes que tú. Recarga y vuelve a intentar")
         conn.commit()
+        sufijo = f" (evento de {fila['vendedor']})" if fila["ajeno"] else ""
         if "estado" in campos and campos["estado"] in ("hecho", "cancelado"):
-            mov_reg.registrar_movimiento(usuario, f"{'Cerró' if campos['estado'] == 'hecho' else 'Canceló'} el evento '{fila['titulo']}'", "CRM")
+            mov_reg.registrar_movimiento(usuario, f"{'Cerró' if campos['estado'] == 'hecho' else 'Canceló'} el evento '{fila['titulo']}'{sufijo}", "CRM")
             _alertar(_msg_evento("cerró" if campos["estado"] == "hecho" else "canceló",
                                  usuario, fila["titulo"], fila.get("cliente"), fila["tipo"], fila["inicio"]))
         elif "inicio" in campos or "fin" in campos:
-            mov_reg.registrar_movimiento(usuario, f"Movió el evento '{fila['titulo']}' al {nuevo_inicio}", "CRM")
-        return {"id": evento_id, "actualizados": columnas}
+            mov_reg.registrar_movimiento(usuario, f"Movió el evento '{fila['titulo']}' al {nuevo_inicio}{sufijo}", "CRM")
+        elif fila["ajeno"]:
+            mov_reg.registrar_movimiento(usuario, f"Editó el evento '{fila['titulo']}' ({', '.join(columnas)}){sufijo}", "CRM")
+        if debe_avisar_cambio_ajeno(usuario, fila["ajeno"], fila.get("editado_por")):
+            _alertar(
+                "🔀 <b>CRM · Cambio sobre evento ajeno</b>\n\n"
+                f"• <b>Evento:</b> {_esc(fila['titulo'])}\n"
+                f"• <b>Dueño:</b> {_esc(fila['vendedor'])}\n"
+                f"• <b>Cambió:</b> {_esc(usuario)}"
+            )
+        return {"id": evento_id, "actualizados": columnas, "version": int(fila.get("version") or 1) + 1}
     except mysql.connector.Error as err:
         _error_db(conn, err, "editar-evento")
     finally:
@@ -1059,7 +1146,7 @@ async def crm_eliminar_evento(evento_id: int, usuario: str = Depends(usuario_aut
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
     try:
-        fila = _evento_autorizado(cursor, evento_id, usuario)
+        fila = _evento_autorizado(cursor, evento_id, usuario, solo_autor=True)
         cursor.execute("UPDATE crm_eventos SET eliminado = 1 WHERE id = %s AND eliminado = 0", (evento_id,))
         if cursor.rowcount == 0:
             raise HTTPException(status_code=404, detail="Evento no encontrado")
@@ -1082,7 +1169,7 @@ async def crm_metricas_resumen(
     hasta: Optional[date] = None,
     vendedor: Optional[List[str]] = Query(None),
     tipo: Optional[List[Tipo]] = Query(None),
-    usuario: str = Depends(requerir_gerencia),
+    usuario: str = Depends(usuario_autenticado),
 ):
     """Totales por tipo, tabla por vendedor, serie diaria y seguimientos vencidos."""
     desde, hasta = validar_rango(desde, hasta)
@@ -1162,7 +1249,7 @@ async def crm_metricas_embudo(
     desde: Optional[date] = None,
     hasta: Optional[date] = None,
     vendedor: Optional[List[str]] = Query(None),
-    usuario: str = Depends(requerir_gerencia),
+    usuario: str = Depends(usuario_autenticado),
 ):
     """Clientes por etapa hoy (por vendedor) y entradas a cada etapa en el periodo."""
     desde, hasta = validar_rango(desde, hasta)

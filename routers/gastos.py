@@ -1,11 +1,12 @@
 import mysql.connector, html, asyncio
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from fastapi import APIRouter, HTTPException, Depends
-import os, mov_reg
+import os
+from servicios import mov_reg
 from dotenv import load_dotenv
 from servicios.telegram.notificacion import send_telegram_alert
-from permisos import requerir_gerencia
-from errores_db import detalle_error_db
+from servicios.permisos import requerir_gerencia
+from servicios.errores_db import detalle_error_db
 
 router =APIRouter(tags=["/gastos"],responses={404: {"Mensaje":"No encontrado"}})
 load_dotenv()

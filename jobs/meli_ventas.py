@@ -489,7 +489,7 @@ def procesar_cancelacion(order_id: str, motivo: str = "webhook") -> dict:
     Solo toca filas con inventario_descontado=1, así que es idempotente ante
     reintentos del webhook. Devuelve piezas regresadas.
     """
-    import mov_reg
+    from servicios import mov_reg
     oid = str(order_id)
     conn = get_db_connection()
     cur = conn.cursor(dictionary=True)
@@ -525,7 +525,7 @@ def procesar_cancelacion(order_id: str, motivo: str = "webhook") -> dict:
 
 async def run_job(dry_run: bool | None = None, motivo: str = "manual", telegram: bool = True) -> dict:
     """Si telegram=False no manda Telegram (webhook: avisa por WS + tabla)."""
-    import mov_reg
+    from servicios import mov_reg
     dry = _dry_run_default() if dry_run is None else dry_run
     resumen = {"motivo": motivo, "dry_run": dry, "inicio": datetime.now(CDMX).isoformat()}
 
@@ -546,7 +546,7 @@ async def run_job(dry_run: bool | None = None, motivo: str = "manual", telegram:
         if not ordenes:
             await avisar("📭 <b>Resumen de ventas MELI</b>\n\nNo hubo ventas pagadas en la ventana revisada (últimas 72 h).")
             try:
-                import notificaciones_service
+                from servicios import notificaciones_service
                 await notificaciones_service.crear_y_notificar_todos(
                     "Sin ventas MELI", "No hubo ventas pagadas en las últimas 72 h.", "info")
             except Exception as err:
@@ -586,7 +586,7 @@ async def run_job(dry_run: bool | None = None, motivo: str = "manual", telegram:
             # Sin DRY_RUN el aviso refleja cambios reales; en simulación no se notifica.
             if not dry:
                 try:
-                    import notificaciones_service
+                    from servicios import notificaciones_service
                     await notificaciones_service.crear_y_notificar_todos(
                         "Ventas MELI procesadas",
                         f"{stats['nuevas']} nuevas, {stats['descontadas']} descontadas, "

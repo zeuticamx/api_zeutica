@@ -114,7 +114,7 @@ def db(monkeypatch):
     monkeypatch.setattr(ventas, "get_db_connection", lambda: base)
     monkeypatch.setattr(ventas.mov_reg, "registrar_movimiento", lambda *a, **k: None)
     monkeypatch.setattr(ventas, "send_telegram_alert", AsyncMock())
-    import notificaciones_service
+    from servicios import notificaciones_service
     monkeypatch.setattr(notificaciones_service, "crear_y_notificar_todos", AsyncMock())
     # El cálculo de comisiones tiene sus propios tests (test_comisiones.py)
     monkeypatch.setattr(ventas.comisiones, "registrar_comisiones_seguro", lambda *a, **k: None)
@@ -431,7 +431,7 @@ def test_reportes_incluye_canceladas_con_marca(client, db):
 
 
 def test_producto_venta_persiste_aviso_en_tabla(client, db, monkeypatch):
-    import notificaciones_service
+    from servicios import notificaciones_service
     db.stock = {"A-001": 10}
     r = client.post("/producto/venta", json=venta_simple())
     assert r.status_code == 200, r.text
@@ -441,7 +441,7 @@ def test_producto_venta_persiste_aviso_en_tabla(client, db, monkeypatch):
 
 
 def test_venta_completa_persiste_un_solo_aviso(client, db):
-    import notificaciones_service
+    from servicios import notificaciones_service
     db.stock = {"A-001": 10, "B-002": 5}
     r = client.post("/ventas/registrar", json=venta_completa())
     assert r.status_code == 200, r.text

@@ -2,7 +2,7 @@ import mysql.connector
 from fastapi import APIRouter, HTTPException
 import os
 from dotenv import load_dotenv
-from errores_db import detalle_error_db
+from servicios.errores_db import detalle_error_db
 
 router =APIRouter(tags=["/cuentas"],responses={404: {"Mensaje":"No encontrado"}})
 load_dotenv()

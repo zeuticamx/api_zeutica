@@ -6,7 +6,7 @@ import os
 from dotenv import load_dotenv
 from datetime import date
 from mysql.connector import errorcode
-import mov_reg
+from servicios import mov_reg
 from servicios.telegram.notificacion import send_telegram_alert
 
 router =APIRouter(tags=["/cleanest"],responses={404: {"Mensaje":"No encontrado"}})
@@ -55,7 +55,7 @@ async def crear_orden(ordenes: List[OrdenModel], usuario: str):
         mov_reg.registrar_movimiento(usuario, f"Registró una orden para {ordenes[0].numero_orden} artículos", "Ordenes Cleanest Choice")
 
         try:
-            import notificaciones_service
+            from servicios import notificaciones_service
             await notificaciones_service.crear_y_notificar_todos(
                 f"Orden Cleanest {ordenes[0].numero_orden} creada",
                 f"{len(ordenes)} artículo(s) por {usuario}.",
@@ -133,7 +133,7 @@ async def efirma(payload: EfirmaModel):
         mov_reg.registrar_movimiento(payload.usuario, f"Registró una firma para la orden {payload.numero_orden}", "Firmas")
 
         try:
-            import notificaciones_service
+            from servicios import notificaciones_service
             await notificaciones_service.crear_y_notificar_todos(
                 f"Firma registrada en orden {payload.numero_orden}",
                 f"Por {payload.usuario}.",
@@ -389,7 +389,7 @@ async def ingresar_venta(venta: VentaSchema):
         print(f"Venta Cleanest {venta.id_venta} registrada, pero falló la bitácora: {err}")
 
     try:
-        import notificaciones_service
+        from servicios import notificaciones_service
         await notificaciones_service.crear_y_notificar_todos(
             f"Venta Cleanest {venta.id_venta} registrada",
             f"{venta.sku} ×{venta.stock_clean} por {venta.usuario}.",

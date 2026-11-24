@@ -2,9 +2,10 @@ import mysql.connector
 from pydantic import BaseModel
 from fastapi import APIRouter, HTTPException, Query
 from typing import List, Optional
-import os, mov_reg
+import os
+from servicios import mov_reg
 from dotenv import load_dotenv
-from errores_db import detalle_error_db
+from servicios.errores_db import detalle_error_db
 
 router = APIRouter(tags=["/inventario"], responses={404: {"Mensaje": "No encontrado"}})
 load_dotenv()

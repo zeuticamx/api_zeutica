@@ -4,15 +4,16 @@ from fastapi import APIRouter, Depends, HTTPException
 from typing import List
 from decimal import Decimal
 import datetime
-import os, mov_reg
+import os
+from servicios import mov_reg
 from dotenv import load_dotenv
 from typing import Optional
-from cotizacion_service import generar_nuevo_codigo, guardar_cotizacion_db
+from servicios.cotizacion_service import generar_nuevo_codigo, guardar_cotizacion_db
 from servicios.telegram.notificacion import send_telegram_alert #notificaciones a telegram
-from errores_db import detalle_error_db
-import cotizacion_cancelacion as cancelacion
-import skydropx_envios
-from permisos import usuario_autenticado, es_gerencia
+from servicios.errores_db import detalle_error_db
+from servicios import cotizacion_cancelacion as cancelacion
+from servicios import skydropx_envios
+from servicios.permisos import usuario_autenticado, es_gerencia
 
 router =APIRouter(tags=["/cotizaciones"],responses={404: {"Mensaje":"No encontrado"}})
 load_dotenv() # Cargar credenciales .env
@@ -303,7 +304,7 @@ async def vincular_factura(vinculos: List[VinculoFactura]):
                     message += f"\n• <b>Partidas de venta marcadas facturadas:</b> {ventas_marcadas[v.codigo_cotizacion]}"
                 asyncio.create_task(send_telegram_alert(message))
             try:
-                import notificaciones_service
+                from servicios import notificaciones_service
                 for v in vinculos:
                     if not v.relacion_factura:
                         continue
@@ -391,7 +392,7 @@ async def guardar_firma(firma: FirmaEnvio):
             mov_reg.registrar_movimiento(firma.usuario, f"Guardó firma para cotización {firma.codigo_cotizacion}", "Cotizaciones")
 
             try:
-                import notificaciones_service
+                from servicios import notificaciones_service
                 await notificaciones_service.crear_y_notificar_todos(
                     f"Firma guardada en cotización {firma.codigo_cotizacion}",
                     f"Por {firma.usuario}.",

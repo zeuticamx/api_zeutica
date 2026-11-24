@@ -65,8 +65,8 @@ def test_trigger_respeta_cdmx_aunque_ref_sea_utc():
 
 @pytest.fixture
 def avisos(monkeypatch):
-    import mov_reg
-    import notificaciones_service
+    from servicios import mov_reg
+    from servicios import notificaciones_service
     from routers import sofi_notificaciones
     from servicios.telegram import notificacion
     tg, notif, ws = AsyncMock(), AsyncMock(), AsyncMock()

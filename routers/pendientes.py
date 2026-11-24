@@ -6,11 +6,11 @@ import os, html, asyncio
 from dotenv import load_dotenv
 from datetime import date, datetime, timedelta
 from dateutil.relativedelta import relativedelta
-import mov_reg
-from permisos import requerir_gerencia, usuario_autenticado, es_gerencia, puede_ver_todo
-from errores_db import detalle_error_db
+from servicios import mov_reg
+from servicios.permisos import requerir_gerencia, usuario_autenticado, es_gerencia, puede_ver_todo
+from servicios.errores_db import detalle_error_db
 from servicios.telegram.notificacion import send_telegram_alert
-import pendientes_tiempo_logica as tiempo
+from servicios import pendientes_tiempo_logica as tiempo
 
 router =APIRouter(tags=["/pendientes"],responses={404: {"Mensaje":"No encontrado"}})
 load_dotenv()
