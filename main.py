@@ -94,6 +94,12 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"❌ No se pudieron asegurar las columnas de clientes: {e}")
 
+    # Domicilio estructurado de clientes (calle, numero, interior, colonia, municipio, estado) y cp a texto
+    try:
+        clientes.asegurar_columnas_domicilio()
+    except Exception as e:
+        print(f"❌ No se pudieron asegurar las columnas de domicilio de clientes: {e}")
+
     # Tablas del CRM (cartera, interacciones, historial de etapas)
     try:
         crm.crear_tablas_crm()
@@ -158,6 +164,20 @@ async def lifespan(app: FastAPI):
         cotizacion_cancelacion.asegurar_columnas_cancelacion()
     except Exception as e:
         print(f"❌ No se pudieron asegurar las columnas de cancelación de cotizaciones: {e}")
+
+    # Detalle de «OTROS» en el seguimiento de cotizaciones (seguimiento_otros).
+    try:
+        from servicios import cotizacion_seguimiento
+        cotizacion_seguimiento.asegurar_columna_seguimiento()
+    except Exception as e:
+        print(f"❌ No se pudo asegurar la columna seguimiento_otros de cotizaciones: {e}")
+
+    # Liga cotizaciones con clientes (cotizaciones.cliente_id; rellenado único al crearse).
+    try:
+        from servicios import cotizacion_service
+        cotizacion_service.asegurar_columna_cliente_id()
+    except Exception as e:
+        print(f"❌ No se pudo asegurar la columna cliente_id de cotizaciones: {e}")
 
     # Columna usuario en devoluciones (auditoría de inventario).
     try:
@@ -437,6 +457,7 @@ app.include_router(mercado_ads.router, dependencies=[Depends(obtener_usuario_act
 app.include_router(competencia.router, dependencies=[Depends(obtener_usuario_actual)])
 app.include_router(meli_stock_config.router, dependencies=[Depends(obtener_usuario_actual)])
 app.include_router(landed_cost.router, dependencies=[Depends(obtener_usuario_actual)])
+
 # Sin obtener_usuario_actual a proposito: el WebSocket valida el token por query
 # param y el POST de escalacion valida X-API-Key (n8n no tiene sesion de usuario).
 app.include_router(sofi_notificaciones.router)

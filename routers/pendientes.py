@@ -525,6 +525,49 @@ async def tiempos(incluir_intercambiadas: bool = False, actual: str = Depends(re
         conn.close()
 
 
+@router.get("/pendientes/cronometro")
+async def cronometro_visor(actual: str = Depends(usuario_autenticado)):
+    """Solo lectura: tareas 'en proceso' de los usuarios cronometrados, con su tiempo corrido.
+    Para los usuarios de USUARIOS_VISORES (hoy `ventas`) y gerencia; el resto recibe 403."""
+    if not (tiempo.es_visor(actual) or puede_ver_todo(actual)):
+        raise HTTPException(status_code=403, detail="Sin permiso para ver el cronómetro")
+    usuarios = list(tiempo.USUARIOS_CRONOMETRO)
+    marcas = ", ".join(["%s"] * len(usuarios))
+    conn, cursor = _conexion()
+    try:
+        cursor.execute(
+            f"SELECT {_CAMPOS} FROM pendientes WHERE LOWER(estado) = 'en proceso' AND LOWER(usuario) IN ({marcas})",
+            tuple(usuarios),
+        )
+        # Solo lo necesario para mostrar la tarjeta; sin observaciones ni datos de la cola.
+        en_proceso = [
+            {k: p.get(k) for k in ("id", "usuario", "actividad", "prioridad", "estado", "segundosTranscurridos")}
+            for p in sorted((pendiente_json(f) for f in cursor.fetchall()), key=clave_orden)
+        ]
+        # Acumulado de las ya cerradas: el mismo KPI de gerencia (terminadas sin «Intercambiado»).
+        cursor.execute(
+            "SELECT id, usuario, actividad, prioridad, estado, inicio_atencion, fin_atencion, intercambiado,"
+            " intercambiado_por, fecha_intercambiado FROM pendientes"
+            f" WHERE LOWER(usuario) IN ({marcas}) AND inicio_atencion IS NOT NULL",
+            tuple(usuarios),
+        )
+        ahora = tiempo.ahora_mx()
+        kpi = tiempo.resumen_kpi([tiempo.tarea_tiempo_json(f, ahora) for f in cursor.fetchall()])
+        return {
+            "en_proceso": en_proceso,
+            "acumulado": {
+                "segundos": kpi["segundos_sin_intercambiar"],
+                "tareas": kpi["tareas_sin_intercambiar"],
+                "sin_dato": kpi["tareas_sin_dato"],
+            },
+        }
+    except mysql.connector.Error as err:
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error al consultar el cronómetro"))
+    finally:
+        cursor.close()
+        conn.close()
+
+
 class IntercambioCambio(BaseModel):
     valor: bool = True  # False = quitar la marca
 

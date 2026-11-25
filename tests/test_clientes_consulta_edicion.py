@@ -154,6 +154,31 @@ def test_edicion_acepta_usocdfi_historico(client, db):
     assert "P01" in db.updates()[0][1]
 
 
+DOMICILIO = {"calle": "Av. Juárez", "numero": "100", "interior": None, "colonia": "Centro",
+             "cp": "44100", "municipio": "Guadalajara", "estado": "Jalisco"}
+
+
+def test_edicion_con_domicilio_estructurado_actualiza_campos_y_compone_direccion(client, db):
+    assert client.post("/editcliente/tester", json=edicion_valida(**DOMICILIO)).status_code == 200
+    (q, p), = db.updates()
+    assert "calle = %s" in q and "municipio = %s" in q and "estado = %s" in q
+    assert "Av. Juárez 100, Col. Centro, CP 44100, Guadalajara, Jalisco" in p
+    assert p[-1] == 42
+
+
+def test_edicion_de_cliente_viejo_sin_domicilio_nuevo_conserva_la_direccion_libre(client, db):
+    # Decidido: no se obliga a migrar al editar (p. ej. solo cambiar el teléfono).
+    assert client.post("/editcliente/tester", json=edicion_valida()).status_code == 200
+    (q, p), = db.updates()
+    assert "Calle 1" in p and p[6:12] == (None,) * 6
+
+
+def test_edicion_con_domicilio_incompleto_da_422_sin_actualizar(client, db):
+    r = client.post("/editcliente/tester", json=edicion_valida(**{**DOMICILIO, "colonia": ""}))
+    assert r.status_code == 422 and "colonia" in r.json()["detail"]
+    assert db.updates() == []
+
+
 def test_edicion_de_cliente_inexistente_da_404(client, db):
     db.filas_afectadas = 0
     r = client.post("/editcliente/tester", json=edicion_valida(id=999))

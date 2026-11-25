@@ -46,6 +46,72 @@ def db(monkeypatch):
     return base
 
 
+class _CursorAsesor:
+    def __init__(self, fila=None, falla=False):
+        self.fila, self.falla = fila, falla
+
+    def execute(self, sql, params=None):
+        if self.falla:
+            raise mysql.connector.Error("boom")
+
+    def fetchone(self):
+        return self.fila
+
+    def close(self):
+        pass
+
+
+class _ConnAsesor:
+    def __init__(self, **kw):
+        self.kw = kw
+
+    def cursor(self):
+        return _CursorAsesor(**self.kw)
+
+
+def test_armar_nombre_asesor_une_nombres_y_apellido_paterno():
+    assert genera_cotizacion.armar_nombre_asesor("Juan  Carlos", " Pérez ") == "Juan Carlos Pérez"
+    assert genera_cotizacion.armar_nombre_asesor("Ana", None) == "Ana"
+    assert genera_cotizacion.armar_nombre_asesor("", "Pérez") is None
+    assert genera_cotizacion.armar_nombre_asesor(None, None) is None
+
+
+def test_obtener_nombre_asesor_lee_empleado_y_tolera_fallos():
+    f = genera_cotizacion.obtener_nombre_asesor
+    assert f(_ConnAsesor(fila=("Ana", "López", "Ruiz")[:2]), "ana") == "Ana López"
+    assert f(_ConnAsesor(fila=None), "sin_empleado") is None
+    assert f(_ConnAsesor(falla=True), "ana") is None
+
+
+def test_pdf_usa_nombre_formal_del_asesor_y_conserva_usuario(client, db, monkeypatch):
+    monkeypatch.setattr(genera_cotizacion, "obtener_nombre_asesor", lambda conn, u: "Ana López")
+    textos = []
+    original = pdf_cotizacion._CotizacionPDF.cell
+
+    def cell(self, w, h=0, txt="", *a, **k):
+        textos.append(str(txt))
+        return original(self, w, h, txt, *a, **k)
+
+    monkeypatch.setattr(pdf_cotizacion._CotizacionPDF, "cell", cell)
+    assert client.post("/genera-cotizacion", json=payload()).status_code == 200
+    assert "Asesor: Ana López" in textos
+    assert db.guardadas[0].usuario == "tester"  # lo guardado/bitácora sigue siendo el usuario
+
+
+def test_pdf_sin_empleado_cae_al_usuario(client, db, monkeypatch):
+    monkeypatch.setattr(genera_cotizacion, "obtener_nombre_asesor", lambda conn, u: None)
+    textos = []
+    original = pdf_cotizacion._CotizacionPDF.cell
+
+    def cell(self, w, h=0, txt="", *a, **k):
+        textos.append(str(txt))
+        return original(self, w, h, txt, *a, **k)
+
+    monkeypatch.setattr(pdf_cotizacion._CotizacionPDF, "cell", cell)
+    client.post("/genera-cotizacion", json=payload())
+    assert "Asesor: tester" in textos
+
+
 @pytest.fixture
 def client():
     app = FastAPI()
@@ -160,3 +226,52 @@ def test_pdf_soporta_acentos_y_descripciones_largas():
     ] * 40)
     contenido = pdf_cotizacion.generar_pdf_cotizacion(cot)
     assert contenido.startswith(b"%PDF")
+
+
+# ---- T2: cliente_id opcional y validado antes de folio y PDF
+from servicios import cotizacion_service as _cs
+from fastapi import HTTPException as _HTTPException
+
+
+@pytest.fixture
+def validacion(monkeypatch):
+    llamadas = {"codigo": 0, "pdf": 0}
+    monkeypatch.setattr(genera_cotizacion, "generar_nuevo_codigo",
+                        lambda conn: llamadas.__setitem__("codigo", llamadas["codigo"] + 1) or "ZTC-301")
+    original = genera_cotizacion.generar_pdf_cotizacion
+
+    def pdf(c):
+        llamadas["pdf"] += 1
+        return original(c)
+
+    monkeypatch.setattr(genera_cotizacion, "generar_pdf_cotizacion", pdf)
+
+    def validar(conn, cid):
+        if cid is not None and cid != 5:
+            raise _HTTPException(status_code=422, detail="El cliente indicado no existe o fue eliminado")
+
+    monkeypatch.setattr(genera_cotizacion, "validar_cliente_id", validar)
+    return llamadas
+
+
+def test_cliente_id_valido_se_guarda_y_conserva_con_otra_empresa(client, db, validacion):
+    r = client.post("/genera-cotizacion", json=payload(cliente_id=5, empresa="Nombre distinto"))
+    assert r.status_code == 200
+    assert db.guardadas[0].cliente_id == 5 and db.guardadas[0].empresa == "Nombre distinto"
+
+
+def test_sin_cliente_id_guarda_none(client, db, validacion):
+    assert client.post("/genera-cotizacion", json=payload()).status_code == 200
+    assert db.guardadas[0].cliente_id is None
+
+
+@pytest.mark.parametrize("valor", [0, -1, "abc", 1.5, "5", True])
+def test_cliente_id_invalido_422(client, db, validacion, valor):
+    assert client.post("/genera-cotizacion", json=payload(cliente_id=valor)).status_code == 422
+    assert validacion == {"codigo": 0, "pdf": 0} and db.guardadas == []
+
+
+def test_cliente_inexistente_422_antes_de_folio_y_pdf(client, db, validacion):
+    r = client.post("/genera-cotizacion", json=payload(cliente_id=99))
+    assert r.status_code == 422  # no se vuelve 500
+    assert validacion == {"codigo": 0, "pdf": 0} and db.guardadas == []

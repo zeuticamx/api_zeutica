@@ -10,8 +10,17 @@ CREATE TABLE IF NOT EXISTS prospectos (
   contacto        VARCHAR(255)  NULL,
   telefono        BIGINT        NULL DEFAULT 0,
   direccion       VARCHAR(500)  NULL,
+  -- Domicilio estructurado (calle, numero, interior opcional, colonia, cp, municipio, estado). `direccion` se
+  -- compone con ellos. Las tablas viejas reciben las columnas por ALTER y `cp` pasa de INT a texto
+  -- (domicilio_logica.asegurar_columnas_domicilio, llamada desde crear_tablas_prospectos).
+  calle           VARCHAR(150)  NULL,
+  numero          VARCHAR(20)   NULL,
+  interior        VARCHAR(20)   NULL,
+  colonia         VARCHAR(120)  NULL,
+  municipio       VARCHAR(100)  NULL,
+  estado          VARCHAR(60)   NULL,
   rfc             VARCHAR(20)   NULL,
-  cp              INT           NULL DEFAULT 0,
+  cp              VARCHAR(10)   NULL,
   regimen         VARCHAR(100)  NULL,
   usocfdi         VARCHAR(100)  NULL,
   frecuencia      VARCHAR(100)  NULL,

@@ -9,14 +9,14 @@ import asyncio
 import html
 import os
 from datetime import date
-from typing import Literal, Optional
+from typing import Literal, Optional, Union
 
 import mysql.connector
 from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field, field_validator
 
-from servicios import mov_reg
+from servicios import mov_reg, domicilio_logica
 from servicios.permisos import es_gerencia, puede_ver_todo, usuario_autenticado
 from servicios.telegram.notificacion import send_telegram_alert
 from servicios.errores_db import detalle_error_db
@@ -63,6 +63,8 @@ def crear_tablas_prospectos():
         cursor.execute("SHOW COLUMNS FROM prospectos_seguimientos LIKE 'eliminado'")
         if not cursor.fetchall():
             cursor.execute("ALTER TABLE prospectos_seguimientos ADD COLUMN eliminado TINYINT(1) NOT NULL DEFAULT 0")
+        # Tablas anteriores al domicilio estructurado: columnas nuevas y `cp` de INT a texto.
+        domicilio_logica.asegurar_columnas_domicilio(cursor, "prospectos")
         conn.commit()
         print("Tablas de prospectos verificadas/creadas.")
     except mysql.connector.Error as err:
@@ -108,8 +110,14 @@ class ProspectoNuevo(BaseModel):
     contacto: Optional[str] = ""
     telefono: Optional[int] = 0
     direccion: Optional[str] = None
+    calle: Optional[str] = None
+    numero: Optional[str] = None
+    interior: Optional[str] = None
+    colonia: Optional[str] = None
+    municipio: Optional[str] = None
+    estado: Optional[str] = None
     rfc: Optional[str] = None
-    cp: Optional[int] = 0
+    cp: Optional[Union[int, str]] = None
     regimen: Optional[str] = None
     usocfdi: Optional[str] = None
     uso_cfdi: Optional[str] = None
@@ -135,8 +143,14 @@ class ProspectoEditar(BaseModel):
     contacto: Optional[str] = None
     telefono: Optional[int] = None
     direccion: Optional[str] = None
+    calle: Optional[str] = None
+    numero: Optional[str] = None
+    interior: Optional[str] = None
+    colonia: Optional[str] = None
+    municipio: Optional[str] = None
+    estado: Optional[str] = None
     rfc: Optional[str] = None
-    cp: Optional[int] = None
+    cp: Optional[Union[int, str]] = None
     regimen: Optional[str] = None
     usocfdi: Optional[str] = None
     uso_cfdi: Optional[str] = None
@@ -162,6 +176,7 @@ class SeguimientoNuevo(BaseModel):
 
 CAMPOS_EDITABLES = (
     "nombre", "email", "empresa", "contacto", "telefono", "direccion", "rfc",
+    "calle", "numero", "interior", "colonia", "municipio", "estado",
     "cp", "regimen", "usocfdi", "frecuencia", "credito", "monto_credito", "dias_credito", "vendedor",
 )
 
@@ -243,16 +258,24 @@ async def crear_prospecto(datos: ProspectoNuevo, usuario: str = Depends(usuario_
     if datos.vendedor and not es_gerencia(usuario) and datos.vendedor.strip().lower() != usuario.strip().lower():
         raise HTTPException(status_code=403, detail="Solo gerencia puede asignar prospectos a otro vendedor")
 
+    # Domicilio estructurado: vacío es válido; con algo capturado debe estar completo.
+    try:
+        dom = domicilio_logica.validar_domicilio(datos.model_dump())
+    except ValueError as err:
+        raise HTTPException(status_code=422, detail=str(err))
+
     conn = get_db_connection()
     cursor = conn.cursor()
     try:
         cursor.execute(
             """INSERT INTO prospectos
-               (nombre, email, empresa, contacto, telefono, direccion, rfc, cp, regimen, usocfdi,
+               (nombre, email, empresa, contacto, telefono, direccion, calle, numero, interior, colonia,
+                municipio, estado, rfc, cp, regimen, usocfdi,
                 frecuencia, credito, monto_credito, dias_credito, etapa, vendedor, registrado_por)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'nuevo',%s,%s)""",
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'nuevo',%s,%s)""",
             (nombre, datos.email, datos.empresa, datos.contacto, datos.telefono or 0,
-             datos.direccion, datos.rfc, datos.cp or 0, datos.regimen,
+             dom["direccion"] or datos.direccion, dom["calle"], dom["numero"], dom["interior"], dom["colonia"],
+             dom["municipio"], dom["estado"], datos.rfc, dom["cp"], datos.regimen,
              datos.uso_cfdi or datos.usocfdi, datos.frecuencia, int(bool(datos.credito)),
              datos.monto_credito or 0, datos.dias_credito or 0, vendedor, usuario),
         )
@@ -292,6 +315,19 @@ async def editar_prospecto(prospecto_id: int, datos: ProspectoEditar, usuario: s
         fila = _autorizado(cursor, prospecto_id, usuario)
         if fila["etapa"] == "convertido":
             raise HTTPException(status_code=409, detail="Este prospecto ya es cliente; edítalo desde Clientes")
+        # Domicilio: se valida el conjunto (lo guardado + lo que cambió), porque el PATCH manda solo lo modificado.
+        if set(campos) & set(domicilio_logica.CAMPOS_DOMICILIO):
+            mezcla = {k: fila.get(k) for k in domicilio_logica.CAMPOS_DOMICILIO}
+            mezcla.update({k: campos[k] for k in domicilio_logica.CAMPOS_DOMICILIO if k in campos})
+            try:
+                dom = domicilio_logica.validar_domicilio(mezcla)
+            except ValueError as err:
+                raise HTTPException(status_code=422, detail=str(err))
+            for k in domicilio_logica.CAMPOS_DOMICILIO:
+                if k in campos:
+                    campos[k] = dom[k]
+            if dom["direccion"]:
+                campos["direccion"] = dom["direccion"]
         reasignado = None
         if "vendedor" in campos:
             nuevo = (campos.pop("vendedor") or "").strip()
@@ -392,11 +428,14 @@ async def convertir_a_cliente(prospecto_id: int, usuario: str = Depends(usuario_
             raise HTTPException(status_code=409, detail=f"Ya existe un cliente llamado '{nombre}'")
         cursor.execute(
             """INSERT INTO clientes
-               (nombre, email, empresa, contacto, telefono, direccion, rfc, cp, regimen, usocfdi,
+               (nombre, email, empresa, contacto, telefono, direccion, calle, numero, interior, colonia,
+                municipio, estado, rfc, cp, regimen, usocfdi,
                 frecuencia, usuario, credito, monto_credito, dias_credito)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
             (nombre, fila.get("email"), fila.get("empresa"), fila.get("contacto"), fila.get("telefono") or 0,
-             fila.get("direccion"), fila.get("rfc"), fila.get("cp") or 0, fila.get("regimen"),
+             fila.get("direccion"), fila.get("calle"), fila.get("numero"), fila.get("interior"), fila.get("colonia"),
+             fila.get("municipio"), fila.get("estado"), fila.get("rfc"),
+             domicilio_logica.cp_a_texto(fila.get("cp")), fila.get("regimen"),
              fila.get("usocfdi"), fila.get("frecuencia"), usuario,
              int(bool(fila.get("credito"))), fila.get("monto_credito") or 0, fila.get("dias_credito") or 0),
         )

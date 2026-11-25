@@ -1,9 +1,9 @@
 import mysql.connector, html, asyncio
 from pydantic import BaseModel
 from fastapi import APIRouter, Depends, HTTPException
-from typing import Optional, List
+from typing import Optional, List, Union
 import os
-from servicios import mov_reg
+from servicios import mov_reg, domicilio_logica
 from dotenv import load_dotenv
 from servicios.telegram.notificacion import send_telegram_alert
 from servicios.permisos import requerir_gerencia
@@ -44,18 +44,47 @@ def asegurar_columnas_eliminado():
         cursor.close()
         conn.close()
 
+def asegurar_columnas_domicilio():
+    """Agrega a clientes las columnas del domicilio (calle, numero, interior, colonia, municipio, estado)
+    y convierte `cp` de INT a texto (conserva el cero inicial). Se llama en el lifespan; idempotente."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    try:
+        domicilio_logica.asegurar_columnas_domicilio(cursor, "clientes")
+        conn.commit()
+    finally:
+        cursor.close()
+        conn.close()
+
+def _domicilio_o_422(cliente) -> dict:
+    """Valida el domicilio del body; ValueError → 422. Devuelve los campos normalizados y `direccion`."""
+    try:
+        return domicilio_logica.validar_domicilio({
+            "calle": cliente.calle, "numero": cliente.numero, "interior": cliente.interior,
+            "colonia": cliente.colonia, "cp": cliente.cp, "municipio": cliente.municipio,
+            "estado": cliente.estado,
+        })
+    except ValueError as err:
+        raise HTTPException(status_code=422, detail=str(err))
+
 # Definimos un modelo para recibir los datos en JSON (Body)
-class Cliente(BaseModel):    
+class Cliente(BaseModel):
     nombre: str
     email: Optional[str] = None
     empresa: str
     contacto: str
     telefono: int
-    direccion: Optional[str] = None
+    direccion: Optional[str] = None  # texto libre anterior; si llegan los campos del domicilio se compone con ellos
+    calle: Optional[str] = None
+    numero: Optional[str] = None
+    interior: Optional[str] = None
+    colonia: Optional[str] = None
+    municipio: Optional[str] = None
+    estado: Optional[str] = None
 
 class clienteRfc(Cliente): # molde con herencia para cliente factura
     rfc: Optional[str] = None
-    cp: Optional[int] = None
+    cp: Optional[Union[int, str]] = None  # texto de 5 dígitos; un entero (panel viejo) se rellena con ceros
     regimen: Optional[str] = None
     usocdfi: Optional[str] = None
     uso_cfdi: Optional[str] = None  # nombre que envía el panel; usocdfi se conserva por compatibilidad
@@ -238,20 +267,27 @@ async def cliente_nuevo(cliente: clienteRfc, usuario: str):
     if not nombre:
         raise HTTPException(status_code=422, detail="El nombre del cliente es obligatorio")
 
+    # Domicilio estructurado: vacío es válido; con algo capturado debe estar completo (422 antes de abrir la BD)
+    dom = _domicilio_o_422(cliente)
+    # Con campos nuevos `direccion` se compone con ellos; sin ellos se conserva el texto libre recibido
+    direccion = dom["direccion"] or cliente.direccion
+
     conn = get_db_connection()
-    cursor = conn.cursor() 
+    cursor = conn.cursor()
 
     # El Query de inserción
     query = """
-        INSERT INTO clientes (nombre, email, empresa, contacto, telefono, direccion, rfc, cp, regimen, usocfdi, frecuencia, usuario, credito, monto_credito, dias_credito) 
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO clientes (nombre, email, empresa, contacto, telefono, direccion, calle, numero, interior, colonia, municipio, estado, rfc, cp, regimen, usocfdi, frecuencia, usuario, credito, monto_credito, dias_credito)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
     """
 
     # El panel manda uso_cfdi; usocdfi (typo histórico) sigue aceptándose
     uso_cfdi = cliente.uso_cfdi or cliente.usocdfi
 
     # Extraemos los valores del objeto cliente
-    valores = (nombre, cliente.email, cliente.empresa, cliente.contacto, cliente.telefono, cliente.direccion, cliente.rfc, cliente.cp, cliente.regimen, uso_cfdi, cliente.frecuencia, cliente.usuario, cliente.credito, cliente.monto_credito, cliente.dias_credito or 0)
+    valores = (nombre, cliente.email, cliente.empresa, cliente.contacto, cliente.telefono, direccion,
+               dom["calle"], dom["numero"], dom["interior"], dom["colonia"], dom["municipio"], dom["estado"],
+               cliente.rfc, dom["cp"], cliente.regimen, uso_cfdi, cliente.frecuencia, cliente.usuario, cliente.credito, cliente.monto_credito, cliente.dias_credito or 0)
 
     try:
         # El selector de cotizaciones identifica al cliente por nombre: se evitan duplicados al crear
@@ -294,20 +330,26 @@ async def edit_cliente(cliente: clienteEditar, usuario: str):
     """
     Dependencia para editar un cliente ya registrado.
     """
+    # Un cliente viejo (solo texto libre) se puede editar sin completar el domicilio: vacío es válido.
+    dom = _domicilio_o_422(cliente)
+    direccion = dom["direccion"] or cliente.direccion
+
     conn = get_db_connection()
     cursor = conn.cursor()
 
     # El Query de actualización
     query = """
-        UPDATE clientes 
-        SET nombre = %s, email = %s, empresa = %s, contacto = %s, telefono = %s, 
-            direccion = %s, rfc = %s, cp = %s, regimen = %s, usocfdi = %s, frecuencia = %s, credito = %s, monto_credito = %s, dias_credito = %s
+        UPDATE clientes
+        SET nombre = %s, email = %s, empresa = %s, contacto = %s, telefono = %s,
+            direccion = %s, calle = %s, numero = %s, interior = %s, colonia = %s, municipio = %s, estado = %s,
+            rfc = %s, cp = %s, regimen = %s, usocfdi = %s, frecuencia = %s, credito = %s, monto_credito = %s, dias_credito = %s
         WHERE id = %s AND eliminado = 0
     """
 
     # Extraemos los valores del objeto cliente (el id va al final)
-    valores = (cliente.nombre, cliente.email, cliente.empresa, cliente.contacto, cliente.telefono, 
-               cliente.direccion, cliente.rfc, cliente.cp, cliente.regimen, cliente.uso_cfdi or cliente.usocdfi, cliente.frecuencia, cliente.credito, cliente.monto_credito, cliente.dias_credito, cliente.id)
+    valores = (cliente.nombre, cliente.email, cliente.empresa, cliente.contacto, cliente.telefono,
+               direccion, dom["calle"], dom["numero"], dom["interior"], dom["colonia"], dom["municipio"], dom["estado"],
+               cliente.rfc, dom["cp"], cliente.regimen, cliente.uso_cfdi or cliente.usocdfi, cliente.frecuencia, cliente.credito, cliente.monto_credito, cliente.dias_credito, cliente.id)
 
     try:
         cursor.execute(query, valores)

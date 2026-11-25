@@ -1,13 +1,13 @@
 import mysql.connector
 import base64, html, asyncio
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, StrictInt
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import Response
 import os
 from dotenv import load_dotenv
 from typing import Optional, List
 from servicios import mov_reg
-from servicios.cotizacion_service import generar_nuevo_codigo, guardar_cotizacion_db
+from servicios.cotizacion_service import generar_nuevo_codigo, guardar_cotizacion_db, validar_cliente_id
 from servicios.pdf_cotizacion import generar_pdf_cotizacion
 from servicios.telegram.notificacion import send_telegram_alert
 from servicios.errores_db import detalle_error_db
@@ -50,13 +50,50 @@ class CotizacionSchema(BaseModel):
     comentarios: Optional[str] = None
     usuario: str
     pdf: Optional[str] = None
+    # Cliente del catálogo al que se liga la cotización (opcional; entero >= 1 que exista).
+    cliente_id: Optional[StrictInt] = Field(default=None, ge=1)
     # Solo para el PDF (no se guardan): los precios de items y subtotal ya vienen con
     # el descuento aplicado; con esto se imprime la fila "Descuento (x%)".
     # Empresa que se imprime en el renglón EMPRESA (empresa guarda el nombre del cliente).
     empresa_pdf: Optional[str] = None
+    # Nombre formal del asesor para el PDF (nombres + apellido paterno); lo resuelve el
+    # backend desde `empleados`. No se guarda: `usuario` sigue siendo el de la sesión.
+    asesor_pdf: Optional[str] = None
     descuento_porcentaje: float = 0
     descuento_monto: float = 0
     items: List[ItemCotizacion]
+
+
+def armar_nombre_asesor(nombres, apellido_paterno) -> Optional[str]:
+    """«Nombres + apellido paterno»; None si no hay nombres (se usará el usuario)."""
+    nombres = " ".join(str(nombres or "").split())
+    paterno = " ".join(str(apellido_paterno or "").split())
+    if not nombres:
+        return None
+    return f"{nombres} {paterno}".strip()
+
+
+def obtener_nombre_asesor(conn, usuario: str) -> Optional[str]:
+    """Nombre formal del empleado ligado al usuario. Si no existe o la consulta falla,
+    devuelve None y el PDF conserva el nombre de usuario (no bloquea la cotización)."""
+    cursor = None
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT nombres, apellido_paterno FROM empleados WHERE usuario = %s LIMIT 1",
+            (usuario,),
+        )
+        fila = cursor.fetchone()
+        return armar_nombre_asesor(fila[0], fila[1]) if fila else None
+    except Exception as e:
+        print(f"No se pudo resolver el nombre del asesor de {usuario}: {e}")
+        return None
+    finally:
+        if cursor is not None:
+            try:
+                cursor.close()
+            except Exception:
+                pass
 
 @router.post("/genera-cotizacion")
 async def genera_cotizacion(coti: CotizacionSchema):
@@ -66,9 +103,15 @@ async def genera_cotizacion(coti: CotizacionSchema):
     """
     conn = get_db_connection()
     try:
+        # Valida el cliente ANTES de asignar folio o generar el PDF (422).
+        validar_cliente_id(conn, coti.cliente_id)
+
         # Consecutivo real desde el servicio compartido: ignoramos lo que
         # venga en el payload para evitar códigos duplicados.
         coti.codigo_cotizacion = generar_nuevo_codigo(conn)
+
+        # El PDF muestra nombre + apellido paterno del asesor, no el usuario de sesión.
+        coti.asesor_pdf = obtener_nombre_asesor(conn, coti.usuario)
 
         # Construimos el PDF en memoria (bytes).
         pdf_bytes = generar_pdf_cotizacion(coti)
@@ -113,6 +156,9 @@ async def genera_cotizacion(coti: CotizacionSchema):
                 "X-Cotizacion-Id": str(cotizacion_id),
             },
         )
+
+    except HTTPException:
+        raise
 
     except mysql.connector.Error as err:
         conn.rollback()

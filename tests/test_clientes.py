@@ -136,6 +136,49 @@ def test_nombre_duplicado_da_409_sin_importar_mayusculas(client, db):
     assert db.inserts() == []
 
 
+DOMICILIO = {"calle": "Av. Juárez", "numero": "100", "interior": "4", "colonia": "Centro",
+             "cp": "44100", "municipio": "Guadalajara", "estado": "Jalisco"}
+
+
+def test_alta_con_domicilio_estructurado_guarda_los_campos_y_compone_direccion(client, db):
+    r = client.post("/clientenuevo/tester", json=cliente_valido(direccion="", **DOMICILIO))
+    assert r.status_code == 200
+    (q, p), = db.inserts()
+    assert "calle" in q and "municipio" in q and "estado" in q
+    assert "Av. Juárez 100 Int. 4, Col. Centro, CP 44100, Guadalajara, Jalisco" in p
+    assert ("Av. Juárez", "100", "4", "Centro", "Guadalajara", "Jalisco") == p[6:12]
+    assert "44100" in p
+
+
+def test_alta_sin_domicilio_nuevo_conserva_el_texto_libre_y_acepta_cp_entero(client, db):
+    # Compatibilidad con un panel viejo: direccion libre y cp entero.
+    assert client.post("/clientenuevo/tester", json=cliente_valido()).status_code == 200
+    (q, p), = db.inserts()
+    assert "Calle 1" in p and "44100" in p and None in p[6:12]
+
+
+def test_alta_con_cp_entero_de_4_digitos_recupera_el_cero(client, db):
+    assert client.post("/clientenuevo/tester", json=cliente_valido(cp=1000)).status_code == 200
+    assert "01000" in db.inserts()[0][1]
+
+
+def test_alta_sin_cp_guarda_null(client, db):
+    assert client.post("/clientenuevo/tester", json=cliente_valido(cp=0)).status_code == 200
+    assert db.inserts()[0][1][13] is None  # cp
+
+
+@pytest.mark.parametrize("cambio,texto", [
+    ({"calle": ""}, "falta calle"),
+    ({"municipio": "Mérida"}, "no pertenece a Jalisco"),
+    ({"estado": "Narnia"}, "no es válido"),
+    ({"cp": "123"}, "5 dígitos"),
+])
+def test_alta_con_domicilio_incompleto_o_invalido_da_422_sin_insertar(client, db, cambio, texto):
+    r = client.post("/clientenuevo/tester", json=cliente_valido(**{**DOMICILIO, **cambio}))
+    assert r.status_code == 422 and texto in r.json()["detail"]
+    assert db.inserts() == []
+
+
 def test_error_de_mysql_da_500_con_rollback(client, db):
     db.error_en = "INSERT INTO clientes"
     db.error = mysql.connector.Error("boom")

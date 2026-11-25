@@ -150,6 +150,64 @@ def test_editar_uso_cfdi_del_panel_se_guarda_en_usocfdi(client, db):
     assert "usocfdi = %s" in q and p[0] == "G03"
 
 
+DOM_PROSPECTO = {"calle": "Av. Juárez", "numero": "100", "colonia": "Centro", "cp": "44100",
+                 "municipio": "Guadalajara", "estado": "Jalisco"}
+
+
+def _asignaciones(q, p):
+    columnas = [a.replace(" = %s", "") for a in q.split(" SET ")[1].split(" WHERE ")[0].split(", ")]
+    return dict(zip(columnas, p[:-1]))
+
+
+def test_editar_domicilio_completo_guarda_campos_y_compone_direccion(client, db):
+    r = client.patch("/prospectos/1", json=DOM_PROSPECTO, headers=ANA)
+    assert r.status_code == 200
+    q, p = db.consultas("UPDATE prospectos SET")[0]
+    a = _asignaciones(q, p)
+    assert a["calle"] == "Av. Juárez" and a["estado"] == "Jalisco" and a["cp"] == "44100"
+    assert a["direccion"] == "Av. Juárez 100, Col. Centro, CP 44100, Guadalajara, Jalisco"
+
+
+def test_editar_un_solo_campo_del_domicilio_se_valida_contra_lo_guardado(client, db):
+    # El PATCH manda solo lo modificado: municipio nuevo con el estado ya guardado.
+    db.prospectos[1].update(DOM_PROSPECTO)
+    assert client.patch("/prospectos/1", json={"municipio": "Zapopan"}, headers=ANA).status_code == 200
+    a = _asignaciones(*db.consultas("UPDATE prospectos SET")[0])
+    assert a["municipio"] == "Zapopan" and a["direccion"].endswith("Zapopan, Jalisco")
+    db.ejecutados.clear()
+    r = client.patch("/prospectos/1", json={"municipio": "Mérida"}, headers=ANA)
+    assert r.status_code == 422 and "no pertenece a Jalisco" in r.json()["detail"]
+    assert db.consultas("UPDATE prospectos SET") == []
+
+
+def test_editar_domicilio_incompleto_da_422(client, db):
+    r = client.patch("/prospectos/1", json={"colonia": "Centro"}, headers=ANA)
+    assert r.status_code == 422 and "Completa el domicilio" in r.json()["detail"]
+    assert db.consultas("UPDATE prospectos SET") == []
+
+
+def test_editar_cp_de_prospecto_viejo_sin_domicilio_nuevo_no_exige_el_resto(client, db):
+    assert client.patch("/prospectos/1", json={"cp": 44100}, headers=ANA).status_code == 200
+    assert _asignaciones(*db.consultas("UPDATE prospectos SET")[0])["cp"] == "44100"
+
+
+def test_crear_prospecto_con_domicilio_y_con_domicilio_incompleto(client, db):
+    base = {"nombre": "Nuevo P"}
+    assert client.post("/prospectos", json={**base, **DOM_PROSPECTO}, headers=ANA).status_code == 200
+    q, p = db.consultas("INSERT INTO prospectos")[0]
+    assert "calle" in q and "Av. Juárez 100, Col. Centro, CP 44100, Guadalajara, Jalisco" in p
+    db.ejecutados.clear()
+    r = client.post("/prospectos", json={**base, "calle": "X"}, headers=ANA)
+    assert r.status_code == 422 and db.consultas("INSERT INTO prospectos") == []
+
+
+def test_convertir_copia_el_domicilio_al_cliente(client, db):
+    db.prospectos[1].update(DOM_PROSPECTO, direccion="Av. Juárez 100, Col. Centro, CP 44100, Guadalajara, Jalisco")
+    assert client.post("/prospectos/1/convertir", headers=ANA).status_code == 200
+    q, p = db.consultas("INSERT INTO clientes")[0]
+    assert "calle" in q and "Av. Juárez" in p and "Guadalajara" in p and "Jalisco" in p and "44100" in p
+
+
 def test_editar_nombre_vacio_da_422_y_sin_campos_da_422(client, db):
     assert client.patch("/prospectos/1", json={"nombre": "   "}, headers=ANA).status_code == 422
     assert client.patch("/prospectos/1", json={}, headers=ANA).status_code == 422

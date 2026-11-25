@@ -151,7 +151,7 @@ def generar_pdf_cotizacion(cot) -> bytes:
     pdf.set_font("Helvetica", "", 8)
     pdf.set_text_color(*NEGRO)
     for linea in (EMPRESA_DOMICILIO, EMPRESA_WEB, EMPRESA_TEL, EMPRESA_EMAIL,
-                  f"Asesor: {_txt(cot.usuario)}"):
+                  f"Asesor: {_txt(getattr(cot, 'asesor_pdf', None) or cot.usuario)}"):
         pdf.cell(115, 4.5, linea, 0, new_x=XPos.LMARGIN, new_y=YPos.NEXT, align="L")
 
     pdf.ln(8)

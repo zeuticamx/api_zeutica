@@ -12,10 +12,16 @@ from zoneinfo import ZoneInfo
 CDMX = ZoneInfo("America/Mexico_City")
 USUARIOS_CRONOMETRO = ("fparra",)
 FORMATO = "%Y-%m-%d %H:%M:%S"
+# Usuarios que solo VEN el cronómetro de los cronometrados (sin poder operarlo).
+USUARIOS_VISORES = ("ventas",)
 
 
 def se_cronometra(usuario) -> bool:
     return str(usuario or "").strip().lower() in USUARIOS_CRONOMETRO
+
+
+def es_visor(usuario) -> bool:
+    return str(usuario or "").strip().lower() in USUARIOS_VISORES
 
 
 def ahora_mx() -> datetime:

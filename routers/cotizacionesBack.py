@@ -1,5 +1,5 @@
 import mysql.connector, html, asyncio
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, StrictInt
 from fastapi import APIRouter, Depends, HTTPException
 from typing import List
 from decimal import Decimal
@@ -8,10 +8,11 @@ import os
 from servicios import mov_reg
 from dotenv import load_dotenv
 from typing import Optional
-from servicios.cotizacion_service import generar_nuevo_codigo, guardar_cotizacion_db
+from servicios.cotizacion_service import generar_nuevo_codigo, guardar_cotizacion_db, validar_cliente_id
 from servicios.telegram.notificacion import send_telegram_alert #notificaciones a telegram
 from servicios.errores_db import detalle_error_db
 from servicios import cotizacion_cancelacion as cancelacion
+from servicios import cotizacion_seguimiento as seguimiento_cat
 from servicios import skydropx_envios
 from servicios.permisos import usuario_autenticado, es_gerencia
 
@@ -52,6 +53,8 @@ class CotizacionSchema(BaseModel):
     comentarios: str
     usuario: str
     pdf: str
+    # Cliente del catálogo al que se liga la cotización (opcional; entero >= 1 que exista).
+    cliente_id: Optional[StrictInt] = Field(default=None, ge=1)
     items: List[ItemCotizacion]
 
 # Creamos el "molde" para los datos que enviará el frontend
@@ -113,6 +116,8 @@ async def guardar_cotizacion(cot: CotizacionSchema):
     """
     connection = get_db_connection()
     try:
+        validar_cliente_id(connection, cot.cliente_id)
+
         # El INSERT vive en el servicio de raíz para reutilizarlo también
         # en /genera-cotizacion.
         cotizacion_id = guardar_cotizacion_db(connection, cot)
@@ -134,6 +139,9 @@ async def guardar_cotizacion(cot: CotizacionSchema):
         asyncio.create_task(send_telegram_alert(message))
 
         return {"status": "success", "id": cotizacion_id}
+
+    except HTTPException:
+        raise
 
     except mysql.connector.Error as err:
         connection.rollback()
@@ -172,6 +180,7 @@ async def consulta_cotizacion():
                     c.firma_envio,
                     c.vendido,
                     c.seguimiento,
+                    c.seguimiento_otros,
                     c.fecha_vencimiento,
                     c.usuario,
                     COALESCE(c.cancelada, 0) AS cancelada,
@@ -208,6 +217,7 @@ async def consulta_cotizacion():
                         "firma_envio": fila["firma_envio"],
                         "vendido": fila["vendido"],
                         "seguimiento": fila["seguimiento"],
+                        "seguimiento_otros": fila.get("seguimiento_otros"),
                         # Se devuelve sin filtrar por fecha: el panel decide que
                         # mostrar con sus pestañas Vigentes / Vencidas / Todas.
                         "fecha_vencimiento": str(fila["fecha_vencimiento"]) if isinstance(fila["fecha_vencimiento"], (datetime.date, datetime.datetime)) else fila["fecha_vencimiento"],
@@ -450,18 +460,22 @@ async def obtener_items_cotizacion(cotizacion_id: int):
 class SeguimientoUpdate(BaseModel):
     codigo_cotizacion: str
     seguimiento: Optional[str] = None
+    seguimiento_otros: Optional[str] = None
     usuario: Optional[str] = None
 
 @router.post("/cotizaciones/seguimiento")
 async def actualizar_seguimiento(datos: SeguimientoUpdate):
     """
-    Actualiza el texto de seguimiento libre de una cotización.
+    Actualiza el seguimiento de una cotización: catálogo cerrado (ESPERANDO, PAGADO,
+    ENVIADO, ENTREGADO, OTROS) y, con OTROS, un detalle de texto libre. Valor fuera del
+    catálogo -> 422; vacío = sin seguimiento.
     """
+    valor, detalle = seguimiento_cat.normalizar_seguimiento(datos.seguimiento, datos.seguimiento_otros)
     connection = get_db_connection()
     try:
         with connection.cursor() as cursor:
-            sql = "UPDATE cotizaciones SET seguimiento = %s WHERE codigo_cotizacion = %s"
-            cursor.execute(sql, (datos.seguimiento, datos.codigo_cotizacion))
+            sql = "UPDATE cotizaciones SET seguimiento = %s, seguimiento_otros = %s WHERE codigo_cotizacion = %s"
+            cursor.execute(sql, (valor, detalle, datos.codigo_cotizacion))
 
             if cursor.rowcount == 0:
                 raise HTTPException(status_code=404, detail=f"Cotización {datos.codigo_cotizacion} no encontrada")
@@ -692,6 +706,65 @@ async def reactivar_cotizacion(codigo_cotizacion: str, usuario: str = Depends(us
         connection.rollback()
         print(f"Error BD al reactivar cotización: {err}")
         raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error BD"))
+    finally:
+        connection.close()
+
+
+def _texto(valor):
+    """Fechas y montos como texto, igual que GET /consulta/cotizacion."""
+    if isinstance(valor, (datetime.date, datetime.datetime, Decimal)):
+        return str(valor)
+    return valor
+
+
+@router.get("/cotizaciones/por-cliente/{cliente_id}")
+async def cotizaciones_por_cliente(cliente_id: int):
+    """
+    Cotizaciones ligadas a un cliente (cotizaciones.cliente_id), en todos los
+    estados y de la más reciente a la más antigua. Cualquier sesión puede
+    consultarla. Nunca devuelve el contenido del PDF, solo `tiene_pdf`.
+    """
+    connection = get_db_connection()
+    try:
+        with connection.cursor(dictionary=True) as cursor:
+            cursor.execute("SELECT id FROM clientes WHERE id = %s AND eliminado = 0", (cliente_id,))
+            if not cursor.fetchone():
+                raise HTTPException(status_code=404, detail="Cliente no encontrado")
+            cursor.execute("""
+                SELECT
+                    c.id,
+                    c.codigo_cotizacion,
+                    c.fecha,
+                    c.subtotal,
+                    c.total,
+                    c.usuario,
+                    c.vendido,
+                    COALESCE(c.cancelada, 0) AS cancelada,
+                    c.fecha_cancelada,
+                    c.cancelada_por,
+                    c.motivo_cancelacion,
+                    c.fecha_vencimiento,
+                    c.relacion_factura,
+                    c.seguimiento,
+                    c.seguimiento_otros,
+                    (c.pdf IS NOT NULL AND c.pdf <> '') AS tiene_pdf
+                FROM cotizaciones c
+                WHERE c.cliente_id = %s
+                ORDER BY c.fecha DESC, c.id DESC
+            """, (cliente_id,))
+            filas = cursor.fetchall()
+        lista = []
+        for f in filas:
+            item = {k: _texto(v) for k, v in f.items()}
+            item["cancelada"] = int(f.get("cancelada") or 0)
+            item["tiene_pdf"] = bool(f.get("tiene_pdf"))
+            lista.append(item)
+        return {"cotizaciones": lista}
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error al listar cotizaciones por cliente: {e}")
+        raise HTTPException(status_code=500, detail=detalle_error_db(e, "Error en BD"))
     finally:
         connection.close()
 

@@ -25,6 +25,7 @@ from dotenv import load_dotenv
 from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field, field_validator
 
+from servicios import crm_busqueda
 from servicios import crm_exportacion
 from servicios import crm_metricas
 from servicios import mov_reg
@@ -44,6 +45,7 @@ DIAS_PROXIMOS = 7  # "Mis seguimientos" muestra también lo de la próxima seman
 Tipo = Literal["llamada", "correo", "whatsapp", "reunion"]
 Etapa = Literal["contacto_inicial", "en_seguimiento", "cotizado", "ganado", "perdido"]
 Resultado = Literal["contesto", "no_contesto", "interesado", "no_interesado", "pidio_cotizacion"]
+EstadoSeguimiento = Literal["vencidos", "hoy", "proximos"]
 TipoEvento = Literal["cita", "tarea", "llamada", "reunion", "whatsapp", "correo"]
 EstadoEvento = Literal["pendiente", "hecho", "cancelado"]
 
@@ -524,7 +526,12 @@ async def crm_cliente_ficha(cliente_id: int, usuario: str = Depends(usuario_aute
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
     try:
-        fila = _cliente_autorizado(cursor, cliente_id, usuario, lectura=True)
+        # Ficha abierta a toda sesión (spec 001, D2/S1): solo 404 si no existe. La escritura sigue
+        # protegida en _cliente_autorizado; aquí solo se avisa con puede_editar (misma regla).
+        fila = _fila_cliente(cursor, cliente_id)
+        if not fila:
+            raise HTTPException(status_code=404, detail="Cliente no encontrado")
+        puede_editar = bool(puede_gestionar(usuario, vendedor_efectivo(fila)))
         cursor.execute(
             """SELECT id, vendedor, tipo, fecha, resultado, notas, proxima_accion, proxima_fecha, seguimiento_cerrado
                FROM crm_interacciones WHERE cliente_id = %s AND eliminado = 0
@@ -540,7 +547,7 @@ async def crm_cliente_ficha(cliente_id: int, usuario: str = Depends(usuario_aute
         historial = cursor.fetchall()
         cliente = {k: v for k, v in fila.items() if k not in ("en_cartera", "registrado_por")}
         cliente["vendedor"] = vendedor_efectivo(fila)
-        return {"cliente": cliente, "interacciones": interacciones, "historial_etapas": historial}
+        return {"cliente": cliente, "interacciones": interacciones, "historial_etapas": historial, "puede_editar": puede_editar}
     except mysql.connector.Error as err:
         _error_db(conn, err, "ficha")
     finally:
@@ -683,6 +690,8 @@ async def crm_bitacora(
     hasta: Optional[date] = None,
     vendedor: Optional[List[str]] = Query(None),
     tipo: Optional[List[Tipo]] = Query(None),
+    resultado: Optional[List[Resultado]] = Query(None),
+    q: Optional[str] = Query(None, max_length=crm_busqueda.Q_MAX),
     cliente_id: Optional[int] = None,
     limit: int = Query(50, ge=1, le=200),
     offset: int = Query(0, ge=0),
@@ -713,9 +722,20 @@ async def crm_bitacora(
             frag, vals = _en("i.tipo", tipo)
             where.append(frag)
             params += vals
+        if resultado:
+            frag, vals = _en("i.resultado", resultado)
+            where.append(frag)
+            params += vals
+        busqueda = crm_busqueda.fragmento_busqueda(
+            q, ["c.nombre", "c.empresa", "i.notas", "i.proxima_accion"])
+        if busqueda:
+            where.append(busqueda[0])
+            params += busqueda[1]
 
         filtro = " AND ".join(where)
-        cursor.execute(f"SELECT COUNT(*) AS total FROM crm_interacciones i WHERE {filtro}", tuple(params))
+        cursor.execute(
+            f"SELECT COUNT(*) AS total FROM crm_interacciones i LEFT JOIN clientes c ON c.id = i.cliente_id WHERE {filtro}",
+            tuple(params))
         total = (cursor.fetchone() or {}).get("total", 0)
         cursor.execute(
             f"""SELECT i.id, i.cliente_id, c.nombre AS cliente, i.vendedor, i.tipo, i.fecha, i.resultado,
@@ -895,7 +915,13 @@ async def crm_eliminar_interaccion(interaccion_id: int, usuario: str = Depends(u
 # ---------- Seguimientos ----------
 
 @router.get("/crm/seguimientos")
-async def crm_seguimientos(vendedor: Optional[str] = None, usuario: str = Depends(usuario_autenticado)):
+async def crm_seguimientos(
+    vendedor: Optional[str] = None,
+    q: Optional[str] = Query(None, max_length=crm_busqueda.Q_MAX),
+    tipo: Optional[List[Tipo]] = Query(None),
+    estado: Optional[List[EstadoSeguimiento]] = Query(None),
+    usuario: str = Depends(usuario_autenticado),
+):
     """
     Seguimientos abiertos (vencidos, de hoy y de los próximos 7 días). Se asignan
     al dueno actual del cliente, así una reasignación mueve también sus pendientes.
@@ -908,6 +934,15 @@ async def crm_seguimientos(vendedor: Optional[str] = None, usuario: str = Depend
     if vendedor:
         where.append(f"{dueno} = %s")
         params.append(vendedor)
+    if tipo:
+        frag, vals = _en("i.tipo", tipo)
+        where.append(frag)
+        params += vals
+    busqueda = crm_busqueda.fragmento_busqueda(
+        q, ["c.nombre", "c.empresa", "i.proxima_accion", "i.notas", "CAST(c.telefono AS CHAR)", "c.email"])
+    if busqueda:
+        where.append(busqueda[0])
+        params += busqueda[1]
 
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
@@ -925,6 +960,11 @@ async def crm_seguimientos(vendedor: Optional[str] = None, usuario: str = Depend
             tuple(params),
         )
         resultado = crm_metricas.agrupar_seguimientos(cursor.fetchall(), hoy)
+        if estado:  # se aplica tras agrupar: mismas fronteras; el grupo descartado queda vacío y cuenta 0
+            for grupo in ("vencidos", "hoy", "proximos"):
+                if grupo not in estado:
+                    resultado[grupo] = []
+                    resultado["totales"][grupo] = 0
         resultado["fecha"] = hoy.isoformat()
         return resultado
     except mysql.connector.Error as err:
