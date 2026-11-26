@@ -263,18 +263,38 @@ def test_sin_token_o_token_invalido_rechaza(client, db):
     assert client.get("/crm/seguimientos", headers=auth("nope")).status_code == 401
 
 
+def _como_developer(db, monkeypatch):
+    db.tokens["tok-dev"] = "dev"
+    db.usuarios.add("dev")
+    monkeypatch.setattr(permisos, "nivel_usuario", lambda u: "developer" if u == "dev" else "ventas")
+    monkeypatch.setattr(crm, "nivel_usuario", lambda u: "developer" if u == "dev" else "ventas")
+    return auth("tok-dev")
+
+
 @pytest.mark.parametrize("cliente_id", [4, 2])  # 4: cartera de luis · 2: lo dio de alta luis
-def test_vendedor_no_gestiona_cliente_de_otro(client, db, cliente_id):
-    r = client.post("/crm/interacciones", json={"cliente_id": cliente_id, "tipo": "llamada"}, headers=ANA)
-    assert r.status_code == 403
-    assert client.patch(f"/crm/clientes/{cliente_id}/etapa", json={"etapa": "ganado"}, headers=ANA).status_code == 403
-    # la ficha (GET /crm/clientes/{id}) ya NO da 403: spec 001, T4 (antes se fijaba el 403 aquí)
-    assert client.get(f"/crm/clientes/{cliente_id}", headers=ANA).status_code == 200
+def test_developer_no_escribe_en_cliente_de_otro(client, db, monkeypatch, cliente_id):
+    dev = _como_developer(db, monkeypatch)
+    assert client.post("/crm/interacciones", json={"cliente_id": cliente_id, "tipo": "llamada"}, headers=dev).status_code == 403
+    assert client.patch(f"/crm/clientes/{cliente_id}/etapa", json={"etapa": "ganado"}, headers=dev).status_code == 403
     assert client.post("/crm/eventos", json={
         "cliente_id": cliente_id, "tipo": "cita", "titulo": "Visita", "inicio": "2026-10-05T10:00:00",
-    }, headers=ANA).status_code == 403
-    assert client.get("/crm/interacciones", params={"cliente_id": cliente_id}, headers=ANA).status_code == 403
+    }, headers=dev).status_code == 403
+    # leer sí: ficha e historial del cliente
+    assert client.get(f"/crm/clientes/{cliente_id}", headers=dev).status_code == 200
+    assert client.get("/crm/interacciones", params={"cliente_id": cliente_id}, headers=dev).status_code == 200
     assert db.consultas("INSERT") == [] and db.consultas("UPDATE") == []
+
+
+@pytest.mark.parametrize("cliente_id", [4, 2])
+def test_cartera_abierta_vendedor_opera_cliente_de_otro_sin_quitarle_el_dueno(client, db, cliente_id):
+    assert client.post("/crm/interacciones", json={"cliente_id": cliente_id, "tipo": "llamada"}, headers=ANA).status_code == 200
+    assert client.patch(f"/crm/clientes/{cliente_id}/etapa", json={"etapa": "ganado"}, headers=ANA).status_code == 200
+    assert client.post("/crm/eventos", json={
+        "cliente_id": cliente_id, "tipo": "cita", "titulo": "Visita", "inicio": "2026-10-05T10:00:00",
+    }, headers=ANA).status_code == 200
+    assert client.get("/crm/interacciones", params={"cliente_id": cliente_id}, headers=ANA).status_code == 200
+    assert db.cartera[cliente_id]["vendedor"] == "luis"  # el dueño no cambia
+    assert db.consultas("INSERT INTO crm_interacciones")[0][1][1] == "ana"  # el autor es quien registra
 
 
 # ---------- Ficha abierta y puede_editar (spec 001, T4) ----------
@@ -290,17 +310,17 @@ def test_ficha_de_cliente_ajeno_da_200_con_campos_de_s1_sin_filtrar_internos(cli
         assert campo in cli
     assert "en_cartera" not in cli and "registrado_por" not in cli
     assert cuerpo["interacciones"][0]["notas"] == "n" and "historial_etapas" in cuerpo
-    assert cuerpo["puede_editar"] is False
+    assert cuerpo["puede_editar"] is True  # cartera abierta: un vendedor puede operar clientes ajenos
 
 
 def test_ficha_inexistente_da_404(client, db):
     assert client.get("/crm/clientes/999", headers=ANA).status_code == 404
 
 
-def test_ficha_puede_editar_dueno_y_gerencia_si_otro_vendedor_no(client, db):
+def test_ficha_puede_editar_para_todo_vendedor_y_gerencia(client, db):
     assert client.get("/crm/clientes/3", headers=ANA).json()["puede_editar"] is True      # dueña
     assert client.get("/crm/clientes/3", headers=GER).json()["puede_editar"] is True      # gerencia
-    assert client.get("/crm/clientes/3", headers=LUIS).json()["puede_editar"] is False    # otro vendedor
+    assert client.get("/crm/clientes/3", headers=LUIS).json()["puede_editar"] is True     # otro vendedor: cartera abierta
     assert client.get("/crm/clientes/2", headers=LUIS).json()["puede_editar"] is True     # dueño provisional (alta)
 
 
@@ -308,14 +328,12 @@ def test_ficha_developer_ve_todo_pero_no_puede_editar(client, db, monkeypatch):
     db.tokens["tok-dev"] = "dev"
     db.usuarios.add("dev")
     monkeypatch.setattr(permisos, "nivel_usuario", lambda u: "developer" if u == "dev" else "ventas")
+    monkeypatch.setattr(crm, "nivel_usuario", lambda u: "developer" if u == "dev" else "ventas")
     r = client.get("/crm/clientes/3", headers=auth("tok-dev"))
     assert r.status_code == 200 and r.json()["puede_editar"] is False
 
 
-def test_ficha_abierta_no_abre_las_demas_rutas_con_cliente_ajeno(client, db):
-    assert client.patch("/crm/clientes/4/etapa", json={"etapa": "ganado"}, headers=ANA).status_code == 403
-    assert client.post("/crm/interacciones", json={"cliente_id": 4, "tipo": "llamada"}, headers=ANA).status_code == 403
-    assert client.get("/crm/interacciones", params={"cliente_id": 4}, headers=ANA).status_code == 403
+def test_cartera_abierta_no_abre_reasignar_vendedor(client, db):
     assert client.put("/crm/clientes/4/vendedor", json={"vendedor": "ana"}, headers=ANA).status_code == 403
 
 
@@ -358,17 +376,19 @@ def test_bitacora_de_gerencia_filtra_por_varios_vendedores_y_tipos(client, db):
     assert p[2:] == ("ana", "luis", "llamada")
 
 
-def test_bitacora_por_cliente_ajeno_da_403(client, db):
-    assert client.get("/crm/interacciones", params={"cliente_id": 4}, headers=ANA).status_code == 403
+def test_bitacora_por_cliente_ajeno_es_de_lectura_abierta(client, db):
+    assert client.get("/crm/interacciones", params={"cliente_id": 4}, headers=ANA).status_code == 200
 
 
-def test_buscador_de_vendedor_incluye_sus_clientes_y_los_sin_dueno(client, db):
+def test_listado_de_clientes_es_abierto_y_solo_mios_acota(client, db):
     client.get("/crm/clientes", params={"q": "sa"}, headers=ANA)
     q, p = db.ejecutados[-1]
-    assert "IS NULL" in q and p[-2] == "ana" and p[-1] == 20
+    assert "COALESCE(cc.vendedor" not in q.rsplit("WHERE", 1)[1] and "ana" not in p and p[-1] == 20
     client.get("/crm/clientes", params={"solo_mios": True}, headers=ANA)
     q, p = db.ejecutados[-1]
     assert "IS NULL" not in q and p == ("ana", 20)
+    client.get("/crm/clientes", params={"vendedor": "luis"}, headers=ANA)
+    assert db.ejecutados[-1][1] == ("luis", 20)
 
 
 def test_buscador_de_gerencia_ve_todo_o_filtra_por_vendedor(client, db):
@@ -775,11 +795,11 @@ def test_crear_evento_con_cliente_valida_cartera(client, db):
     }, headers=ANA)
     assert r.status_code == 200
     assert db.eventos_insert[0][0] == 3
-    # cliente de otro vendedor: 403 y no escribe
+    # cliente inexistente: 404 y no escribe (la cartera es abierta, ya no hay 403 por dueño)
     db.eventos_insert.clear()
     assert client.post("/crm/eventos", json={
-        "cliente_id": 4, "tipo": "cita", "titulo": "Visita planta", "inicio": "2026-10-05T10:00:00",
-    }, headers=ANA).status_code == 403
+        "cliente_id": 999, "tipo": "cita", "titulo": "Visita planta", "inicio": "2026-10-05T10:00:00",
+    }, headers=ANA).status_code == 404
     assert db.eventos_insert == []
 
 

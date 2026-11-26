@@ -10,10 +10,13 @@
 #     quitarle el dueño: queda en mov_reg, en editado_por/fecha_editado y se avisa
 #     a Telegram. Developer solo edita lo suyo. Eliminar: autor o gerencia. El chequeo
 #     de versión (409) evita pisar lo que otra persona acaba de cambiar.
-#   - Vendedor: gestiona los clientes de su cartera. Dueño de un cliente =
-#     crm_cartera.vendedor; si el cliente aún no entra al CRM, su dueno
+#   - Cartera de clientes ABIERTA al equipo (lectura y escritura): cualquier sesión de nivel
+#     ventas lista, registra interacciones, cambia etapa y agenda sobre cualquier cliente sin
+#     quitarle el dueño (puede_operar_cliente). Developer sigue en solo lectura sobre ajenos.
+#     Dueño de un cliente = crm_cartera.vendedor; si el cliente aún no entra al CRM, su dueno
 #     provisional es clientes.usuario (quien lo dio de alta). Un cliente sin
-#     ninguno de los dos lo "toma" quien registre la primera interacción.
+#     ninguno de los dos lo "toma" quien registre la primera interacción. Reasignar sigue
+#     siendo solo de gerencia.
 import asyncio
 import html
 import os
@@ -278,6 +281,15 @@ def puede_gestionar(usuario: str, vendedor: Optional[str]) -> bool:
     return vendedor.strip().lower() == str(usuario).strip().lower()
 
 
+def puede_operar_cliente(usuario: str, vendedor: Optional[str]) -> bool:
+    """Cartera abierta al equipo: cualquier sesión de nivel ventas (y gerencia) puede registrar interacciones,
+    cambiar etapa y agendar sobre cualquier cliente SIN quitarle el dueño. Developer sigue en solo lectura,
+    salvo sobre sus propios clientes (como antes). Aparte de puede_gestionar, que usa Comisiones."""
+    if puede_gestionar(usuario, vendedor):
+        return True
+    return nivel_usuario(usuario) != NIVEL_DEVELOPER
+
+
 def _yo(usuario) -> str:
     return str(usuario or "").strip().lower()
 
@@ -330,12 +342,13 @@ def _fila_cliente(cursor, cliente_id: int):
 
 
 def _cliente_autorizado(cursor, cliente_id: int, usuario: str, lectura: bool = False):
-    """lectura=True (solo GET): developer también ve clientes de otros; escribir sigue siendo del dueño o gerencia."""
+    """Cartera abierta: leer (lectura=True) lo puede cualquier sesión; escribir, cualquiera salvo developer
+    sobre clientes ajenos (403, solo lectura). El dueño no cambia al escribir."""
     fila = _fila_cliente(cursor, cliente_id)
     if not fila:
         raise HTTPException(status_code=404, detail="Cliente no encontrado")
-    if not (puede_gestionar(usuario, vendedor_efectivo(fila)) or (lectura and puede_ver_todo(usuario))):
-        raise HTTPException(status_code=403, detail="Este cliente pertenece a la cartera de otro vendedor")
+    if not (lectura or puede_operar_cliente(usuario, vendedor_efectivo(fila))):
+        raise HTTPException(status_code=403, detail="Developer solo puede consultar clientes de otros vendedores")
     return fila
 
 
@@ -471,8 +484,8 @@ async def crm_clientes(
     usuario: str = Depends(usuario_autenticado),
 ):
     """
-    Buscador / cartera. Vendedor: sus clientes y los que no tienen dueno
-    (solo_mios=true quita estos últimos). Gerencia: todos, o filtra por vendedor.
+    Buscador / cartera, abierta a toda sesión: devuelve todos los clientes. ?vendedor= filtra por dueño;
+    solo_mios=true deja solo los del usuario del token (vendedor, si viene, tiene prioridad).
     """
     where, params = ["c.eliminado = 0"], []
     if q and q.strip():
@@ -482,15 +495,11 @@ async def crm_clientes(
     if etapa:
         where.append("cc.etapa = %s")
         params.append(etapa)
-    if puede_ver_todo(usuario):
-        if vendedor:
-            where.append(f"{_DUENO_SQL} = %s")
-            params.append(vendedor)
+    if vendedor:
+        where.append(f"{_DUENO_SQL} = %s")
+        params.append(vendedor)
     elif solo_mios:
         where.append(f"{_DUENO_SQL} = %s")
-        params.append(usuario)
-    else:
-        where.append(f"({_DUENO_SQL} = %s OR {_DUENO_SQL} IS NULL)")
         params.append(usuario)
 
     query = f"""
@@ -531,7 +540,7 @@ async def crm_cliente_ficha(cliente_id: int, usuario: str = Depends(usuario_aute
         fila = _fila_cliente(cursor, cliente_id)
         if not fila:
             raise HTTPException(status_code=404, detail="Cliente no encontrado")
-        puede_editar = bool(puede_gestionar(usuario, vendedor_efectivo(fila)))
+        puede_editar = bool(puede_operar_cliente(usuario, vendedor_efectivo(fila)))
         cursor.execute(
             """SELECT id, vendedor, tipo, fecha, resultado, notas, proxima_accion, proxima_fecha, seguimiento_cerrado
                FROM crm_interacciones WHERE cliente_id = %s AND eliminado = 0

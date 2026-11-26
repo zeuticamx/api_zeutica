@@ -102,11 +102,12 @@ def test_crm_cliente_lectura_developer_escritura_no(monkeypatch):
     from routers import crm
     monkeypatch.setenv("USUARIOS_GERENCIA", "jefe")
     monkeypatch.setattr(permisos, "nivel_usuario", lambda u: "developer")
+    monkeypatch.setattr(crm, "nivel_usuario", lambda u: "developer")
     monkeypatch.setattr(crm, "_fila_cliente", lambda c, i: {"vendedor": "ana", "en_cartera": 1})
     monkeypatch.setattr(crm, "vendedor_efectivo", lambda f: f["vendedor"])
     assert crm._cliente_autorizado(None, 1, "dev", lectura=True)["vendedor"] == "ana"
     with pytest.raises(HTTPException) as e:
-        crm._cliente_autorizado(None, 1, "dev")              # escribir: sigue siendo del dueño o gerencia
+        crm._cliente_autorizado(None, 1, "dev")              # escribir en ajeno: developer sigue en solo lectura
     assert e.value.status_code == 403
 
 
