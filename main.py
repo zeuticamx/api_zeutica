@@ -18,7 +18,7 @@ from slowapi.errors import RateLimitExceeded
 from servicios.permisos import usuario_autenticado, asegurar_columna_token_expira, asegurar_columna_nivel, nivel_usuario, token_horas, es_gerencia
 from routers import cotizacionesBack, productos, ventas, clientes, traspaso, gastos, compras, cleanest, cuentas_pendientes,\
       abonos, estadisticas, inventario, empleados, notificaciones, cuentas_pagar, consulta_registros, pendientes, proveedores, genera_cotizacion, sofi_conversaciones, embarques, sofi_notificaciones, whatsapp_plantillas, skydropx
-from routers import crm, comisiones, prospectos, jobs, meli_webhook, meli_promos, anaqueles, reorden, landed_cost, mercado_ads, competencia, meli_stock_config, usuarios
+from routers import crm, comisiones, prospectos, jobs, meli_webhook, meli_promos, anaqueles, reorden, landed_cost, mercado_ads, competencia, meli_stock_config, usuarios, app_movil
 import mysql.connector
 from servicios import skydropx_envios
 from fastapi.middleware.cors import CORSMiddleware
@@ -457,6 +457,8 @@ app.include_router(mercado_ads.router, dependencies=[Depends(obtener_usuario_act
 app.include_router(competencia.router, dependencies=[Depends(obtener_usuario_actual)])
 app.include_router(meli_stock_config.router, dependencies=[Depends(obtener_usuario_actual)])
 app.include_router(landed_cost.router, dependencies=[Depends(obtener_usuario_actual)])
+# Descarga del APK (URL prefirmada de S3): cualquier sesión.
+app.include_router(app_movil.router, dependencies=[Depends(obtener_usuario_actual)])
 
 # Sin obtener_usuario_actual a proposito: el WebSocket valida el token por query
 # param y el POST de escalacion valida X-API-Key (n8n no tiene sesion de usuario).
