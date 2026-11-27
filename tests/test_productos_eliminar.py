@@ -60,7 +60,7 @@ class FakeCursor:
 
 def producto(sku, bodega=0, fba=0, clean=0, total=0, eliminado=0):
     return {"sku": sku, "nombre": f"Producto {sku}", "stock_bodega": bodega, "stock_fba": fba,
-            "stock_clean": clean, "stock_total": total, "eliminado": eliminado}
+            "stock_clean": clean, "stock_total": total, "eliminado": eliminado, "costo_total": 12.5}
 
 
 class FakeDB:
@@ -224,6 +224,24 @@ def test_listado_de_eliminados_es_solo_de_gerencia(client, db):
     r = client.get("/productos?eliminados=true", headers=GER)
     assert r.status_code == 200
     assert [p["sku"] for p in r.json()] == ["ELIM"]
+
+
+# ---------- Costo solo para gerencia y developer ----------
+
+@pytest.mark.parametrize("puede", [True, False])
+def test_listado_manda_el_costo_solo_a_quien_puede_verlo(client, db, monkeypatch, puede):
+    monkeypatch.setattr(productos, "puede_ver_todo", lambda usuario: puede)
+    r = client.get("/productos", headers=ANA)
+    assert r.status_code == 200 and r.json()
+    costos = {p["costo_total"] for p in r.json()}
+    # Sin permiso la llave sigue ahí pero en null (nunca 0), para distinguirlo de un costo real.
+    assert costos == ({12.5} if puede else {None})
+
+
+def test_ventas_normal_no_ve_el_costo_y_gerencia_si(client, db):
+    # Sin parchear puede_ver_todo: ana (nivel ventas por defecto) vs gerencia (USUARIOS_GERENCIA).
+    assert {p["costo_total"] for p in client.get("/productos", headers=ANA).json()} == {None}
+    assert {p["costo_total"] for p in client.get("/productos", headers=GER).json()} == {12.5}
 
 
 # ---------- Alta de un SKU eliminado ----------

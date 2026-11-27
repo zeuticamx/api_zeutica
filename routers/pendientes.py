@@ -113,6 +113,7 @@ async def agregar_pendiente(registro: registro):
     """
 
     try:
+        _exigir_usuario_existente(cursor, registro.usuario)
         cursor.execute(query, (registro.usuario, registro.actividad, registro.prioridad, registro.estado, registro.observaciones, registro.fecha_promesa))
         conn.commit()
         
@@ -155,6 +156,12 @@ async def actualizar_pendiente(id_pendiente: int, registro: registro):
     """
 
     try:
+        # Solo se exige que exista si el dueño cambia: una tarea de un usuario ya eliminado se puede
+        # seguir editando (o cerrando) sin reasignarla.
+        cursor.execute("SELECT usuario FROM pendientes WHERE id = %s", (id_pendiente,))
+        actual = cursor.fetchone()
+        if not actual or not _mismo_usuario(actual.get("usuario"), registro.usuario):
+            _exigir_usuario_existente(cursor, registro.usuario)
         cursor.execute(query, (registro.usuario, registro.actividad, registro.prioridad, registro.estado, registro.observaciones, registro.fecha_promesa, id_pendiente))
         # Cierre por esta vía (Monitor Gerencia): si la tarea tenía cronómetro abierto, se sella el fin.
         if str(registro.estado or "").strip().lower() in ("terminado", "completado"):
@@ -362,6 +369,15 @@ def clave_orden(p: dict):
 
 def _mismo_usuario(a, b) -> bool:
     return str(a or "").strip().lower() == str(b or "").strip().lower()
+
+
+def _exigir_usuario_existente(cursor, usuario: str) -> None:
+    """422 si `usuario` no es una cuenta de `usuarios` (sin distinguir mayúsculas). Los pendientes guardan el
+    nombre como texto sin FK: sin esta revisión se podía asignar una tarea a un usuario que no existe."""
+    nombre = str(usuario or "").strip()
+    cursor.execute("SELECT nombre_usuario FROM usuarios WHERE LOWER(nombre_usuario) = LOWER(%s)", (nombre,))
+    if not cursor.fetchone():
+        raise HTTPException(status_code=422, detail=f"El usuario «{nombre}» no existe")
 
 
 def _estado(fila: dict) -> str:
@@ -678,6 +694,8 @@ async def cola_nueva(datos: PendienteNuevo, actual: str = Depends(usuario_autent
         raise HTTPException(status_code=403, detail="Solo gerencia puede crear pendientes para otro usuario")
     conn, cursor = _conexion()
     try:
+        if not _mismo_usuario(dueno, actual):  # la propia sesión ya prueba que existe
+            _exigir_usuario_existente(cursor, dueno)
         cursor.execute(
             "INSERT INTO pendientes (fecha, usuario, actividad, prioridad, estado, observaciones, fecha_promesa, recurrencia)"
             " VALUES (CURDATE(), %s, %s, %s, 'pendiente', %s, %s, %s)",

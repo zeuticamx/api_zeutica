@@ -50,15 +50,15 @@ misma BD MySQL de `DB_NAME`).
 Cada embarque tiene 3 etapas (`ANTICIPO_CHINA`, `LIQUIDADO_CHINA`,
 `HL_LIQUIDADA`) y 2 estatus (`CON_FORWARDER`, `SALIO_DE_CHINA`).
 
-Al completar una etapa (`PATCH /embarques/{id}/etapas/{tipo}`) el usuario
-captura `fecha_pago` y `monto_mxn` **directo en pesos, sin conversión de
-USD**. El backend solo agrega `tipo_cambio_referencia`: el tipo de cambio
-FIX de esa fecha de pago, guardado puramente como dato de auditoría — nunca
-se usa para calcular el monto. Si falta `fecha_pago` o `monto_mxn` con
-`completado=true`, responde `400`. Editar el monto no vuelve a consultar
-Banxico; editar la fecha de pago sí (`tipo_cambio_referencia` se recalcula
-para la nueva fecha). `fecha_captura` registra cuándo se guardó en el
-sistema y no se toca al desmarcar una etapa.
+Al marcar una etapa (`PATCH /embarques/{id}/etapas/{tipo}`) el backend guarda
+`completado` y `nota`. Además puede guardar, **solo como dato informativo**, el
+tipo de cambio de referencia de esa etapa: `tipo_cambio_fecha` (fecha de
+consulta), `tipo_cambio_valor` y `tipo_cambio_fecha_dato` (la fecha del dato de
+Banxico, que puede ser anterior). Los manda el cliente; el `PATCH` **no consulta
+Banxico** y nunca usa el tipo de cambio para calcular montos. Un campo que no se
+envía conserva su valor anterior. No hay `fecha_pago` ni `monto_mxn`: esas
+columnas (y `tipo_cambio_referencia`, `fecha_captura`) se eliminan de
+`embarque_etapas` al arrancar (`_COLUMNAS_VIEJAS_EMBARQUE_ETAPAS`).
 
 ### Costeo de importación (Landed Cost)
 
@@ -109,7 +109,8 @@ cada una con su propia caché para no golpear la API en cada request:
 - `obtener_tipo_cambio_fecha_especifica(fecha)` — tipo de cambio de una
   fecha pasada (o el dato disponible más reciente antes de ella), cache
   indefinida en `tipo_cambio_historico` ya que un valor histórico publicado
-  no cambia. Es la que usa el `PATCH` de etapas y `GET /tipo-cambio/{fecha}`.
+  no cambia. Es la que usa `GET /tipo-cambio/{fecha}`, con la que el formulario de
+  etapas previsualiza el tipo de cambio antes de guardarlo.
 
 1. Entra a <https://www.banxico.org.mx/SieAPIRest/service/v1/> y
    regístrate (gratis) con tu correo.
@@ -120,8 +121,8 @@ cada una con su propia caché para no golpear la API en cada request:
    BANXICO_API_TOKEN=tu_token_aqui
    ```
 
-4. Sin este token, cualquier intento de completar una etapa o consultar
-   `GET /tipo-cambio/hoy` o `GET /tipo-cambio/{fecha}` responde `502` con
+4. Sin este token, consultar `GET /tipo-cambio/hoy` o `GET /tipo-cambio/{fecha}`
+   responde `502` con
    `"No se pudo obtener tipo de cambio...: Falta BANXICO_API_TOKEN en el .env"`.
 
 El resto de variables de entorno (MySQL, PostgreSQL) están documentadas en

@@ -62,6 +62,8 @@ class FakeCursor:
                 if f["estado"] in ("en proceso", "terminado"):
                     cuenta[f["estado"]] = cuenta.get(f["estado"], 0) + 1
             self._res = [{"estado": k, "n": v} for k, v in cuenta.items()]
+        elif q.startswith("SELECT nombre_usuario FROM usuarios WHERE LOWER(nombre_usuario) = LOWER(%s)"):
+            self._res = [{"nombre_usuario": u} for u in db.usuarios if u.lower() == params[0].lower()]
         elif q.startswith("UPDATE pendientes SET estado = 'en proceso'"):
             next(f for f in db.filas if f["id"] == params[0])["estado"] = "en proceso"
         elif q.startswith("UPDATE pendientes SET estado = 'terminado'"):
@@ -92,6 +94,7 @@ class FakeCursor:
 class FakeDB:
     def __init__(self, filas):
         self.filas = filas
+        self.usuarios = ["ana", "beto", "gerencia"]  # cuentas existentes en la tabla `usuarios`
         self.ejecutados = []
         self.commits = 0
         self.rollbacks = 0
@@ -375,6 +378,20 @@ def test_nueva_para_otro_usuario_solo_gerencia(mp):
     _, g = montar(mp, filas, "gerencia")
     r = g.post("/pendientes/nueva", json={"actividad": "x", "prioridad": "baja", "usuario": "beto"})
     assert r.status_code == 200 and r.json()["usuario"] == "beto"
+
+
+def test_nueva_para_usuario_inexistente_da_422_sin_escribir(mp):
+    filas = []
+    db, g = montar(mp, filas, "gerencia")
+    r = g.post("/pendientes/nueva", json={"actividad": "x", "prioridad": "baja", "usuario": "fantasma"})
+    assert r.status_code == 422 and "fantasma" in r.json()["detail"]
+    assert filas == [] and db.commits == 0
+
+
+def test_nueva_acepta_usuario_con_otro_casing(mp):
+    filas = []
+    _, g = montar(mp, filas, "gerencia")
+    assert g.post("/pendientes/nueva", json={"actividad": "x", "prioridad": "baja", "usuario": "BETO"}).status_code == 200
 
 
 @pytest.mark.parametrize("cuerpo", [

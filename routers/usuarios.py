@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from servicios import mov_reg
+from servicios import usuario_renombre_logica as renombre
 from servicios.errores_db import detalle_error_db
 from servicios.permisos import (
     get_db_connection, requerir_gerencia, usuario_autenticado, nivel_usuario,
@@ -111,6 +112,103 @@ async def listar_cuentas(_: str = Depends(requerir_gerencia)):
         salida.append({"id": f["id"], "nombre_usuario": f["nombre_usuario"], "nivel": nivel,
                        "editable": nivel != NIVEL_GERENCIA})
     return salida
+
+
+class UsuarioRenombre(BaseModel):
+    nuevo_nombre: str
+    simular: bool = False  # solo cuenta lo que cambiaría, sin escribir
+
+
+def _columnas_de_usuario(cursor) -> list:
+    """[(tabla, columna)] de tablas base con columnas de texto que guardan un nombre de cuenta."""
+    cursor.execute(
+        "SELECT c.TABLE_NAME AS tabla, c.COLUMN_NAME AS columna "
+        "FROM information_schema.COLUMNS c "
+        "JOIN information_schema.TABLES t ON t.TABLE_SCHEMA = c.TABLE_SCHEMA AND t.TABLE_NAME = c.TABLE_NAME "
+        "WHERE c.TABLE_SCHEMA = DATABASE() AND t.TABLE_TYPE = 'BASE TABLE' "
+        "AND LOWER(c.DATA_TYPE) IN ('varchar', 'char') ORDER BY c.TABLE_NAME, c.COLUMN_NAME"
+    )
+    return [
+        (f["tabla"], f["columna"]) for f in cursor.fetchall()
+        if str(f["tabla"]).lower() not in renombre.TABLAS_EXCLUIDAS and renombre.columna_guarda_usuario(f["columna"])
+    ]
+
+
+@router.put("/usuarios/{nombre_usuario}/nombre")
+async def renombrar_usuario(nombre_usuario: str, datos: UsuarioRenombre, quien: str = Depends(requerir_gerencia)):
+    """Cambia `usuarios.nombre_usuario` y arrastra el texto en las demás tablas, en una sola transacción.
+    Cierra la sesión de esa cuenta. Con `simular` solo informa cuántos registros cambiarían."""
+    try:
+        nuevo = renombre.validar_nuevo_nombre(nombre_usuario, datos.nuevo_nombre, es_gerencia)
+    except ValueError as err:
+        raise HTTPException(status_code=422, detail=str(err))
+    if quien.strip().lower() == nombre_usuario.strip().lower():
+        raise HTTPException(status_code=409, detail="No puedes renombrar tu propia cuenta mientras la usas")
+
+    conn = get_db_connection()
+    cursor = conn.cursor(dictionary=True)
+    fk_apagado = False
+    try:
+        cursor.execute("SELECT id, nombre_usuario FROM usuarios WHERE nombre_usuario = %s FOR UPDATE", (nombre_usuario,))
+        fila = cursor.fetchone()
+        if not fila:
+            conn.rollback()
+            raise HTTPException(status_code=404, detail="Usuario no encontrado")
+        anterior = fila["nombre_usuario"]
+        if anterior == nuevo:
+            conn.rollback()
+            return {"status": "sin_cambios", "nombre_anterior": anterior, "nombre_usuario": nuevo, "afectados": [], "total": 0, "tablas": 0}
+        cursor.execute("SELECT 1 FROM usuarios WHERE nombre_usuario = %s AND id <> %s", (nuevo, fila["id"]))
+        if cursor.fetchone():
+            conn.rollback()
+            raise HTTPException(status_code=409, detail=f"El usuario «{nuevo}» ya existe")
+
+        if not datos.simular:
+            # empleados.usuario (y quizá otras) apunta a usuarios.nombre_usuario: el padre y los hijos se cambian
+            # en la misma transacción, con las llaves apagadas solo en esta conexión. Sin token = se cierra su sesión.
+            cursor.execute("SET FOREIGN_KEY_CHECKS = 0")
+            fk_apagado = True
+            cursor.execute(
+                "UPDATE usuarios SET nombre_usuario = %s, token = NULL, token_expira = NULL WHERE id = %s",
+                (nuevo, fila["id"]),
+            )
+
+        afectados = []
+        for tabla, columna in _columnas_de_usuario(cursor):
+            t, c = renombre.citar(tabla), renombre.citar(columna)
+            if datos.simular:
+                cursor.execute(f"SELECT COUNT(*) AS n FROM {t} WHERE {c} = %s", (anterior,))
+                filas = int((cursor.fetchone() or {}).get("n") or 0)
+            else:
+                cursor.execute(f"UPDATE {t} SET {c} = %s WHERE {c} = %s", (nuevo, anterior))
+                filas = cursor.rowcount
+            afectados.append({"tabla": tabla, "columna": columna, "filas": filas})
+
+        if datos.simular:
+            conn.rollback()
+        else:
+            conn.commit()
+        con_filas = [a for a in afectados if a["filas"]]
+        resumen = renombre.resumir(afectados)
+        if not datos.simular:
+            try:
+                mov_reg.registrar_movimiento(
+                    quien, f"Renombró la cuenta {anterior} → {nuevo} ({resumen['total']} registros en {resumen['tablas']} tablas)", "Usuarios")
+            except Exception as err:  # la cuenta ya se renombró; la bitácora es secundaria
+                print(f"Bitácora usuarios: {err}")
+        return {"status": "simulacion" if datos.simular else "success", "nombre_anterior": anterior, "nombre_usuario": nuevo,
+                "afectados": con_filas, "total": resumen["total"], "tablas": resumen["tablas"]}
+    except mysql.connector.Error as err:
+        conn.rollback()
+        raise HTTPException(status_code=500, detail=detalle_error_db(err, "Error al renombrar el usuario"))
+    finally:
+        try:
+            if fk_apagado:
+                cursor.execute("SET FOREIGN_KEY_CHECKS = 1")
+        except mysql.connector.Error:
+            pass
+        cursor.close()
+        conn.close()
 
 
 @router.put("/usuarios/{nombre_usuario}/nivel")

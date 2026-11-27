@@ -12,7 +12,7 @@ from servicios import mov_reg
 from dotenv import load_dotenv
 from typing import Optional
 from servicios.telegram.notificacion import send_telegram_alert
-from servicios.permisos import usuario_autenticado, requerir_gerencia, es_gerencia
+from servicios.permisos import usuario_autenticado, requerir_gerencia, es_gerencia, puede_ver_todo
 from servicios.errores_db import detalle_error_db
 
 router =APIRouter(tags=["/productos"],responses={404: {"Mensaje":"No encontrado"}})
@@ -132,6 +132,12 @@ async def consultar_inventario_completo(eliminados: bool = False, usuario: str =
 
         if not productos and not eliminados:
             raise HTTPException(status_code=404, detail="No se han encontrado productos")
+
+        # El costo solo lo ven gerencia y developer: al resto se le manda null (nunca 0), no se omite la
+        # llave, para que los clientes distingan «sin permiso» de un costo real.
+        if not puede_ver_todo(usuario):
+            for p in productos:
+                p["costo_total"] = None
 
         return productos # FastAPI lo convierte automáticamente a JSON
 
